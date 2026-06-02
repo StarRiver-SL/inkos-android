@@ -43,7 +43,7 @@ export function App() {
   const sse = useSSE();
   const { theme, setTheme } = useTheme();
   const { t, lang: currentLang } = useI18n();
-  const { data: project, refetch: refetchProject } = useApi<{ language: string; languageExplicit: boolean }>("/project");
+  const { data: project, error: projectError, refetch: refetchProject } = useApi<{ language: string; languageExplicit: boolean }>("/project");
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -63,6 +63,12 @@ export function App() {
       setReady(true);
     }
   }, [project]);
+
+  useEffect(() => {
+    if (projectError) {
+      setReady(true);
+    }
+  }, [projectError]);
 
   useSessionEvents(sse, route, setRoute);
 
@@ -99,6 +105,26 @@ export function App() {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (projectError) {
+    return (
+      <div className="min-h-screen claude-surface text-foreground flex items-center justify-center px-6 font-sans">
+        <div className="max-w-md rounded-3xl border border-destructive/20 bg-card/85 p-6 shadow-xl shadow-primary/5">
+          <div className="text-sm font-semibold text-destructive">Studio 暂时连不上后端</div>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">{projectError}</p>
+          <button
+            onClick={() => {
+              setReady(false);
+              refetchProject();
+            }}
+            className="mt-5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            重试
+          </button>
+        </div>
       </div>
     );
   }

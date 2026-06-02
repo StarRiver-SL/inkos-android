@@ -3830,9 +3830,9 @@ export async function startStudioServer(
     // SPA fallback — serve index.html for all non-API routes
     const indexPath = joinPath(options.staticDir!, "index.html");
     if (existsSync(indexPath)) {
-      const indexHtml = await readFileFs(indexPath, "utf-8");
-      app.get("*", (c) => {
+      app.get("*", async (c) => {
         if (c.req.path.startsWith("/api/v1/")) return c.notFound();
+        const indexHtml = await readFileFs(indexPath, "utf-8");
         return c.html(indexHtml);
       });
     }

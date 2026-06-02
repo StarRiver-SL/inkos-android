@@ -63,6 +63,25 @@ export function useSSE(url = "/api/v1/events") {
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    fetch("/api/v1/active-operations")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { operations?: unknown } | null) => {
+        if (cancelled || !Array.isArray(data?.operations) || data.operations.length === 0) {
+          return;
+        }
+        setMessages((prev) => [
+          ...prev.slice(-99),
+          { event: "operations:restore", data, timestamp: Date.now() },
+        ]);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const es = new EventSource(url);
     esRef.current = es;
 
