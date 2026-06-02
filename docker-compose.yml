@@ -17,6 +17,8 @@ services:
     volumes:
       # 持久化数据目录（书籍、状态、配置、SQLite 数据库）
       - ./inkos-data:/data
+      # 挂载本地书籍目录（保留已有的书籍数据）
+      - ./books:/data/books
     environment:
       - INKOS_STUDIO_PORT=8080
       - INKOS_PROJECT_ROOT=/data
