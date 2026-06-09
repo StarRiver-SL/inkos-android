@@ -60,6 +60,25 @@ public class EmbeddedNodeService extends Service {
     private String nativeLibSha256 = "";
     private volatile boolean runtimeUnsupported = false;
     private PowerManager.WakeLock wakeLock;
+    private static final boolean NATIVE_RUNNER_AVAILABLE;
+    private static final String NATIVE_RUNNER_LOAD_ERROR;
+
+    static {
+        boolean loaded = false;
+        String loadError = "";
+        try {
+            System.loadLibrary("node");
+            System.loadLibrary("node_runner");
+            loaded = true;
+        } catch (UnsatisfiedLinkError error) {
+            loadError = error.getClass().getSimpleName() + ": " + error.getMessage();
+            Log.e(TAG, "Unable to load InkOS Node native runner", error);
+        }
+        NATIVE_RUNNER_AVAILABLE = loaded;
+        NATIVE_RUNNER_LOAD_ERROR = loadError;
+    }
+
+    private native int startNodeWithArguments(String[] arguments);
 
     @Override
     public void onCreate() {
@@ -191,6 +210,11 @@ public class EmbeddedNodeService extends Service {
                 markUnsupportedAndroidVersion();
                 return;
             }
+            if (!NATIVE_RUNNER_AVAILABLE) {
+                writeRuntimeStatus("node-runner-unavailable", NATIVE_RUNNER_LOAD_ERROR);
+                updateNotification("InkOS local runtime unavailable");
+                return;
+            }
             File nodeExecutable = resolveNodeExecutable();
             if (!nodeExecutable.exists()) {
                 Log.w(TAG, "Node executable is missing: " + nodeExecutable);
@@ -247,33 +271,45 @@ public class EmbeddedNodeService extends Service {
             if (!privateStatusDir.exists() && !privateStatusDir.mkdirs()) {
                 Log.w(TAG, "Unable to create private runtime log dir: " + privateStatusDir);
             }
-            setNodeEnv("INKOS_NODE_LOG", new File(privateStatusDir, "node-output.log").getAbsolutePath());
-            setNodeEnv("INKOS_NODE_PROGRESS", new File(privateStatusDir, "node-progress.json").getAbsolutePath());
+            File publicStatusDir = resolvePublicStatusDir();
+            File logFile = publicStatusDir == null
+                ? new File(privateStatusDir, "node-output.log")
+                : new File(publicStatusDir, "node-output.log");
+            File progressFile = publicStatusDir == null
+                ? new File(privateStatusDir, "node-progress.json")
+                : new File(publicStatusDir, "node-progress.json");
+            setNodeEnv("INKOS_NODE_LOG", logFile.getAbsolutePath());
+            setNodeEnv("INKOS_NODE_PROGRESS", progressFile.getAbsolutePath());
 
             startPortMonitor(projectRoot);
             updateNotification("InkOS local runtime starting on 127.0.0.1:4567");
-            Log.i(TAG, "Starting Node24 executable runtime: " + server.getAbsolutePath());
+            Log.i(TAG, "Starting Node24 JNI runtime: " + server.getAbsolutePath());
             writeRuntimeStatus(
                 "node-starting",
-                "Starting Node24 executable: " + nodeExecutable.getAbsolutePath() + " -> " + server.getAbsolutePath()
+                "Starting Node24 JNI runtime: " + nodeExecutable.getAbsolutePath() + " -> " + server.getAbsolutePath()
             );
             String maxOldSpaceArg = "--max_old_space_size=" + resolveNodeMaxOldSpaceMb();
-            int result = startNodeExecutable(
-                nodeExecutable,
-                new File(privateStatusDir, "node-output.log"),
-                new File(privateStatusDir, "node-progress.json"),
-                projectRoot,
-                builtinGenresDir,
-                maxOldSpaceArg,
-                server.getAbsolutePath(),
-                projectRoot.getAbsolutePath()
+            File nativeLog = logFile;
+            appendRuntimeLog(
+                nativeLog,
+                "[inkos-node-java] invoking JNI runner. java.library.path="
+                    + System.getProperty("java.library.path")
+                    + ", nativeLibraryDir="
+                    + getApplicationInfo().nativeLibraryDir
+                    + ", abis="
+                    + Arrays.toString(Build.SUPPORTED_ABIS)
             );
+            int result = startNodeInProcess(nativeLog, "node", maxOldSpaceArg, server.getAbsolutePath(), projectRoot.getAbsolutePath());
             Log.i(TAG, "Node24 runtime exited with code " + result);
             writeRuntimeStatus("node-exited", "Node24 runtime exited with code " + result);
         } catch (Exception error) {
             Log.e(TAG, "Failed to start embedded Node runtime", error);
             writeRuntimeStatus("node-error", error.getClass().getSimpleName() + ": " + error.getMessage());
             updateNotification("InkOS local runtime unavailable");
+        } catch (Throwable error) {
+            Log.e(TAG, "Embedded Node runtime crashed before startup", error);
+            writeRuntimeStatus("node-crash", error.getClass().getSimpleName() + ": " + error.getMessage());
+            updateNotification("InkOS local runtime crashed");
         } finally {
             synchronized (this) {
                 startedNodeAlready = false;
@@ -322,52 +358,28 @@ public class EmbeddedNodeService extends Service {
         return new File(nativeLibraryDir, "libnode.so");
     }
 
-    private int startNodeExecutable(
-        File nodeExecutable,
-        File logFile,
-        File progressFile,
-        File projectRoot,
-        File builtinGenresDir,
-        String... arguments
-    ) throws IOException, InterruptedException {
-        if (!nodeExecutable.canExecute()) {
-            boolean executable = nodeExecutable.setExecutable(true, false);
-            writeRuntimeStatus(
-                executable ? "node24-executable-permission-fixed" : "node24-executable-permission-warning",
-                "Node24 executable permission check for " + nodeExecutable.getAbsolutePath() + ": canExecute=" + nodeExecutable.canExecute()
-            );
-        }
-        if (logFile.getParentFile() != null && !logFile.getParentFile().exists() && !logFile.getParentFile().mkdirs()) {
-            Log.w(TAG, "Unable to create Node log directory: " + logFile.getParentFile());
-        }
+    private int startNodeInProcess(File logFile, String... arguments) {
+        writeRuntimeStatus("node24-jni-start", "Executing embedded Node with " + Arrays.toString(arguments));
+        appendRuntimeLog(logFile, "[inkos-node-java] before startNodeWithArguments " + Arrays.toString(arguments));
+        return startNodeWithArguments(arguments);
+    }
 
-        java.util.ArrayList<String> command = new java.util.ArrayList<>();
-        command.add(nodeExecutable.getAbsolutePath());
-        command.addAll(Arrays.asList(arguments));
-
-        ProcessBuilder builder = new ProcessBuilder(command);
-        builder.redirectErrorStream(true);
-        builder.environment().put("NODE_ENV", "production");
-        builder.environment().put("INKOS_ANDROID", "1");
-        builder.environment().put("INKOS_NODE_EXECUTABLE_MODE", "1");
-        builder.environment().put("INKOS_STUDIO_PORT", "4567");
-        builder.environment().put("INKOS_PROJECT_ROOT", projectRoot.getAbsolutePath());
-        builder.environment().put("INKOS_BUILTIN_GENRES_DIR", builtinGenresDir.getAbsolutePath());
-        builder.environment().put("HOME", getFilesDir().getAbsolutePath());
-        builder.environment().put("TMPDIR", getCacheDir().getAbsolutePath());
-        builder.environment().put("INKOS_NODE_LOG", logFile.getAbsolutePath());
-        builder.environment().put("INKOS_NODE_PROGRESS", progressFile.getAbsolutePath());
-        builder.environment().put("LD_LIBRARY_PATH", nodeExecutable.getParentFile().getAbsolutePath());
-
-        writeRuntimeStatus("node24-process-spawn", "Executing " + command);
-        Process process = builder.start();
-        synchronized (this) {
-            nodeProcess = process;
+    private void appendRuntimeLog(File logFile, String message) {
+        if (logFile == null) {
+            return;
         }
-        Thread logPump = startProcessLogPump(process, logFile);
-        int exitCode = process.waitFor();
-        logPump.join(2000L);
-        return exitCode;
+        try {
+            File parent = logFile.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                return;
+            }
+            String line = message + "\n";
+            try (FileOutputStream output = new FileOutputStream(logFile, true)) {
+                output.write(line.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to append runtime log to " + logFile, error);
+        }
     }
 
     private synchronized void stopNodeProcess() {
@@ -736,6 +748,11 @@ public class EmbeddedNodeService extends Service {
             payload.put("state", state);
             payload.put("message", message == null ? "" : message);
             payload.put("updatedAt", System.currentTimeMillis());
+            payload.put("abi", Arrays.toString(Build.SUPPORTED_ABIS));
+            payload.put("nativeRunnerAvailable", NATIVE_RUNNER_AVAILABLE);
+            if (!NATIVE_RUNNER_LOAD_ERROR.isEmpty()) {
+                payload.put("nativeRunnerLoadError", NATIVE_RUNNER_LOAD_ERROR);
+            }
             if (!packagedRuntimeVersion.isEmpty()) {
                 payload.put("packagedRuntimeVersion", packagedRuntimeVersion);
             }
@@ -752,8 +769,56 @@ public class EmbeddedNodeService extends Service {
             try (FileOutputStream output = new FileOutputStream(statusFile, false)) {
                 output.write(json.getBytes(StandardCharsets.UTF_8));
             }
+            appendRuntimeStatusHistory(projectRoot, json);
+            writePublicRuntimeStatus(json);
         } catch (Exception error) {
             Log.w(TAG, "Unable to write runtime status", error);
+        }
+    }
+
+    private void appendRuntimeStatusHistory(File statusDir, String json) {
+        try {
+            File historyFile = new File(statusDir, "runtime-status-history.log");
+            try (FileOutputStream output = new FileOutputStream(historyFile, true)) {
+                output.write((json + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to append private runtime status history", error);
+        }
+    }
+
+    private void writePublicRuntimeStatus(String json) {
+        try {
+            File publicStatusDir = resolvePublicStatusDir();
+            if (publicStatusDir == null) {
+                return;
+            }
+            File statusFile = new File(publicStatusDir, "runtime-status.json");
+            try (FileOutputStream output = new FileOutputStream(statusFile, false)) {
+                output.write(json.getBytes(StandardCharsets.UTF_8));
+            }
+            File historyFile = new File(publicStatusDir, "runtime-status-history.log");
+            try (FileOutputStream output = new FileOutputStream(historyFile, true)) {
+                output.write((json + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to mirror runtime status to public Documents", error);
+        }
+    }
+
+    private File resolvePublicStatusDir() {
+        try {
+            File dir = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                "InkOS Studio"
+            );
+            if (!dir.exists() && !dir.mkdirs()) {
+                return null;
+            }
+            return dir;
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to resolve public InkOS status dir", error);
+            return null;
         }
     }
 

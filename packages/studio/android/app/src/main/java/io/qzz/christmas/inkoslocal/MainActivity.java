@@ -3,10 +3,13 @@ package io.qzz.christmas.inkoslocal;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
 
 import com.getcapacitor.BridgeActivity;
@@ -27,6 +30,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(InkOSRuntimePlugin.class);
         super.onCreate(savedInstanceState);
         requestNotificationPermissionIfNeeded();
+        requestAllFilesAccessIfNeeded();
         scheduleEmbeddedNodeServiceStart();
     }
 
@@ -55,6 +59,28 @@ public class MainActivity extends BridgeActivity {
         }
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4567);
+        }
+    }
+
+    private void requestAllFilesAccessIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()) {
+            return;
+        }
+        if (getPreferences(MODE_PRIVATE).getBoolean("requestedAllFilesAccess", false)) {
+            return;
+        }
+        getPreferences(MODE_PRIVATE).edit().putBoolean("requestedAllFilesAccess", true).apply();
+        try {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to open app all-files access settings; trying global settings", error);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            } catch (Exception fallbackError) {
+                Log.e(TAG, "Unable to open all-files access settings", fallbackError);
+            }
         }
     }
 

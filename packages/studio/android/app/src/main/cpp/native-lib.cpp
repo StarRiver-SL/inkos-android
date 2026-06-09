@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <vector>
 #include <unistd.h>
-#include "node.h"
+
+namespace node {
+int Start(int argc, char *argv[]);
+}
 
 extern "C" jint JNICALL
 Java_io_qzz_christmas_inkoslocal_EmbeddedNodeService_startNodeWithArguments(
