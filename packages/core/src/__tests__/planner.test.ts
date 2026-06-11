@@ -6,7 +6,6 @@ import { PlannerAgent } from "../agents/planner.js";
 import * as llmProvider from "../llm/provider.js";
 import type { LLMClient } from "../llm/provider.js";
 import type { BookConfig } from "../models/book.js";
-import { PlannerParseError } from "../utils/chapter-memo-parser.js";
 
 const VALID_BODY = `
 ## 当前任务
@@ -50,7 +49,17 @@ defer:
 `.trim();
 
 function validMemoRaw(chapter: number): string {
-  return `---\nchapter: ${chapter}\ngoal: 把七号门被动过手脚钉成现场实证\nisGoldenOpening: false\nthreadRefs:\n  - H03\n  - S004\n---\n${VALID_BODY}\n`;
+  return `# 第 ${chapter} 章 memo
+
+## 本章目标
+把七号门被动过手脚钉成现场实证
+
+## 关联线索
+- H03
+- S004
+
+${VALID_BODY}
+`;
 }
 
 const ZERO_USAGE = {
@@ -182,45 +191,14 @@ describe("PlannerAgent.planChapter memo generation", () => {
     expect(userMsg?.content).toContain("当面对质");
   });
 
-  it("compacts oversized planning context before sending the memo prompt", async () => {
-    const storyDir = join(bookDir, "story");
-    await writeFile(
-      join(storyDir, "brief.md"),
-      [
-        "第 4 章必须继续七号门调查。",
-        "主角当前目标是锁定仓库账本。",
-        "世界观背景：".repeat(1_000),
-        "无关远古设定：".repeat(2_000),
-      ].join("\n\n"),
-      "utf-8",
-    );
-    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
-      content: validMemoRaw(4),
-      usage: ZERO_USAGE,
-    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
-
-    await makePlanner().planChapter({
-      book: makeBook(),
-      bookDir,
-      chapterNumber: 4,
-    });
-
-    const messages = chatSpy.mock.calls[0]![2] as ReadonlyArray<{ role: string; content: string }>;
-    const combinedPrompt = messages.map((message) => message.content).join("\n\n");
-    expect(combinedPrompt).toContain("planner 上下文已压缩");
-    expect(combinedPrompt).toContain("第 4 章必须继续七号门调查");
-    expect(combinedPrompt).toContain("## 不要做");
-    expect(combinedPrompt.length).toBeLessThan(25_000);
-  });
-
   it("retries when the first response is malformed and succeeds on retry", async () => {
     const chatSpy = vi.spyOn(llmProvider, "chatCompletion")
       .mockResolvedValueOnce({
-        content: "no frontmatter here",
+        content: "no memo sections here",
         usage: ZERO_USAGE,
       } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>)
       .mockResolvedValueOnce({
-        content: "still no frontmatter",
+        content: "still no memo sections",
         usage: ZERO_USAGE,
       } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>)
       .mockResolvedValueOnce({
@@ -243,26 +221,6 @@ describe("PlannerAgent.planChapter memo generation", () => {
     const secondMessages = secondCallArgs[2] as ReadonlyArray<{ role: string; content: string }>;
     const userMsg = secondMessages.find((m) => m.role === "user");
     expect(userMsg?.content).toContain("上次输出的错误");
-    expect(userMsg?.content).toContain("必须逐字重新输出所有必填 markdown 标题");
-    expect(userMsg?.content).toContain("## 不要做");
-  });
-
-  it("corrects stale memo chapter frontmatter when the model reuses the previous chapter number", async () => {
-    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
-      content: validMemoRaw(1),
-      usage: ZERO_USAGE,
-    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
-
-    const result = await makePlanner().planChapter({
-      book: makeBook(),
-      bookDir,
-      chapterNumber: 2,
-    });
-
-    expect(chatSpy).toHaveBeenCalledTimes(1);
-    expect(result.memo.chapter).toBe(2);
-    expect(result.memo.goal).toBe("把七号门被动过手脚钉成现场实证");
-    expect(result.intent.chapter).toBe(2);
   });
 
   // Phase hotfix 4: English books must receive English system + user prompts
@@ -307,7 +265,16 @@ defer:
 - Do not directly name the mastermind.
 `.trim();
 
-    const validEnRaw = `---\nchapter: 1\ngoal: Pin Door 7 tampering as live evidence\nisGoldenOpening: false\nthreadRefs:\n  - H03\n---\n${VALID_EN_BODY}\n`;
+    const validEnRaw = `# Chapter 1 memo
+
+## Chapter goal
+Pin Door 7 tampering as live evidence
+
+## Thread refs
+- H03
+
+${VALID_EN_BODY}
+`;
 
     const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
       content: validEnRaw,
@@ -348,19 +315,23 @@ defer:
     expect(userMsg?.content).not.toContain("黄金三章规划指引");
   });
 
-  it("throws PlannerParseError when all 3 attempts fail", async () => {
+  it("returns a degraded memo instead of throwing when all 3 attempts fail", async () => {
     vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
       content: "permanently broken",
       usage: ZERO_USAGE,
     } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
 
-    await expect(
-      makePlanner().planChapter({
-        book: makeBook(),
-        bookDir,
-        chapterNumber: 2,
-      }),
-    ).rejects.toBeInstanceOf(PlannerParseError);
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 2,
+    });
+
+    expect(result.memo.chapter).toBe(2);
+    expect(result.memo.goal.length).toBeGreaterThan(0);
+    expect(result.memo.body).toContain("## 当前任务");
+    expect(result.memo.body).toContain("## Planner warning");
+    expect(result.intentMarkdown).toContain("Planner warning");
   });
 
   // Phase hotfix 5: planner.intent.mustAvoid must come from the Phase 5

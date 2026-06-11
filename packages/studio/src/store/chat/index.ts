@@ -1,3 +1,3 @@
 export { useChatStore } from "./store";
 export { chatSelectors } from "./selectors";
-export type { ChatStore, Message, ToolCall, BookSummary } from "./types";
+export type { ChatStore, ChatSessionKind, Message, ToolCall, BookSummary } from "./types";

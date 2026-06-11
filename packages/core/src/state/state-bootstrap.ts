@@ -21,6 +21,7 @@ import {
   parseChapterSummariesMarkdown,
   parseInteger,
   parseMarkdownTableRows,
+  parsePendingHooksMarkdown,
 } from "../utils/story-markdown.js";
 
 export {
@@ -279,27 +280,14 @@ async function loadOrBootstrapSummaries(params: {
 }
 
 function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
-  const tableRows = parseMarkdownTableRows(markdown)
-    .filter((row) => (row[0] ?? "").toLowerCase() !== "hook_id");
-
-  if (tableRows.length > 0) {
+  const parsedHooks = parsePendingHooksMarkdown(markdown);
+  if (parsedHooks.length > 0) {
     return HooksStateSchema.parse({
-      hooks: tableRows
-        .filter((row) => normalizeHookId(row[0]).length > 0)
-        .map((row) => {
-          const hookId = normalizeHookId(row[0]);
-          const legacyShape = row.length < 8;
-          return {
-            hookId,
-            startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
-            type: normalizeHookType(row[2], warnings, hookId),
-            status: normalizeHookStatus(row[3], warnings, hookId),
-            lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
-            expectedPayoff: row[5] ?? "",
-            payoffTiming: legacyShape ? undefined : normalizeHookPayoffTiming(row[6]),
-            notes: legacyShape ? (row[6] ?? "") : (row[7] ?? ""),
-          };
-        }),
+      hooks: parsedHooks.map((hook) => ({
+        ...hook,
+        type: normalizeHookType(hook.type, warnings, hook.hookId),
+        status: normalizeHookStatus(hook.status, warnings, hook.hookId),
+      })),
     });
   }
 
@@ -589,10 +577,10 @@ export function resolveContiguousChapterPrefix(chapterNumbers: ReadonlyArray<num
 function normalizeHookStatus(value: string | undefined, warnings: string[], hookId: string): HookStatus {
   const normalized = (value ?? "").trim().toLowerCase();
   if (!normalized) return "open";
-  if (/(resolved|closed|done|已回收|回收|完成)/i.test(normalized)) return "resolved";
-  if (/(deferred|paused|hold|搁置|延后|延期)/i.test(normalized)) return "deferred";
-  if (/(progress|active|推进|进行中)/i.test(normalized)) return "progressing";
-  if (/(open|pending|待定|未回收)/i.test(normalized)) return "open";
+  if (/(resolved|closed|done|paid[_ -]?off|已回收|回收|完成|已解决|已兑现|兑现)/i.test(normalized)) return "resolved";
+  if (/(deferred|paused|hold|dormant|inactive|unplanted|unseeded|not[_ -]?started|not[_ -]?active|搁置|延后|延期|暂缓|休眠|未激活|未启动|待启动|未推进|尚未推进)/i.test(normalized)) return "deferred";
+  if (/(confirmed[_ -]?hit|confirmed|advanced|progressing|progress|active|pressured|命中|已确认命中|已推进|推进|进行中|持续推进|重大推进)/i.test(normalized)) return "progressing";
+  if (/(open|pending|seeded|planted|待定|未回收|已埋|已种下|已铺垫)/i.test(normalized)) return "open";
   appendWarning(warnings, `${hookId}:status normalized from "${value ?? ""}" to "open"`);
   return "open";
 }

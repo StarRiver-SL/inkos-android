@@ -572,7 +572,11 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
 export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: DashboardSseState; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const [menuOpenBookId, setMenuOpenBookId] = useState<string | null>(null);
-  const [dismissedTaskAt, setDismissedTaskAt] = useState<number | null>(null);
+  const [dismissedTaskAt, setDismissedTaskAt] = useState<number | null>(() => {
+    const stored = window.localStorage.getItem("inkos.dashboard.dismissedTaskAt");
+    const value = stored ? Number(stored) : Number.NaN;
+    return Number.isFinite(value) ? value : null;
+  });
   const { data, loading, error, refetch } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { data: operationHistoryData, refetch: refetchOperationHistory } = useApi<{
     operations: ReadonlyArray<OperationHistoryItem>;
@@ -602,6 +606,11 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: DashboardSseS
     [visibleCurrentTask, sse.messages],
   );
   const currentTaskLogs = useMemo(() => getRecentTaskLogs(sse.messages), [sse.messages]);
+
+  const dismissCurrentTask = (timestamp: number) => {
+    window.localStorage.setItem("inkos.dashboard.dismissedTaskAt", String(timestamp));
+    setDismissedTaskAt(timestamp);
+  };
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
@@ -854,7 +863,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: DashboardSseS
             entries={currentTaskLogs}
             progressEvent={progressEvent}
             startedAt={visibleCurrentTask.startedAt}
-            onClear={visibleCurrentTask.status !== "running" ? () => setDismissedTaskAt(visibleCurrentTask.timestamp) : undefined}
+            onClear={visibleCurrentTask.status !== "running" ? () => dismissCurrentTask(visibleCurrentTask.timestamp) : undefined}
           />
         </div>
       )}

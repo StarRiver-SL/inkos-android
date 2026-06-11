@@ -45,67 +45,62 @@ defer:
 
 function makeRaw(
   opts: {
-    chapter?: number | string;
     goal?: string;
-    isGoldenOpening?: boolean | string;
     threadRefs?: ReadonlyArray<string> | null | unknown;
     body?: string;
-    dropFrontmatter?: boolean;
+    prefix?: string;
+    fenced?: boolean;
   } = {},
 ): string {
-  if (opts.dropFrontmatter) {
-    return opts.body ?? SECTIONS;
-  }
-
-  const threadRefsText = Array.isArray(opts.threadRefs)
-    ? `threadRefs:\n${opts.threadRefs.map((id) => `  - ${id}`).join("\n")}`
-    : opts.threadRefs === null
-      ? "threadRefs: null"
-      : opts.threadRefs === undefined
-        ? "threadRefs: []"
-        : `threadRefs: ${String(opts.threadRefs)}`;
-
-  const frontmatter = [
-    `chapter: ${opts.chapter ?? 12}`,
-    `goal: ${opts.goal ?? "把七号门被动过手脚钉成现场实证"}`,
-    `isGoldenOpening: ${opts.isGoldenOpening ?? false}`,
-    threadRefsText,
+  const refs = Array.isArray(opts.threadRefs)
+    ? opts.threadRefs.map((id) => `- ${id}`).join("\n")
+    : "";
+  const raw = [
+    `# 第 12 章 memo`,
+    "",
+    "## 本章目标",
+    opts.goal ?? "把七号门被动手脚钉成实证",
+    "",
+    "## 关联线索",
+    refs || "无",
+    "",
+    opts.body ?? SECTIONS,
   ].join("\n");
-
-  return `---\n${frontmatter}\n---\n${opts.body ?? SECTIONS}\n`;
+  const withPrefix = `${opts.prefix ?? ""}${raw}`;
+  return opts.fenced ? `\`\`\`markdown\n${withPrefix}\n\`\`\`` : withPrefix;
 }
 
 describe("parseMemo", () => {
-  it("parses a valid frontmatter + 7 sections", () => {
+  it("parses a valid markdown memo without YAML frontmatter", () => {
     const memo = parseMemo(makeRaw({ threadRefs: ["H03", "S004"] }), 12, false);
     expect(memo.chapter).toBe(12);
-    expect(memo.goal).toBe("把七号门被动过手脚钉成现场实证");
+    expect(memo.goal).toBe("把七号门被动手脚钉成实证");
     expect(memo.isGoldenOpening).toBe(false);
     expect(memo.threadRefs).toEqual(["H03", "S004"]);
     expect(memo.body).toContain("## 当前任务");
     expect(memo.body).toContain("## 不要做");
   });
 
-  it("throws when frontmatter delimiters are missing", () => {
-    expect(() => parseMemo(SECTIONS, 12, false)).toThrow(PlannerParseError);
-    expect(() => parseMemo(SECTIONS, 12, false)).toThrow(/frontmatter/);
+  it("accepts markdown wrapped in a code fence with leading prose", () => {
+    const memo = parseMemo(makeRaw({
+      prefix: "好的，下面是本章 memo：\n\n",
+      fenced: true,
+      threadRefs: ["H03"],
+    }), 12, true);
+    expect(memo.chapter).toBe(12);
+    expect(memo.isGoldenOpening).toBe(true);
+    expect(memo.threadRefs).toEqual(["H03"]);
   });
 
-  it("allows a concise goal over the old 50-char limit", () => {
-    const goal = "把异常钉成实证并推进人物关系冲突升级到必须选择的局面";
-    expect(parseMemo(makeRaw({ goal }), 12, false).goal).toBe(goal);
-  });
-
-  it("throws when goal exceeds 80 chars", () => {
-    const longGoal = "把异常钉成实证".repeat(12);
-    expect(() => parseMemo(makeRaw({ goal: longGoal }), 12, false)).toThrow(/goal too long/);
-  });
-
-  it("throws when chapter mismatches expected", () => {
-    expect(() => parseMemo(makeRaw({ chapter: 99 }), 12, false)).toThrow(/chapter mismatch/);
+  it("keeps long goal semantics in the memo body while deriving a short display goal", () => {
+    const longGoal = "把异常钉成实证".repeat(10);
+    const memo = parseMemo(makeRaw({ goal: longGoal }), 12, false);
+    expect(memo.goal.length).toBeLessThanOrEqual(50);
+    expect(memo.body).toContain(longGoal);
   });
 
   it.each([
+    "## 本章目标",
     "## 当前任务",
     "## 读者此刻在等什么",
     "## 该兑现的 / 暂不掀的",
@@ -115,8 +110,8 @@ describe("parseMemo", () => {
     "## 本章 hook 账",
     "## 不要做",
   ])("throws when body is missing section %s", (heading) => {
-    const body = SECTIONS.replace(heading, "## SECTION-REMOVED");
-    expect(() => parseMemo(makeRaw({ body }), 12, false)).toThrow(/missing sections/);
+    const raw = makeRaw().replace(heading, "## SECTION-REMOVED");
+    expect(() => parseMemo(raw, 12, false)).toThrow(/missing sections|goal/);
   });
 
   it("silently coerces non-array threadRefs to empty array", () => {
@@ -125,31 +120,10 @@ describe("parseMemo", () => {
     expect(memo.threadRefs).toEqual([]);
   });
 
-  it("uses caller-provided isGoldenOpening, not LLM frontmatter value", () => {
-    // LLM claims true but caller says false — caller wins
-    const raw = makeRaw({ isGoldenOpening: true });
-    const memo = parseMemo(raw, 12, false);
-    expect(memo.isGoldenOpening).toBe(false);
-
-    // LLM claims false but caller says true — caller wins
-    const raw2 = makeRaw({ isGoldenOpening: false });
-    const memo2 = parseMemo(raw2, 12, true);
-    expect(memo2.isGoldenOpening).toBe(true);
-  });
-
-  it("throws when YAML frontmatter is not an object", () => {
-    const raw = `---\n- just\n- a\n- list\n---\n${SECTIONS}\n`;
-    expect(() => parseMemo(raw, 12, false)).toThrow(/frontmatter is not an object/);
-  });
-
-  it("throws when chapter is not an integer", () => {
-    const raw = `---\nchapter: 12.5\ngoal: x\nisGoldenOpening: false\nthreadRefs: []\n---\n${SECTIONS}\n`;
-    expect(() => parseMemo(raw, 12, false)).toThrow(/chapter must be an integer/);
-  });
-
-  it("throws on invalid YAML", () => {
-    const raw = `---\nchapter: 12\n  bad indent: : :\n---\n${SECTIONS}\n`;
-    expect(() => parseMemo(raw, 12, false)).toThrow(/invalid YAML/);
+  it("uses caller-provided chapter and isGoldenOpening", () => {
+    const memo = parseMemo(makeRaw(), 99, true);
+    expect(memo.chapter).toBe(99);
+    expect(memo.isGoldenOpening).toBe(true);
   });
 
   // Phase hotfix 7: empty / blank section payloads must be rejected.
@@ -186,7 +160,7 @@ describe("parseMemo", () => {
         .toThrow(/empty sections.*当前任务/);
     });
 
-    it("rejects a memo where one section has placeholder content", () => {
+    it("rejects a memo where one section has 'TODO' (under 20 chars)", () => {
       const body = SECTIONS.replace(
         /## 章尾必须发生的改变\n[\s\S]*?\n\n## 本章 hook 账/,
         "## 章尾必须发生的改变\nTODO\n\n## 本章 hook 账",
@@ -196,8 +170,8 @@ describe("parseMemo", () => {
     });
 
     it("accepts a sparse-but-non-empty memo (Phase 6 sparse-memo principle)", () => {
-      // Terse transition-chapter rows should remain legal; the parser should
-      // reject shells, not enforce filler length.
+      // Each section just barely meets the threshold — this is the
+      // breath/transition chapter case the principle wants to keep legal.
       const sparseBody = [
         "## 当前任务",
         "主角与协作者在码头会合，交换上一案的情报与下一步行动安排。",
@@ -229,39 +203,8 @@ describe("parseMemo", () => {
       expect(memo.body).toContain("## 不要做");
     });
 
-    it("accepts short but specific section payloads without a 20-char floor", () => {
-      const shortBody = [
-        "## 当前任务",
-        "码头会合。",
-        "",
-        "## 读者此刻在等什么",
-        "等暗线露头。",
-        "",
-        "## 该兑现的 / 暂不掀的",
-        "兑现 H03；不掀黑手。",
-        "",
-        "## 日常/过渡承担什么任务",
-        "铺关系。",
-        "",
-        "## 关键抉择过三连问",
-        "信谁？为何？代价？",
-        "",
-        "## 章尾必须发生的改变",
-        "同盟成形。",
-        "",
-        "## 本章 hook 账",
-        "advance: H03。",
-        "",
-        "## 不要做",
-        "无",
-      ].join("\n");
-
-      const memo = parseMemo(makeRaw({ body: shortBody }), 12, false);
-      expect(memo.body).toContain("码头会合");
-    });
-
     it('accepts "## 不要做" with very short content like "无" / "N/A" (relaxed threshold)', () => {
-      // The "do not" section uses a relaxed minimum so books with no extra
+      // The "do not" section uses a 5-char minimum so books with no extra
       // chapter-level prohibitions can say so without inventing filler.
       const body = SECTIONS.replace(
         /## 不要做\n[\s\S]*$/,

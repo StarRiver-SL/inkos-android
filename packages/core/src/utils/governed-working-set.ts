@@ -48,7 +48,6 @@ export function buildGovernedHookWorkingSet(params: {
 
   return renderHookSnapshot(workingSet, params.language);
 }
-
 function collectHookAgendaIds(chapterIntent?: string): Set<string> {
   if (!chapterIntent || chapterIntent.trim().length === 0) {
     return new Set();
@@ -392,4 +391,85 @@ function containsCjk(value: string): boolean {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseBibleSections(content: string) {
+  const lines = content.split("\n");
+  const topLines: string[] = [];
+  const sections: Array<{ heading: string; body: string }> = [];
+  let currentHeading: string | null = null;
+  let currentBody: string[] = [];
+
+  const flush = () => {
+    if (!currentHeading) return;
+    sections.push({
+      heading: currentHeading,
+      body: currentBody.join("\n").trimEnd(),
+    });
+  };
+
+  for (const line of lines) {
+    if (line.startsWith("## ") || line.startsWith("### ")) {
+      flush();
+      currentHeading = line;
+      currentBody = [];
+      continue;
+    }
+
+    if (currentHeading) {
+      currentBody.push(line);
+    } else {
+      topLines.push(line);
+    }
+  }
+
+  flush();
+  return { topLines, sections };
+}
+
+export function buildGovernedBibleWorkingSet(params: {
+  readonly bibleMarkdown: string;
+  readonly chapterIntent: string;
+  readonly contextPackage?: ContextPackage;
+}): string {
+  const { bibleMarkdown } = params;
+  if (!bibleMarkdown || bibleMarkdown === "(文件不存在)" || bibleMarkdown === "(文件尚未创建)") {
+    return bibleMarkdown;
+  }
+
+  const parsed = parseBibleSections(bibleMarkdown);
+  if (parsed.sections.length === 0) {
+    return bibleMarkdown;
+  }
+
+  const corpus = [
+    params.chapterIntent,
+    ...(params.contextPackage?.selectedContext ?? []).flatMap((entry) => [
+      entry.reason,
+      entry.excerpt ?? "",
+    ]),
+  ].join("\n");
+
+  const filteredSections = parsed.sections.filter((section) => {
+    const titleMatch = section.heading.match(/^#+\s*(.+)$/);
+    if (!titleMatch) return true;
+
+    const titleStr = titleMatch[1]!.trim();
+    if (!titleStr) return true;
+
+    const keywords = titleStr.split(/[/、，,\|]/).map((k) => k.trim()).filter(Boolean);
+    if (keywords.length === 0) return true;
+
+    for (const kw of keywords) {
+      if (kw.length < 2 && !containsCjk(kw)) continue;
+      if (isNameMentioned(kw, corpus)) return true;
+    }
+
+    return false;
+  });
+
+  return [
+    ...parsed.topLines,
+    ...filteredSections.flatMap((section) => [section.heading, section.body]),
+  ].join("\n").trimEnd();
 }

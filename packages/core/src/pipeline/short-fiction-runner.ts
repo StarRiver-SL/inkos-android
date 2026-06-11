@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AgentContext } from "../agents/base.js";
 import {
@@ -16,6 +16,7 @@ import {
   ShortFictionOutlineReviserAgent,
   ShortFictionPackagingAgent,
   ShortFictionWriterAgent,
+  findEmptyShortFictionChapters,
   renderShortFictionDraftMarkdown,
   validateShortFictionDraftForFinal,
   type ShortFictionBatchDraft,
@@ -25,6 +26,8 @@ import {
 import { coverSecretKey, resolveCoverProviderPreset, type CoverProviderPreset } from "../llm/cover-providers.js";
 import { loadSecrets } from "../llm/secrets.js";
 import { safeChildPath } from "../utils/path-safety.js";
+
+const SHORT_FICTION_DRAFT_COMPLETION_ATTEMPTS = 3;
 
 export interface ShortFictionRunRuntimes {
   readonly planner: AgentContext;
@@ -72,6 +75,7 @@ export interface ShortFictionCoverOptions {
   readonly intro?: string;
   readonly sellingPoints?: string | ReadonlyArray<string>;
   readonly coverPrompt?: string;
+  readonly promptMode?: CoverPromptMode;
   readonly outputDir?: string;
   readonly coverBaseUrl?: string;
   readonly coverEndpoint?: string;
@@ -87,10 +91,46 @@ export interface ShortFictionCoverResult {
   readonly coverImagePath: string;
 }
 
+type CoverPromptMode = "short" | "generic";
+
 export async function runShortFictionProduction(
   options: ShortFictionRunOptions,
 ): Promise<ShortFictionRunResult> {
   const root = options.projectRoot;
+  const outDir = normalizeOutputDir(options.outDir ?? "shorts");
+  const providedStoryId = options.storyId ? safeSegment(options.storyId) : undefined;
+
+  // A stable storyId lets a re-run resume from disk instead of redoing finished
+  // work — a transient failure in a late stage used to throw the whole short
+  // away (orphaning outline/drafts). If it already finished, return it as-is.
+  if (
+    providedStoryId
+    && await projectFileExists(root, join(outDir, providedStoryId, "final", "full.md"))
+    && !await isFailedShortRun(root, join(outDir, providedStoryId, "status.json"))
+  ) {
+    return buildShortRunResult(providedStoryId, join(outDir, providedStoryId), { coverError: "already-complete" });
+  }
+
+  try {
+    return await produceShort(options, root, outDir, providedStoryId);
+  } catch (error) {
+    // Mark the partial output as failed so drafts can't masquerade as a short.
+    if (providedStoryId) {
+      await writeJson(root, join(outDir, providedStoryId, "status.json"), {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function produceShort(
+  options: ShortFictionRunOptions,
+  root: string,
+  outDir: string,
+  providedStoryId: string | undefined,
+): Promise<ShortFictionRunResult> {
   const chapterCount = boundedInteger(
     options.chapterCount,
     SHORT_FICTION_DEFAULT_CHAPTERS,
@@ -106,83 +146,146 @@ export async function runShortFictionProduction(
     SHORT_FICTION_MAX_CHARS_PER_CHAPTER,
   );
 
-  options.onProgress?.("Creating short fiction outline...");
-  const outlineAgent = new ShortFictionOutlineAgent(options.runtimes.planner);
-  const outlineV1 = await outlineAgent.createOutline({
-    direction: options.direction,
-    chapterCount,
-    charsPerChapter,
-    reference: options.reference,
-  });
+  // Resume the (3-stage) outline from disk if v002 already exists for this id —
+  // the writer + everything downstream only need the outline markdown.
+  const resumedOutline = providedStoryId
+    ? await tryReadProjectText(root, join(outDir, providedStoryId, "outline", "v002.md"))
+    : undefined;
 
-  const storyId = safeSegment(options.storyId || slugify(outlineV1.storyTitle || options.direction));
-  const baseDir = join(normalizeOutputDir(options.outDir ?? "shorts"), storyId);
-  await writeText(root, join(baseDir, "outline", "v001.md"), outlineV1.rawContent);
+  let outlineMarkdown: string;
+  let storyId: string;
+  let baseDir: string;
+  if (providedStoryId && resumedOutline?.trim()) {
+    storyId = providedStoryId;
+    baseDir = join(outDir, storyId);
+    outlineMarkdown = resumedOutline;
+    options.onProgress?.("Resuming from existing outline (skipping outline stages)...");
+  } else {
+    options.onProgress?.("Creating short fiction outline...");
+    const outlineAgent = new ShortFictionOutlineAgent(options.runtimes.planner);
+    const outlineV1 = await outlineAgent.createOutline({
+      direction: options.direction,
+      chapterCount,
+      charsPerChapter,
+      reference: options.reference,
+    });
 
-  options.onProgress?.("Reviewing outline...");
-  const outlineReviewer = new ShortFictionOutlineReviewerAgent(options.runtimes.outlineReview);
-  const outlineReview = await outlineReviewer.reviewOutline({
-    direction: options.direction,
-    outline: outlineV1,
-    reference: options.reference,
-  });
-  await writeText(root, join(baseDir, "reviews", "outline-v001.md"), outlineReview);
+    storyId = providedStoryId ?? safeSegment(slugify(outlineV1.storyTitle || options.direction));
+    baseDir = join(outDir, storyId);
+    await writeText(root, join(baseDir, "outline", "v001.md"), outlineV1.rawContent);
 
-  options.onProgress?.("Revising outline once...");
-  const outlineReviser = new ShortFictionOutlineReviserAgent(options.runtimes.planner);
-  const outlineV2 = await outlineReviser.reviseOutline({
-    direction: options.direction,
-    outline: outlineV1,
-    review: outlineReview,
-    reference: options.reference,
-    chapterCount,
-    charsPerChapter,
-  });
-  await writeText(root, join(baseDir, "outline", "v002.md"), outlineV2.rawContent);
+    options.onProgress?.("Reviewing outline...");
+    const outlineReviewer = new ShortFictionOutlineReviewerAgent(options.runtimes.outlineReview);
+    const outlineReview = await outlineReviewer.reviewOutline({
+      direction: options.direction,
+      outline: outlineV1,
+      reference: options.reference,
+    });
+    await writeText(root, join(baseDir, "reviews", "outline-v001.md"), outlineReview);
 
-  options.onProgress?.("Writing full short fiction draft...");
-  const writer = new ShortFictionWriterAgent(options.runtimes.writer);
-  const draftV1 = await writer.writeDraft({
-    direction: options.direction,
-    outlineMarkdown: outlineV2.rawContent,
-    chapterCount,
-    charsPerChapter,
-  });
-  await writeDraftArtifacts(root, baseDir, "v001", draftV1);
+    options.onProgress?.("Revising outline once...");
+    const outlineReviser = new ShortFictionOutlineReviserAgent(options.runtimes.planner);
+    const outlineV2 = await outlineReviser.reviseOutline({
+      direction: options.direction,
+      outline: outlineV1,
+      review: outlineReview,
+      reference: options.reference,
+      chapterCount,
+      charsPerChapter,
+    });
+    await writeText(root, join(baseDir, "outline", "v002.md"), outlineV2.rawContent);
+    outlineMarkdown = outlineV2.rawContent;
+  }
 
-  options.onProgress?.("Reviewing full draft...");
-  const draftReviewer = new ShortFictionDraftReviewerAgent(options.runtimes.draftReview);
-  const draftReview = await draftReviewer.reviewDraft({
-    direction: options.direction,
-    outlineMarkdown: outlineV2.rawContent,
-    draft: draftV1,
-    chapterCount,
-    charsPerChapter,
-  });
-  await writeText(root, join(baseDir, "reviews", "draft-v001.md"), draftReview);
+  let finalDraft: ShortFictionBatchDraft;
+  let revisionWarning: string | undefined;
+  let salesPackage: ShortFictionSalesPackage;
+  try {
+    options.onProgress?.("Writing full short fiction draft...");
+    const writer = new ShortFictionWriterAgent(options.runtimes.writer);
+    let draftV1 = await writer.writeDraft({
+      direction: options.direction,
+      outlineMarkdown,
+      chapterCount,
+      charsPerChapter,
+    });
+    let missingFromDraft = findEmptyShortFictionChapters(draftV1);
+    if (missingFromDraft.length > 0) {
+      await writeDraftArtifacts(root, baseDir, "v001-partial", draftV1);
+      for (let attempt = 1; missingFromDraft.length > 0 && attempt <= SHORT_FICTION_DRAFT_COMPLETION_ATTEMPTS; attempt += 1) {
+        options.onProgress?.(`Completing missing short fiction chapters: ${missingFromDraft.join(", ")}...`);
+        draftV1 = await writer.continueDraft({
+          direction: options.direction,
+          outlineMarkdown,
+          chapterCount,
+          charsPerChapter,
+          draft: draftV1,
+        });
+        missingFromDraft = findEmptyShortFictionChapters(draftV1);
+        if (missingFromDraft.length > 0) {
+          await writeDraftArtifacts(root, baseDir, "v001-partial", draftV1);
+        }
+      }
+    }
+    validateShortFictionDraftForFinal(draftV1, { expectedChapters: chapterCount });
+    await writeDraftArtifacts(root, baseDir, "v001", draftV1);
 
-  options.onProgress?.("Revising full draft once...");
-  const reviser = new ShortFictionDraftReviserAgent(options.runtimes.revise);
-  const draftV2 = await reviser.reviseDraft({
-    direction: options.direction,
-    outlineMarkdown: outlineV2.rawContent,
-    draft: draftV1,
-    review: draftReview,
-    chapterCount,
-    charsPerChapter,
-  });
-  validateShortFictionDraftForFinal(draftV2, { expectedChapters: chapterCount });
-  await writeDraftArtifacts(root, baseDir, "v002", draftV2);
-  await writeFinalArtifacts(root, baseDir, draftV2);
+    options.onProgress?.("Reviewing full draft...");
+    const draftReviewer = new ShortFictionDraftReviewerAgent(options.runtimes.draftReview);
+    const draftReview = await draftReviewer.reviewDraft({
+      direction: options.direction,
+      outlineMarkdown,
+      draft: draftV1,
+      chapterCount,
+      charsPerChapter,
+    });
+    await writeText(root, join(baseDir, "reviews", "draft-v001.md"), draftReview);
 
-  options.onProgress?.("Generating synopsis and cover prompt...");
-  const packager = new ShortFictionPackagingAgent(options.runtimes.package);
-  const salesPackage = await packager.generatePackage({
-    direction: options.direction,
-    outlineMarkdown: outlineV2.rawContent,
-    draft: draftV2,
-  });
-  await writePackageArtifacts(root, baseDir, salesPackage);
+    finalDraft = draftV1;
+    options.onProgress?.("Revising full draft once...");
+    const reviser = new ShortFictionDraftReviserAgent(options.runtimes.revise);
+    try {
+      const draftV2 = await reviser.reviseDraft({
+        direction: options.direction,
+        outlineMarkdown,
+        draft: draftV1,
+        review: draftReview,
+        chapterCount,
+        charsPerChapter,
+      });
+      validateShortFictionDraftForFinal(draftV2, { expectedChapters: chapterCount });
+      await writeDraftArtifacts(root, baseDir, "v002", draftV2);
+      finalDraft = draftV2;
+    } catch (error) {
+      revisionWarning = error instanceof Error ? error.message : String(error);
+      await writeText(root, join(baseDir, "reviews", "draft-v002-warning.md"), [
+        "# 第二轮改稿未采用",
+        "",
+        "系统没有用不完整或解析失败的改稿覆盖完整首稿。",
+        "",
+        "## 原因",
+        "",
+        revisionWarning,
+      ].join("\n"));
+    }
+
+    await writeFinalArtifacts(root, baseDir, finalDraft);
+
+    options.onProgress?.("Generating synopsis and cover prompt...");
+    const packager = new ShortFictionPackagingAgent(options.runtimes.package);
+    salesPackage = await packager.generatePackage({
+      direction: options.direction,
+      outlineMarkdown,
+      draft: finalDraft,
+    });
+    await writePackageArtifacts(root, baseDir, salesPackage);
+  } catch (error) {
+    await writeShortRunStatus(root, baseDir, {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined);
+    throw error;
+  }
 
   const coverArtifacts: { readonly coverImagePath?: string; readonly coverError?: string } = options.cover === false
     ? { coverError: "disabled" }
@@ -197,6 +300,21 @@ export async function runShortFictionProduction(
         coverApiKeyEnv: options.coverApiKeyEnv,
       }).catch((error: unknown) => ({ coverError: String(error) }));
 
+  if (revisionWarning) {
+    await writeShortRunStatus(root, baseDir, {
+      status: "complete",
+      warning: `revision skipped: ${revisionWarning}`,
+    }).catch(() => undefined);
+  }
+
+  return buildShortRunResult(storyId, baseDir, coverArtifacts);
+}
+
+function buildShortRunResult(
+  storyId: string,
+  baseDir: string,
+  coverArtifacts: { readonly coverImagePath?: string; readonly coverError?: string },
+): ShortFictionRunResult {
   return {
     storyId,
     outlinePath: projectPath(join(baseDir, "outline", "v002.md")),
@@ -209,6 +327,34 @@ export async function runShortFictionProduction(
     coverImagePath: coverArtifacts.coverImagePath,
     coverError: coverArtifacts.coverError,
   };
+}
+
+async function projectFileExists(root: string, path: string): Promise<boolean> {
+  try {
+    await access(safeChildPath(root, path));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isFailedShortRun(root: string, path: string): Promise<boolean> {
+  const raw = await tryReadProjectText(root, path);
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as { status?: unknown };
+    return parsed.status === "failed";
+  } catch {
+    return false;
+  }
+}
+
+async function tryReadProjectText(root: string, path: string): Promise<string | undefined> {
+  try {
+    return await readFile(safeChildPath(root, path), "utf-8");
+  } catch {
+    return undefined;
+  }
 }
 
 export async function generateShortFictionCover(
@@ -228,12 +374,14 @@ export async function generateShortFictionCover(
     rawContent: "",
   };
   const promptPath = join(outputDir, "cover-prompt.md");
-  await writeText(options.projectRoot, promptPath, buildCoverImagePrompt(salesPackage));
+  const imagePrompt = buildCoverImagePrompt(salesPackage, options.promptMode ?? "generic");
+  await writeText(options.projectRoot, promptPath, imagePrompt);
 
   const artifact = await generateCoverImageArtifact({
     root: options.projectRoot,
     outputDir,
     salesPackage,
+    promptMode: options.promptMode ?? "generic",
     coverBaseUrl: options.coverBaseUrl,
     coverEndpoint: options.coverEndpoint,
     coverModel: options.coverModel,
@@ -303,6 +451,17 @@ async function writePackageArtifacts(root: string, baseDir: string, salesPackage
   await writeText(root, join(finalDir, "cover-prompt.md"), salesPackage.coverPrompt || "(empty)");
 }
 
+async function writeShortRunStatus(
+  root: string,
+  baseDir: string,
+  value: Record<string, unknown>,
+): Promise<void> {
+  await writeJson(root, join(baseDir, "status.json"), {
+    ...value,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 async function generateCoverArtifact(input: {
   readonly root: string;
   readonly baseDir: string;
@@ -323,6 +482,7 @@ async function generateCoverImageArtifact(input: {
   readonly root: string;
   readonly outputDir: string;
   readonly salesPackage: ShortFictionSalesPackage;
+  readonly promptMode?: CoverPromptMode;
   readonly coverBaseUrl?: string;
   readonly coverEndpoint?: string;
   readonly coverModel?: string;
@@ -337,21 +497,29 @@ async function generateCoverImageArtifact(input: {
     coverApiKeyEnv: input.coverApiKeyEnv,
   });
   const size = input.coverSize || process.env.INKOS_COVER_SIZE || "1024x1360";
+  const { buffer, extension } = await generateImageFromPrompt(request, buildCoverImagePrompt(input.salesPackage, input.promptMode ?? "short"), size);
+  const coverPath = join(input.outputDir, extension === "jpg" ? "cover.jpg" : "cover.png");
+  await writeBinary(input.root, coverPath, buffer);
+  return { coverImagePath: projectPath(coverPath) };
+}
 
+/**
+ * Generate one image from a free-text prompt via whichever image API the cover
+ * config resolves to (gemini / images / responses). Shared by cover generation
+ * and the interactive-world (Play) illustration feature so both go through the
+ * same provider plumbing.
+ */
+export async function generateImageFromPrompt(
+  request: ShortFictionCoverRequest,
+  prompt: string,
+  size: string,
+): Promise<{ readonly buffer: Buffer; readonly extension: "png" | "jpg" }> {
   if (request.api === "gemini") {
-    const prompt = buildCoverImagePrompt(input.salesPackage);
     const payload = await generateGeminiCover(request, prompt);
-    const coverPath = join(input.outputDir, payload.extension === "jpg" ? "cover.jpg" : "cover.png");
-    await writeBinary(input.root, coverPath, Buffer.from(payload.base64, "base64"));
-    return { coverImagePath: projectPath(coverPath) };
+    return { buffer: Buffer.from(payload.base64, "base64"), extension: payload.extension };
   }
-
   if (request.api === "images") {
-    const prompt = buildCoverImagePrompt(input.salesPackage);
-    const payload = await generateImagesCover(request, prompt, size);
-    const coverPath = join(input.outputDir, payload.extension === "jpg" ? "cover.jpg" : "cover.png");
-    await writeBinary(input.root, coverPath, payload.buffer);
-    return { coverImagePath: projectPath(coverPath) };
+    return generateImagesCover(request, prompt, size);
   }
 
   const endpoint = request.endpoint ?? `${request.baseUrl.replace(/\/+$/u, "")}/responses`;
@@ -363,30 +531,27 @@ async function generateCoverImageArtifact(input: {
     },
     body: JSON.stringify({
       model: request.model,
-      input: buildCoverImagePrompt(input.salesPackage),
+      input: prompt,
       tools: [{ type: "image_generation", size }],
     }),
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`cover generation failed: HTTP ${response.status} ${text.slice(0, 500)}`);
+    throw new Error(`image generation failed: HTTP ${response.status} ${text.slice(0, 500)}`);
   }
 
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch (error) {
-    throw new Error(`cover generation returned non-JSON response: ${String(error)}`);
+    throw new Error(`image generation returned non-JSON response: ${String(error)}`);
   }
 
   const imageBase64 = extractResponsesImageBase64(payload);
   if (!imageBase64) {
-    throw new Error("cover generation response did not include image_generation_call result.");
+    throw new Error("image generation response did not include image_generation_call result.");
   }
-
-  const coverPath = join(input.outputDir, "cover.png");
-  await writeBinary(input.root, coverPath, Buffer.from(imageBase64, "base64"));
-  return { coverImagePath: projectPath(coverPath) };
+  return { buffer: Buffer.from(imageBase64, "base64"), extension: "png" };
 }
 
 export interface ShortFictionCoverRequest {
@@ -424,6 +589,18 @@ export async function resolveCoverGenerationRequest(input: {
   }
 
   const preset = resolveCoverProviderPreset(projectCover.service);
+  if (!preset && projectCover.service.startsWith("custom:") && projectCover.baseUrl) {
+    const apiKey = await resolveProjectCoverApiKey(input.root, projectCover.service);
+    if (!apiKey) {
+      throw new Error(`Cover API key is required. Configure a cover key for ${projectCover.label ?? projectCover.service}.`);
+    }
+    return {
+      api: projectCover.api ?? "images",
+      baseUrl: projectCover.baseUrl,
+      model: input.coverModel || projectCover.model || "gpt-image-2",
+      apiKey,
+    };
+  }
   if (!preset) {
     throw new Error(`Unsupported cover service: ${projectCover.service}`);
   }
@@ -440,16 +617,41 @@ export async function resolveCoverGenerationRequest(input: {
   };
 }
 
-async function readProjectCoverConfig(root: string): Promise<{ readonly service: string; readonly model?: string } | undefined> {
+async function readProjectCoverConfig(root: string): Promise<{
+  readonly service: string;
+  readonly model?: string;
+  readonly label?: string;
+  readonly baseUrl?: string;
+  readonly api?: "responses" | "images" | "gemini";
+} | undefined> {
   try {
     const raw = await readFile(join(root, "inkos.json"), "utf-8");
-    const parsed = JSON.parse(raw) as { llm?: { cover?: { service?: unknown; model?: unknown } } };
+    const parsed = JSON.parse(raw) as {
+      llm?: {
+        cover?: {
+          service?: unknown;
+          model?: unknown;
+          label?: unknown;
+          baseUrl?: unknown;
+          api?: unknown;
+        };
+      };
+    };
     const service = typeof parsed.llm?.cover?.service === "string" ? parsed.llm.cover.service : "";
     if (!service) return undefined;
     return {
       service,
       ...(typeof parsed.llm?.cover?.model === "string" && parsed.llm.cover.model.trim()
         ? { model: parsed.llm.cover.model.trim() }
+        : {}),
+      ...(typeof parsed.llm?.cover?.label === "string" && parsed.llm.cover.label.trim()
+        ? { label: parsed.llm.cover.label.trim() }
+        : {}),
+      ...(typeof parsed.llm?.cover?.baseUrl === "string" && parsed.llm.cover.baseUrl.trim()
+        ? { baseUrl: parsed.llm.cover.baseUrl.trim() }
+        : {}),
+      ...(parsed.llm?.cover?.api === "responses" || parsed.llm?.cover?.api === "images" || parsed.llm?.cover?.api === "gemini"
+        ? { api: parsed.llm.cover.api }
         : {}),
     };
   } catch {
@@ -648,13 +850,24 @@ function resolveCoverEndpoint(coverEndpoint?: string, coverBaseUrl?: string): st
   return `${baseUrl.replace(/\/+$/u, "")}/images/generations`;
 }
 
-function buildCoverImagePrompt(salesPackage: ShortFictionSalesPackage): string {
-  return [
-    "为中文商业短篇小说生成手机端平台书封，3:4竖图。",
-    `主标题：${salesPackage.title}`,
+function buildCoverImagePrompt(salesPackage: ShortFictionSalesPackage, mode: CoverPromptMode): string {
+  const base = [
+    `标题：${salesPackage.title}`,
     salesPackage.intro ? `简介：${salesPackage.intro}` : "",
     salesPackage.sellingPoints.length > 0 ? `卖点：${salesPackage.sellingPoints.join("；")}` : "",
-    salesPackage.coverPrompt ? `包装提示：${salesPackage.coverPrompt}` : "",
+    salesPackage.coverPrompt ? `用户视觉要求：${salesPackage.coverPrompt}` : "",
+  ].filter(Boolean);
+
+  if (mode === "generic") {
+    return [
+      "按用户给出的标题、简介、卖点和视觉要求生成封面图。",
+      ...base,
+    ].join("\n");
+  }
+
+  return [
+    "为中文短篇小说生成手机端竖版书封，3:4竖图。",
+    ...base.map((line) => line.replace(/^标题：/u, "主标题：").replace(/^用户视觉要求：/u, "包装提示：")),
     "",
     "封面方向：平台短篇书封，不是电影海报。标题字要成为主视觉，预留两到四行大字排版区；人物近景或半身，表情有冷笑、震惊、崩溃、压迫或反杀感；道具少而大，一眼能看出冲突。",
     "颜色高对比、高饱和，适合手机列表缩略图。避免写实会议摄影、横版视频缩略图、杂志大片、小清新细字和长段文字。",
@@ -711,7 +924,7 @@ function slugify(value: string): string {
   const slug = value
     .toLowerCase()
     .replace(/['"]/g, "")
-    .replace(/[^0-9a-zA-Z\u3400-\u9fff]+/g, "-")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
   return slug || `short-${Date.now()}`;

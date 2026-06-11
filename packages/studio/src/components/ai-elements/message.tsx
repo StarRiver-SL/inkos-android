@@ -12,6 +12,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { cjk } from "@streamdown/cjk";
+import { code } from "@streamdown/code";
+import { math } from "@streamdown/math";
+import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
@@ -24,8 +28,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import { LazyStreamdown } from "./lazy-streamdown";
-import type { LazyStreamdownProps } from "./lazy-streamdown";
+import { Streamdown } from "streamdown";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -51,8 +54,8 @@ export const MessageContent = ({
 }: MessageContentProps) => (
   <div
     className={cn(
-      "is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm",
-      "group-[.is-user]:ml-auto group-[.is-user]:rounded-[18px] group-[.is-user]:border group-[.is-user]:border-border/50 group-[.is-user]:bg-card/80 group-[.is-user]:px-4 group-[.is-user]:py-2.5 group-[.is-user]:text-foreground group-[.is-user]:shadow-[0_1px_3px_oklch(0_0_0/0.04)]",
+      "is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-base",
+      "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
       "group-[.is-assistant]:text-foreground",
       className
     )}
@@ -316,20 +319,21 @@ export const MessageBranchPage = ({
   );
 };
 
-export type MessageResponseProps = LazyStreamdownProps;
+export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
-const messageResponseClassName =
-  "size-full text-[15px] leading-[1.65] tracking-[-0.006em] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4";
+const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const MessageResponse = memo(
-  ({ className, children, ...props }: MessageResponseProps) => {
-    const resolvedClassName = cn(messageResponseClassName, className);
-    return (
-      <LazyStreamdown className={resolvedClassName} {...props}>
-        {children}
-      </LazyStreamdown>
-    );
-  },
+  ({ className, ...props }: MessageResponseProps) => (
+    <Streamdown
+      className={cn(
+        "size-full text-[17px] leading-[1.72] font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4",
+        className
+      )}
+      plugins={streamdownPlugins}
+      {...props}
+    />
+  ),
   (prevProps, nextProps) =>
     prevProps.children === nextProps.children &&
     nextProps.isAnimating === prevProps.isAnimating

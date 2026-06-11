@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as memoryRetrieval from "../utils/memory-retrieval.js";
@@ -28,21 +28,6 @@ describe("retrieveMemorySelection", () => {
     }
     vi.resetModules();
     vi.doUnmock("../state/memory-db.js");
-  });
-
-  sqliteIt("quarantines an incompatible memory.db and rebuilds the derived index", async () => {
-    root = await mkdtemp(join(tmpdir(), "inkos-memory-repair-test-"));
-    const bookDir = join(root, "book");
-    const storyDir = join(bookDir, "story");
-    await mkdir(storyDir, { recursive: true });
-    await writeFile(join(storyDir, "memory.db"), "incompatible sqlite payload", "utf-8");
-
-    const db = new MemoryDB(bookDir);
-    expect(db.getChapterCount()).toBe(0);
-    db.close();
-
-    const backups = await readdir(join(storyDir, ".repair-backups"));
-    expect(backups.some((name) => name.startsWith("memory.db.corrupt-"))).toBe(true);
   });
 
   it("indexes current state facts into sqlite-backed memory selection", async () => {
@@ -95,6 +80,40 @@ describe("retrieveMemorySelection", () => {
     } else {
       expect(result.dbPath).toBeUndefined();
     }
+  });
+
+  it("does not treat unpromoted hook seeds as active debt", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-memory-retrieval-hook-seeds-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(
+        join(storyDir, "pending_hooks.md"),
+        [
+          "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | payoff_timing | depends_on | pays_off_in_arc | core_hook | half_life | promoted | notes |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| H-live | 3 | 主线 | open | 8 | 第12章公开账册 | 近期 | 无 | 第一卷 | 是 | 10 | 是 | 已经被读者看见的账册债务 |",
+          "| H-seed | 4 | 小承诺 | open | 0 | 第16章回收 | 中程 | 无 | 第一卷 | 否 | 10 | 否 | 架构阶段预埋、尚未进入读者追踪的种子 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const result = await retrieveMemorySelection({
+      bookDir,
+      chapterNumber: 18,
+      goal: "继续处理账册债务。",
+      outlineNode: "推进主线账册。",
+    });
+
+    expect(result.activeHooks.map((hook) => hook.hookId)).toEqual(["H-live"]);
+    expect(result.recyclableHooks.map((hook) => hook.hookId)).toEqual(["H-live"]);
+    expect(result.hooks.map((hook) => hook.hookId)).not.toContain("H-seed");
   });
 
   it("extracts mentor-focused query terms without pulling guild-route negatives into English retrieval", () => {

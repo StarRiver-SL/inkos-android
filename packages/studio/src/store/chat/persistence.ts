@@ -9,6 +9,8 @@ const MAX_PERSISTED_BYTES = 240_000;
 interface PersistedSession {
   readonly sessionId: string;
   readonly bookId: string | null;
+  readonly sessionKind?: SessionRuntime["sessionKind"];
+  readonly playMode?: SessionRuntime["playMode"];
   readonly title: string | null;
   readonly messages: SessionRuntime["messages"];
   readonly deletedMessageKeys?: ReadonlyArray<string>;
@@ -64,7 +66,7 @@ function isTransientAssistantError(message: SessionRuntime["messages"][number]):
 
 function cacheableMessages(messages: SessionRuntime["messages"]): SessionRuntime["messages"] {
   const kept: Array<SessionRuntime["messages"][number]> = [];
-  for (let index = 0; index < messages.length; index++) {
+  for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     const next = messages[index + 1];
     if (isTransientAssistantError(message)) continue;
@@ -88,6 +90,8 @@ export function loadPersistedMessageState(): Partial<MessageState> {
       sessions[sessionId] = {
         sessionId,
         bookId: session.bookId ?? null,
+        sessionKind: session.sessionKind,
+        playMode: session.playMode,
         title: session.title ?? null,
         messages: cacheableMessages(session.messages ?? []),
         deletedMessageKeys: session.deletedMessageKeys ?? [],
@@ -119,15 +123,15 @@ export function persistMessageState(state: MessageState): void {
     const buildSessionEntries = () => Object.entries(state.sessions)
       .map(([sessionId, session]) => [sessionId, { ...session, messages: cacheableMessages(session.messages) }] as const)
       .filter(([, session]) => session.messages.length > 0 || session.isDraft)
-      .sort(([, left], [, right]) => {
-        return sessionSortTime(right) - sessionSortTime(left);
-      })
+      .sort(([, left], [, right]) => sessionSortTime(right) - sessionSortTime(left))
       .slice(0, MAX_SESSIONS)
       .map(([sessionId, session]) => [
         sessionId,
         {
           sessionId,
           bookId: session.bookId,
+          sessionKind: session.sessionKind,
+          playMode: session.playMode,
           title: session.title,
           messages: session.messages.slice(-messageLimit),
           deletedMessageKeys: session.deletedMessageKeys,
@@ -135,7 +139,6 @@ export function persistMessageState(state: MessageState): void {
         } satisfies PersistedSession,
       ]);
 
-    let payload: PersistedChatState;
     let serialized = "";
     do {
       const sessionEntries = buildSessionEntries();
@@ -147,7 +150,7 @@ export function persistMessageState(state: MessageState): void {
         ]),
       );
 
-      payload = {
+      const payload: PersistedChatState = {
         activeSessionId: state.activeSessionId && cachedSessionIds.has(state.activeSessionId)
           ? state.activeSessionId
           : null,

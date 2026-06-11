@@ -37,6 +37,82 @@ export {
   RuntimeStateDeltaSchema,
 } from "./models/runtime-state.js";
 export {
+  type PlayActionKind,
+  type PlayActionIntentInput,
+  type PlayActionIntent,
+  type PlayEntityType,
+  type PlayEntityInput,
+  type PlayEntity,
+  type PlayVisibility,
+  type PlayEdgeInput,
+  type PlayEdge,
+  type PlayStateSlotKind,
+  type PlayStateSlotInput,
+  type PlayStateSlot,
+  type PlayEvidenceStatus,
+  type PlayEvidenceTransitionInput,
+  type PlayEvidenceTransition,
+  type PlayEventInput,
+  type PlayEvent,
+  type PlayMutationInput,
+  type PlayMutation,
+  PlayActionKindSchema,
+  PlayActionIntentSchema,
+  PlayEntityTypeSchema,
+  PlayEntitySchema,
+  PlayVisibilitySchema,
+  PlayEdgeSchema,
+  PlayStateSlotKindSchema,
+  PlayStateSlotSchema,
+  PlayEvidenceStatusSchema,
+  PlayEvidenceTransitionSchema,
+  PlayEventSchema,
+  PlayMutationSchema,
+} from "./models/play.js";
+export {
+  PlayActionInterpreterAgent,
+  PlayWorldMutatorAgent,
+  PlaySceneRendererAgent,
+  PlaySceneReconcilerAgent,
+  type PlayActionInterpreterInput,
+  type PlayWorldMutatorInput,
+  type PlaySceneRenderInput,
+  type PlaySceneReconcileInput,
+  type PlaySceneRender,
+} from "./play/play-agents.js";
+export { PlayDB } from "./play/play-db.js";
+export { createPlayDB, type PlayGraphDB } from "./play/play-db-factory.js";
+export { PlayFileDB, type PlayGraphSnapshot } from "./play/play-file-db.js";
+export {
+  applyPlayMutation,
+  type PlayReducerDB,
+  type ApplyPlayMutationInput,
+  type ApplyPlayMutationResult,
+} from "./play/play-reducer.js";
+export {
+  PlayRunner,
+  type PlayActionInterpreterLike,
+  type PlayWorldMutatorLike,
+  type PlaySceneRendererLike,
+  type PlayRunnerOptions,
+  type PlayStepResult,
+} from "./play/play-runner.js";
+export { PlayStore, type PlayTranscriptTurn, type PlayWorld, type PlayWorldInput, type PlayRunSummary } from "./play/play-store.js";
+export {
+  buildPlayEntityImagePrompt,
+  buildPlaySceneImagePrompt,
+  readPlayImageManifest,
+  setPlayImageEntry,
+  playImageFileName,
+  generatePlayImage,
+  readPlayImageSettings,
+  writePlayImageSettings,
+  DEFAULT_PLAY_IMAGE_SETTINGS,
+  type PlayImageEntry,
+  type PlayImageManifest,
+  type PlayImageSettings,
+} from "./play/play-image.js";
+export {
   type ChapterMemo,
   type ChapterIntent,
   type ContextSource,
@@ -97,6 +173,28 @@ export {
   type InteractionRequest,
 } from "./interaction/intents.js";
 export {
+  ActionSourceSchema,
+  ActionEnvelopeSchema,
+  ActionPayloadSchema,
+  CreateBookActionPayloadSchema,
+  GenerateCoverActionPayloadSchema,
+  PlayStartActionPayloadSchema,
+  RequestedIntentSchema,
+  ShortRunActionPayloadSchema,
+  type ActionSource,
+  type ActionEnvelope,
+  type ActionPayload,
+  type RequestedIntent,
+  normalizeActionSource,
+  normalizeActionEnvelope,
+  normalizeActionPayload,
+  normalizeRequestedIntent,
+  normalizePlayMode,
+  isExplicitWriteChapterCommand,
+  isUsablePlayInitialScene,
+  isWriteNextInstruction,
+} from "./interaction/action-envelope.js";
+export {
   ExecutionStatusSchema,
   ExecutionStateSchema,
   InteractionEventSchema,
@@ -124,8 +222,12 @@ export {
   appendInteractionMessage,
   appendInteractionEvent,
   BookSessionSchema,
+  SessionKindSchema,
+  PlayModeSchema,
   GlobalSessionSchema,
   type BookSession,
+  type SessionKind,
+  type PlayMode,
   type GlobalSession,
   createBookSession,
   appendBookSessionMessage,
@@ -153,10 +255,10 @@ export {
 export {
   appendManualSessionMessages,
   appendTranscriptEvent,
-  compactDeletedTranscriptMessages,
   sessionsDir,
   readTranscriptEvents,
   nextTranscriptSeq,
+  compactDeletedTranscriptMessages,
   transcriptPath,
   legacyBookSessionPath,
 } from "./interaction/session-transcript.js";
@@ -186,14 +288,9 @@ export type {
 } from "./interaction/session-transcript-schema.js";
 export { routeInteractionRequest } from "./interaction/request-router.js";
 export {
-  routeNaturalLanguageIntent,
-  type NaturalLanguageRoutingContext,
-} from "./interaction/nl-router.js";
-export {
-  processProjectInteractionInput,
   processProjectInteractionRequest,
 } from "./interaction/project-control.js";
-export { createInteractionToolsFromDeps, type FileAuditAction, type FileAuditEvent } from "./interaction/project-tools.js";
+export { createInteractionToolsFromDeps } from "./interaction/project-tools.js";
 export { buildExportArtifact, writeExportArtifact } from "./interaction/export-artifact.js";
 export {
   normalizeTruthFileName,
@@ -258,7 +355,7 @@ export {
 export * from "./agent/index.js";
 
 // LLM
-export { createLLMClient, chatCompletion, chatWithTools, createStreamMonitor, PartialResponseError, type LLMClient, type LLMResponse, type LLMMessage, type ToolDefinition, type ToolCall, type AgentMessage, type ChatWithToolsResult, type StreamProgress, type OnStreamProgress, type TokenOptimizationOptions } from "./llm/provider.js";
+export { createLLMClient, chatCompletion, createStreamMonitor, PartialResponseError, type LLMClient, type LLMResponse, type LLMMessage, type LLMRequestDiagnostics, type LLMRequestDiagnosticsSink, type StreamProgress, type OnStreamProgress } from "./llm/provider.js";
 export {
   SERVICE_PRESETS,
   SERVICE_TO_PI_PROVIDER,
@@ -284,8 +381,16 @@ export {
 export { migrateConfig, type MigrationResult } from "./llm/config-migration.js";
 export { getAllEndpoints, getEndpoint, type InkosEndpoint, type InkosModel, type EndpointGroup } from "./llm/providers/index.js";
 export { probeModelsFromUpstream, type ProbedModel } from "./llm/providers/probe.js";
+export { verifyService, type VerifyResult } from "./llm/providers/verify.js";
 
 // Agents
+export {
+  runAgentSession,
+  evictAgentCache,
+  type AgentRequestDiagnostics,
+  type AgentSessionConfig,
+  type AgentSessionResult,
+} from "./agent/agent-session.js";
 export { BaseAgent, type AgentContext } from "./agents/base.js";
 export { ArchitectAgent, type ArchitectOutput } from "./agents/architect.js";
 export { WriterAgent, type WriteChapterInput, type WriteChapterOutput, type TokenUsage } from "./agents/writer.js";
@@ -298,10 +403,6 @@ export { FanqieRadarSource, QidianRadarSource, TextRadarSource, type RadarSource
 export { readGenreProfile, readBookRules, listAvailableGenres, getBuiltinGenresDir } from "./agents/rules-reader.js";
 export { buildWriterSystemPrompt, buildGoldenOpeningDiscipline } from "./agents/writer-prompts.js";
 export { analyzeAITells, type AITellResult, type AITellIssue } from "./agents/ai-tells.js";
-export { validateWriteRequest, validateBookCreateRequest } from "./utils/pre-write-validation.js";
-export type { ValidationWarning, PreWriteValidationResult } from "./utils/pre-write-validation.js";
-export { getMemoryUsage, checkMemoryThreshold, formatMemoryUsage, triggerGC } from "./utils/memory-monitor.js";
-export type { MemoryUsage, MemoryThresholds } from "./utils/memory-monitor.js";
 export { analyzeSensitiveWords, type SensitiveWordResult, type SensitiveWordMatch } from "./agents/sensitive-words.js";
 export { detectAIContent, type DetectionResult } from "./agents/detector.js";
 export { analyzeStyle } from "./agents/style-analyzer.js";
@@ -318,21 +419,30 @@ export { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeIn
 export * from "./prompts/index.js";
 
 // Utils
-export { isNewLayoutBook } from "./utils/outline-paths.js";
+export { isNewLayoutBook, isBookFoundationComplete } from "./utils/outline-paths.js";
 export { fetchUrl, searchWeb } from "./utils/web-search.js";
 export { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "./utils/context-filter.js";
 export { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "./utils/pov-filter.js";
 export { ConsolidatorAgent } from "./agents/consolidator.js";
-export { MemoryDB, type Fact, type StoredSummary, type StoredHook, type VectorHit } from "./state/memory-db.js";
+export { MemoryDB, type Fact, type StoredSummary } from "./state/memory-db.js";
 export { StateValidatorAgent } from "./agents/state-validator.js";
 export { loadRuntimeStateSnapshot, buildRuntimeStateArtifacts, saveRuntimeStateSnapshot, loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts, type RuntimeStateArtifacts, type NarrativeMemorySeed } from "./state/runtime-state-store.js";
 export { splitChapters, type SplitChapter } from "./utils/chapter-splitter.js";
-export { countChapterLength, resolveLengthCountingMode, formatLengthCount, buildLengthSpec, isOutsideSoftRange, isOutsideHardRange, chooseNormalizeMode, type LengthLanguage } from "./utils/length-metrics.js";
+export { countChapterLength, resolveLengthCountingMode, formatLengthCount, buildLengthSpec, defaultChapterLength, DEFAULT_CHAPTER_LENGTH_ZH, DEFAULT_CHAPTER_LENGTH_EN, isOutsideSoftRange, isOutsideHardRange, chooseNormalizeMode, type LengthLanguage } from "./utils/length-metrics.js";
 export { createLogger, createStderrSink, createJsonLineSink, nullSink, type Logger, type LogSink, type LogLevel, type LogEntry } from "./utils/logger.js";
+export { inferLanguage, type WritingLanguage } from "./utils/language.js";
 export { loadProjectConfig, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, isApiKeyOptionalForEndpoint } from "./utils/config-loader.js";
 export { resolveEffectiveLLMConfig, type EffectiveLLMConfigResult, type EffectiveLLMDiagnostics, type LLMConfigCliOverrides, type LLMConfigMode, type LLMConsumer, type LLMValueSource } from "./utils/effective-llm-config.js";
 export { loadLLMEnvLayers, mergeEnvMaps, studioIgnoredEnv, cliOverlayEnv, legacyEnv, type LLMEnvLayers, type LLMEnvMap } from "./utils/llm-env.js";
+export type { ContextCompressionCallback, ContextCompressionCategory, ContextCompressionEvent, ContextCompressionPhase } from "./models/context-compression.js";
 export { computeAnalytics, type AnalyticsData, type TokenStats } from "./utils/analytics.js";
+export {
+  evaluateBookQuality,
+  computeChapterEvalScore,
+  type BookEval,
+  type ChapterEval,
+  type EvaluateBookQualityOptions,
+} from "./utils/book-eval.js";
 export {
   collectStaleHookDebt,
   evaluateHookAdmission,
@@ -343,41 +453,10 @@ export {
 } from "./utils/hook-governance.js";
 export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./utils/hook-arbiter.js";
 export { analyzeHookHealth } from "./utils/hook-health.js";
-export {
-  applyOfficialOptimizationConfig,
-  clearAllL1Caches,
-  clearIdleL1Caches,
-  ensureSemanticCacheStorage,
-  getEmbeddingDiagnostics,
-  installPresetSceneTemplates,
-  headroomRetrieve,
-  getHeadroomSavingsTelemetry,
-  getSemanticCacheStats,
-  getTokenDiagnostics,
-  maintainSemanticCache,
-  diffHeadroomSavingsTelemetry,
-  recordTokenCompressionSavings,
-  recordTokenOptimizationEvent,
-  type EmbeddingDiagnostics,
-  type HeadroomSavingsTelemetry,
-  type OfficialOptimizationRuntimeConfig,
-  type SemanticCacheMaintenanceResult,
-  type SemanticCacheStats,
-  type TokenDiagnostics,
-  type TokenOptimizationEvent,
-} from "./utils/headroom-cache.js";
-export {
-  INKOS_PROMPT_CACHE_POLICY,
-  headroomLightCompress,
-  normalizePromptForCache,
-  optimizePromptBlock,
-  type HeadroomLightMode,
-} from "./utils/prompt-optimizer.js";
 
 // Pipeline
-export { PipelineRunner, type PipelineConfig, type WritePipelineMode, type WriteNextChapterOptions, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
+export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
 export { Scheduler, type SchedulerConfig } from "./pipeline/scheduler.js";
-export { runAgentLoop, AGENT_TOOLS as AGENT_TOOLS, type AgentLoopOptions } from "./pipeline/agent.js";
 export { detectChapter, detectAndRewrite, loadDetectionHistory, type DetectChapterResult, type DetectAndRewriteResult } from "./pipeline/detection-runner.js";
 
 // State

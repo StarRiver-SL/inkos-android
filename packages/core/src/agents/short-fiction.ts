@@ -3,6 +3,7 @@ import { countChapterLength } from "../utils/length-metrics.js";
 import {
   buildShortFictionDraftReviewSystemPrompt,
   buildShortFictionDraftReviewUserPrompt,
+  buildShortFictionDraftContinuationUserPrompt,
   buildShortFictionDraftRevisionFollowup,
   buildShortFictionOutlineReviewSystemPrompt,
   buildShortFictionOutlineReviewUserPrompt,
@@ -161,6 +162,32 @@ export class ShortFictionWriterAgent extends BaseAgent {
 
     return parseShortFictionBatchDraft(response.content, { expectedChapters: input.chapterCount });
   }
+
+  async continueDraft(input: ShortFictionDraftInput & { readonly draft: ShortFictionBatchDraft }): Promise<ShortFictionBatchDraft> {
+    const missingChapters = findEmptyShortFictionChapters(input.draft);
+    if (missingChapters.length === 0) return input.draft;
+
+    const response = await retryShortFictionCall(() =>
+      this.chat([
+        { role: "system", content: buildShortFictionWriterSystemPrompt() },
+        { role: "user", content: buildShortFictionDraftContinuationUserPrompt({
+          direction: input.direction,
+          outlineMarkdown: input.outlineMarkdown,
+          chapterCount: input.chapterCount,
+          charsPerChapter: input.charsPerChapter,
+          existingDraftMarkdown: renderShortFictionDraftMarkdown(input.draft),
+          missingChapters,
+        }) },
+      ], {
+        temperature: 0.68,
+        maxTokens: estimateShortFictionMaxTokens(missingChapters.length, input.charsPerChapter),
+      }), this.name, this.log);
+
+    return parseShortFictionBatchDraft(
+      `${input.draft.rawContent.trim()}\n\n${response.content.trim()}`,
+      { expectedChapters: input.chapterCount },
+    );
+  }
 }
 
 export class ShortFictionDraftReviewerAgent extends BaseAgent {
@@ -256,7 +283,7 @@ export function parseShortFictionBatchDraft(
       number,
     );
     const content = sanitizeChapterContent(
-      extractTaggedBlock(rawContent, `CHAPTER ${number} CONTENT`)
+      extractLastNonEmptyTaggedBlock(rawContent, `CHAPTER ${number} CONTENT`)
       || extractDuplicateTitleTaggedChapterContent(rawContent, number)
       || extractMarkdownChapterContent(rawContent, number)
       || "",
@@ -285,12 +312,16 @@ export function validateShortFictionDraftForFinal(
     throw new Error(`Short-hit draft is incomplete; expected ${options.expectedChapters} chapters, got ${draft.chapters.length}.`);
   }
 
-  const emptyChapters = draft.chapters
-    .filter((chapter) => !chapter.content.trim())
-    .map((chapter) => chapter.number);
+  const emptyChapters = findEmptyShortFictionChapters(draft);
   if (emptyChapters.length > 0) {
     throw new Error(`Short-hit draft is incomplete; empty chapters: ${emptyChapters.join(", ")}.`);
   }
+}
+
+export function findEmptyShortFictionChapters(draft: ShortFictionBatchDraft): number[] {
+  return draft.chapters
+    .filter((chapter) => !chapter.content.trim())
+    .map((chapter) => chapter.number);
 }
 
 export function renderShortFictionDraftMarkdown(draft: ShortFictionBatchDraft): string {
@@ -333,12 +364,30 @@ export function parseShortFictionSalesPackage(rawContent: string, fallbackTitle 
 }
 
 function extractTaggedBlock(raw: string, tag: string): string {
+  return extractTaggedBlocks(raw, tag)[0] ?? "";
+}
+
+function extractLastNonEmptyTaggedBlock(raw: string, tag: string): string {
+  return extractTaggedBlocks(raw, tag)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .at(-1) ?? "";
+}
+
+function extractTaggedBlocks(raw: string, tag: string): string[] {
   const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(
-    `^\\s*===\\s*${escaped}\\s*===\\s*\\n([\\s\\S]*?)(?=^\\s*===\\s*[A-Z0-9_ ]+\\s*===\\s*$|(?![\\s\\S]))`,
-    "im",
-  );
-  return pattern.exec(raw)?.[1]?.trim() ?? "";
+  const tagPattern = new RegExp(`^\\s*===\\s*${escaped}\\s*===\\s*$`, "gim");
+  const nextTagPattern = /^\s*===\s*[A-Z0-9_ ]+\s*===\s*$/gim;
+  const blocks: string[] = [];
+  for (const match of raw.matchAll(tagPattern)) {
+    if (match.index === undefined) continue;
+    const start = match.index + match[0].length;
+    const rest = raw.slice(start).replace(/^\s*\n/, "");
+    nextTagPattern.lastIndex = 0;
+    const next = nextTagPattern.exec(rest);
+    blocks.push((next ? rest.slice(0, next.index) : rest).trim());
+  }
+  return blocks;
 }
 
 function extractFirstHeading(raw: string): string {
@@ -364,7 +413,7 @@ function extractDuplicateTitleTaggedChapterContent(raw: string, number: number):
 
   const start = duplicateTitle.index + duplicateTitle[0].length;
   const rest = raw.slice(start).replace(/^\s*\n/, "");
-  const nextTag = rest.search(/^\\s*===\\s*(?:CHAPTER\\s+\\d+\\s+(?:TITLE|CONTENT)|SHORT_FICTION_[A-Z0-9_ ]+)\\s*===\\s*$/im);
+  const nextTag = rest.search(/^\s*===\s*(?:CHAPTER\s+\d+\s+(?:TITLE|CONTENT)|SHORT_FICTION_[A-Z0-9_ ]+)\s*===\s*$/im);
   return (nextTag >= 0 ? rest.slice(0, nextTag) : rest).trim();
 }
 

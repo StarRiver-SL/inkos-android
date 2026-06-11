@@ -28,6 +28,7 @@ interface ServiceConfigPayload {
 export function ServiceConfigSourceCard({ onChange }: { onChange?: () => void }) {
   const [data, setData] = useState<ServiceConfigPayload | null>(null);
   const [saving, setSaving] = useState<ConfigSource | null>(null);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
@@ -58,6 +59,21 @@ export function ServiceConfigSourceCard({ onChange }: { onChange?: () => void })
       setError(e instanceof Error ? e.message : "切换配置来源失败");
     } finally {
       setSaving(null);
+    }
+  };
+
+  const importEnvConfig = async () => {
+    setImporting(true);
+    try {
+      await fetchJson("/services/config/import-env", {
+        method: "POST",
+      });
+      await load();
+      onChange?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导入环境变量配置失败");
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -97,11 +113,21 @@ export function ServiceConfigSourceCard({ onChange }: { onChange?: () => void })
           <button
             type="button"
             onClick={() => void switchSource("studio")}
-            disabled={saving !== null || configSource === "studio"}
+            disabled={saving !== null || importing || configSource === "studio"}
             className="rounded-lg border border-border/50 px-3 py-1.5 text-xs hover:bg-secondary/50 disabled:opacity-50"
           >
             {saving === "studio" ? "切换中…" : "使用 Studio 配置"}
           </button>
+          {envDetected && activeEnvSummary.hasApiKey ? (
+            <button
+              type="button"
+              onClick={() => void importEnvConfig()}
+              disabled={saving !== null || importing}
+              className="rounded-lg border border-border/50 bg-secondary/40 px-3 py-1.5 text-xs hover:bg-secondary/70 disabled:opacity-50"
+            >
+              {importing ? "导入中…" : "导入检测到的配置"}
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -122,7 +148,7 @@ export function ServiceConfigSourceCard({ onChange }: { onChange?: () => void })
           {activeEnvSummary.provider ? <div>Provider: <span className="font-mono text-foreground">{activeEnvSummary.provider}</span></div> : null}
           <div>API Key: <span className="text-foreground">{activeEnvSummary.hasApiKey ? "已设置" : "未设置"}</span></div>
           <div className="text-muted-foreground/70 pt-1">
-            当前虽然检测到 .env，但 Studio 和 Agent 请求会忽略这套 LLM 覆盖；CLI、daemon 和部署环境可以使用它。
+            当前虽然检测到 .env，但 Studio 和 Agent 请求不会直接使用这套覆盖；点击“导入检测到的配置”后，会把它保存为 Studio 服务配置。
           </div>
         </div>
       ) : (

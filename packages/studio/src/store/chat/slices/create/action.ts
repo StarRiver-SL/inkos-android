@@ -7,4 +7,6 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   openChapterArtifact: (chapterNum) => set({ sidebarView: "artifact", artifactFile: null, artifactChapter: chapterNum }),
   closeArtifact: () => set({ sidebarView: "panel", artifactFile: null, artifactChapter: null }),
   setBookSummary: (summary) => set({ bookSummary: summary }),
+  markProposalResolved: (execId, resolution) =>
+    set((s) => ({ resolvedProposals: { ...s.resolvedProposals, [execId]: resolution } })),
 });

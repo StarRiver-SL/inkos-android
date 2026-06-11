@@ -23,6 +23,18 @@ describe("hash route", () => {
       expect(parseHash("#/book/my-novel/settings")).toEqual({ page: "book-settings", bookId: "my-novel" });
     });
 
+    it("parses chapter route", () => {
+      expect(parseHash("#/book/my-novel/chapters/12")).toEqual({
+        page: "chapter",
+        bookId: "my-novel",
+        chapterNumber: 12,
+      });
+    });
+
+    it("parses logs route", () => {
+      expect(parseHash("#/logs")).toEqual({ page: "logs" });
+    });
+
     it("decodes encoded bookId", () => {
       expect(parseHash("#/book/%E4%B9%9D%E9%BE%99")).toEqual({ page: "book", bookId: "九龙" });
     });
@@ -39,8 +51,16 @@ describe("hash route", () => {
       expect(parseHash("#/services")).toEqual({ page: "services" });
     });
 
+    it("parses project settings", () => {
+      expect(parseHash("#/settings")).toEqual({ page: "project-settings" });
+    });
+
     it("parses service-detail", () => {
       expect(parseHash("#/services/openai")).toEqual({ page: "service-detail", serviceId: "openai" });
+    });
+
+    it("parses import tab routes", () => {
+      expect(parseHash("#/import/fanfic")).toEqual({ page: "import", tab: "fanfic" });
     });
 
     it("decodes encoded serviceId", () => {
@@ -69,6 +89,10 @@ describe("hash route", () => {
       expect(routeToHash({ page: "book-settings", bookId: "novel-1" })).toBe("#/book/novel-1/settings");
     });
 
+    it("chapter -> #/book/{id}/chapters/{num}", () => {
+      expect(routeToHash({ page: "chapter", bookId: "novel-1", chapterNumber: 7 })).toBe("#/book/novel-1/chapters/7");
+    });
+
     it("encodes Chinese bookId", () => {
       const hash = routeToHash({ page: "book", bookId: "九龙城夜行" });
       expect(hash).toContain("#/book/");
@@ -83,8 +107,16 @@ describe("hash route", () => {
       expect(routeToHash({ page: "services" })).toBe("#/services");
     });
 
+    it("project-settings -> #/settings", () => {
+      expect(routeToHash({ page: "project-settings" })).toBe("#/settings");
+    });
+
     it("service-detail -> #/services/{id}", () => {
       expect(routeToHash({ page: "service-detail", serviceId: "openai" })).toBe("#/services/openai");
+    });
+
+    it("import tab -> #/import/{tab}", () => {
+      expect(routeToHash({ page: "import", tab: "chapters" })).toBe("#/import/chapters");
     });
 
     it("encodes Chinese serviceId", () => {
@@ -93,9 +125,9 @@ describe("hash route", () => {
       expect(decodeURIComponent(hash)).toContain("自定义");
     });
 
-    it("non-hash pages return empty string", () => {
-      expect(routeToHash({ page: "daemon" })).toBe("");
-      expect(routeToHash({ page: "logs" })).toBe("");
+    it("utility pages have stable hashes", () => {
+      expect(routeToHash({ page: "daemon" })).toBe("#/daemon");
+      expect(routeToHash({ page: "logs" })).toBe("#/logs");
     });
   });
 });

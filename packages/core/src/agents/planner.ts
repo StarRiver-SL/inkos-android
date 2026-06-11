@@ -16,11 +16,6 @@ import {
   gatherPlanningMaterials,
   loadPlanningSeedMaterials,
 } from "../utils/planning-materials.js";
-import {
-  buildPlannerContextBudget,
-  compactPlanningTextForChapter,
-  type PlannerContextCompaction,
-} from "../utils/planner-context-budget.js";
 import { parseMemo, PlannerParseError } from "../utils/chapter-memo-parser.js";
 import {
   buildPlannerUserMessage,
@@ -59,38 +54,19 @@ export interface PlanChapterOutput {
 
 const MEMO_RETRY_LIMIT = 3;
 
-function correctMemoFrontmatterChapter(raw: string, expectedChapter: number): string | undefined {
-  const trimmed = raw.trim();
-  const match = trimmed.match(/^(---\s*\n)([\s\S]*?)(\n---\s*\n[\s\S]*)$/);
-  if (!match) return undefined;
-
-  const frontmatter = match[2]!;
-  if (!/^\s*chapter\s*:/m.test(frontmatter)) return undefined;
-
-  const correctedFrontmatter = frontmatter.replace(
-    /^\s*chapter\s*:\s*.+$/m,
-    `chapter: ${expectedChapter}`,
-  );
-  return `${match[1]}${correctedFrontmatter}${match[3]}`;
-}
-
-function isChapterMismatch(error: PlannerParseError): boolean {
-  return /^chapter mismatch: expected \d+, got \d+$/.test(error.message);
-}
-
 /**
  * Phase 3 planner.
  *
  * Produces:
  *   - a simplified ChapterIntent (goal + outline + keep/avoid/style) —
  *     still deterministic, used for retrieval hints and the intent markdown.
- *   - a full ChapterMemo (YAML frontmatter + 7-section markdown body) via
- *     LLM call + strict parser.
+ *   - a full ChapterMemo (plain markdown sections) via LLM call + strict
+ *     parser.
  *
  * Retry policy: up to 3 attempts. Each failed parse appends an error
- * feedback block to the user message and re-invokes the LLM. On the third
- * failure we surface `PlannerParseError` — never silently truncate or
- * rename fields.
+ * feedback block to the user message and re-invokes the LLM. If all attempts
+ * fail, the planner emits a degraded but valid memo with an explicit warning
+ * instead of crashing the whole chapter pipeline.
  */
 export class PlannerAgent extends BaseAgent {
   get name(): string {
@@ -236,52 +212,28 @@ export class PlannerAgent extends BaseAgent {
       ? "Fix and re-emit."
       : "请修正后重新输出。";
 
-    const budget = buildPlannerContextBudget();
-    const compactions: PlannerContextCompaction[] = [];
-    const compact = (label: string, text: string, maxChars: number): string => {
-      const result = compactPlanningTextForChapter(text, {
-        label,
-        maxChars,
-        chapterNumber: input.chapterNumber,
-        goal: input.fallbackGoal,
-        language,
-      });
-      if (result.compaction) compactions.push(result.compaction);
-      return result.text;
-    };
-
     const userMessage = buildPlannerUserMessage({
       chapterNumber: input.chapterNumber,
       previousChapterEndingExcerpt: input.previousEndingExcerpt?.trim()
-        ? compact("previousEndingExcerpt", input.previousEndingExcerpt.trim(), budget.previousEndingExcerpt)
+        ? input.previousEndingExcerpt.trim()
         : noPriorChapter,
-      recentSummaries: compact("recentSummaries", formatRecentSummaries(input.chapterSummariesRaw, input.chapterNumber, 3), budget.recentSummaries),
-      currentArcProse: compact("currentArcProse", composeCurrentArcProse(subplotBoard, emotionalArcs, input.chapterNumber), budget.currentArcProse),
-      protagonistMatrixRow: compact("protagonistMatrixRow", extractProtagonistRow(characterMatrix), budget.protagonistMatrixRow),
-      opponentRows: compact("opponentRows", extractOpponentRows(characterMatrix, 3), budget.opponentRows),
-      collaboratorRows: compact("collaboratorRows", extractCollaboratorRows(characterMatrix, 3), budget.collaboratorRows),
-      relevantThreads: compact("relevantThreads", extractRelevantThreads(pendingHooks, subplotBoard), budget.relevantThreads),
-      recyclableHooks: compact(
-        "recyclableHooks",
-        formatRecyclableHooks(
-          input.recyclableHooks ?? [],
-          input.chapterNumber,
-          language,
-        ),
-        budget.recyclableHooks,
+      recentSummaries: formatRecentSummaries(input.chapterSummariesRaw, input.chapterNumber, 3),
+      currentArcProse: composeCurrentArcProse(subplotBoard, emotionalArcs, input.chapterNumber),
+      protagonistMatrixRow: extractProtagonistRow(characterMatrix),
+      opponentRows: extractOpponentRows(characterMatrix, 3),
+      collaboratorRows: extractCollaboratorRows(characterMatrix, 3),
+      relevantThreads: extractRelevantThreads(pendingHooks, subplotBoard),
+      recyclableHooks: formatRecyclableHooks(
+        input.recyclableHooks ?? [],
+        input.chapterNumber,
+        language,
       ),
       isGoldenOpening: input.isGoldenOpening,
-      bookRulesRelevant: bookRulesRaw.trim().length > 0 ? compact("bookRulesRelevant", bookRulesRaw.trim(), budget.bookRulesRelevant) : noBookRules,
-      brief: compact("brief", input.brief ?? "", budget.brief),
-      chapterContext: compact("chapterContext", input.chapterContext ?? "", budget.chapterContext),
+      bookRulesRelevant: bookRulesRaw.trim().length > 0 ? bookRulesRaw.trim() : noBookRules,
+      brief: input.brief ?? "",
+      chapterContext: input.chapterContext ?? "",
       language,
     });
-    if (compactions.length > 0) {
-      const detail = compactions
-        .map((item) => `${item.label}:${item.originalChars}->${item.compactedChars}`)
-        .join(", ");
-      this.log?.info?.(`[planner] compacted planning context for chapter ${input.chapterNumber}: ${detail}`);
-    }
 
     const systemPrompt = getPlannerMemoSystemPrompt(language);
 
@@ -303,32 +255,109 @@ export class PlannerAgent extends BaseAgent {
         if (!(error instanceof PlannerParseError)) {
           throw error;
         }
-
-        if (isChapterMismatch(error)) {
-          const corrected = correctMemoFrontmatterChapter(response.content, input.chapterNumber);
-          if (corrected) {
-            try {
-              const memo = parseMemo(corrected, input.chapterNumber, input.isGoldenOpening);
-              this.log?.warn(
-                `[planner] memo chapter frontmatter corrected after model mismatch: ${error.message}`,
-              );
-              return memo;
-            } catch {
-              // Keep the original parse error for the retry feedback below.
-            }
-          }
-        }
-
         lastError = error;
         this.log?.warn(`[planner] memo parse failed (attempt ${attempt + 1}/${MEMO_RETRY_LIMIT}): ${error.message}`);
-        const chapterReminder = language === "en"
-          ? `The YAML frontmatter chapter field MUST be exactly ${input.chapterNumber}; do not reuse a previous/example chapter number. Re-emit every required markdown heading verbatim, including "## Do not"; if there are no extra prohibitions, write "none" under it.`
-          : `YAML frontmatter 的 chapter 字段必须精确写 ${input.chapterNumber}，不要沿用上一章或示例章号。必须逐字重新输出所有必填 markdown 标题，包括 "## 不要做"；如果没有额外禁忌，就在该标题下写"无"。`;
-        currentUserMessage = `${userMessage}\n\n${retryFeedbackHeader}\n${error.message}\n${chapterReminder}\n${retryFeedbackTrailer}`;
+        currentUserMessage = `${userMessage}\n\n${retryFeedbackHeader}\n${error.message}\n${retryFeedbackTrailer}`;
       }
     }
 
-    throw lastError ?? new PlannerParseError("memo planner exhausted retries without a specific error");
+    const fallbackError = lastError ?? new PlannerParseError("memo planner exhausted retries without a specific error");
+    this.log?.warn(`[planner] memo planner fell back after ${MEMO_RETRY_LIMIT} attempts: ${fallbackError.message}`);
+    return parseMemo(
+      this.buildFallbackMemoMarkdown({
+        chapterNumber: input.chapterNumber,
+        isGoldenOpening: input.isGoldenOpening,
+        fallbackGoal: input.fallbackGoal,
+        errorMessage: fallbackError.message,
+        language,
+      }),
+      input.chapterNumber,
+      input.isGoldenOpening,
+    );
+  }
+
+  private buildFallbackMemoMarkdown(input: {
+    readonly chapterNumber: number;
+    readonly isGoldenOpening: boolean;
+    readonly fallbackGoal: string;
+    readonly errorMessage: string;
+    readonly language: "zh" | "en";
+  }): string {
+    if (input.language === "en") {
+      return [
+        `# Chapter ${input.chapterNumber} memo`,
+        "",
+        "## Chapter goal",
+        input.fallbackGoal || `Continue chapter ${input.chapterNumber} according to the current outline`,
+        "",
+        "## Thread refs",
+        "none",
+        "",
+        "## Current task",
+        `Use the current chapter goal and authoritative book context to continue chapter ${input.chapterNumber} without inventing a new direction.`,
+        "",
+        "## What the reader is waiting for right now",
+        "Keep the reader's active expectation from the outline and previous chapter in focus; do not replace it with a generic scene.",
+        "",
+        "## To pay off / to keep buried",
+        "Pay off only the near-term promises already supported by context; keep larger secrets buried unless the outline explicitly asks for them.",
+        "",
+        "## What the slow / transitional beats carry",
+        "If a slower beat is needed, make it carry pressure, evidence, relationship movement, or a concrete setup for the next action.",
+        "",
+        "## Three-question check on the key choice",
+        "The protagonist's main choice must have a reason, match current interest, and stay consistent with the established persona.",
+        "",
+        "## Required end-of-chapter change",
+        "End with a concrete change in information, pressure, relationship, objective, or risk so the chapter is not only summary.",
+        "",
+        "## Hook ledger for this chapter",
+        "advance: keep the active promise moving; resolve: only settle what has evidence; defer: preserve larger threads for later chapters.",
+        "",
+        "## Do not",
+        "Do not contradict established facts, ignore the user's current instruction, or turn the fallback memo into a new outline.",
+        "",
+        "## Planner warning",
+        `The model failed to produce a valid chapter memo after ${MEMO_RETRY_LIMIT} attempts. Last parser error: ${input.errorMessage}`,
+      ].join("\n");
+    }
+
+    return [
+      `# 第 ${input.chapterNumber} 章 memo`,
+      "",
+      "## 本章目标",
+      input.fallbackGoal || `按当前大纲继续推进第 ${input.chapterNumber} 章`,
+      "",
+      "## 关联线索",
+      "无",
+      "",
+      "## 当前任务",
+      `沿用当前章节目标和权威设定推进第 ${input.chapterNumber} 章，不临时改方向，也不把章节写成泛泛过渡。`,
+      "",
+      "## 读者此刻在等什么",
+      "延续大纲和上一章形成的读者期待，优先回应当前已经建立的压力、证据、关系或目标变化。",
+      "",
+      "## 该兑现的 / 暂不掀的",
+      "只兑现已有上下文支撑的近端承诺；更大的秘密、身份、幕后主使或终局信息，除非大纲明确要求，否则继续压住。",
+      "",
+      "## 日常/过渡承担什么任务",
+      "如果需要日常或过渡，它必须承担压力、证据、人物关系、目标变化或下一步行动铺垫，不能只是闲聊和气氛。",
+      "",
+      "## 关键抉择过三连问",
+      "主角本章的关键选择必须有原因、符合当前利益，并且不背离已经建立的人设和行为逻辑。",
+      "",
+      "## 章尾必须发生的改变",
+      "章尾至少要在信息、压力、关系、目标或风险上发生一个明确变化，避免只有剧情摘要没有推进。",
+      "",
+      "## 本章 hook 账",
+      "advance: 推进当前活跃承诺；resolve: 只结清已有证据支撑的线索；defer: 大线继续保留到更合适的位置。",
+      "",
+      "## 不要做",
+      "不要违背既成事实，不要无视用户当前指令，不要把 fallback memo 当成新大纲重写整本书。",
+      "",
+      "## Planner warning",
+      `模型连续 ${MEMO_RETRY_LIMIT} 次没有产出合格章节 memo。最后一次解析错误：${input.errorMessage}`,
+    ].join("\n");
   }
 
   private isGoldenOpeningChapter(language: string | undefined, chapterNumber: number): boolean {

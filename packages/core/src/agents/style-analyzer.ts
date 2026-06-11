@@ -15,13 +15,27 @@ const RHETORICAL_PATTERNS: ReadonlyArray<{ readonly name: string; readonly regex
   { name: "短句节奏", regex: /[。！？][^。！？]{1,8}[。！？]/g },
 ];
 
+// Common rhetorical patterns in English fiction
+const EN_RHETORICAL_PATTERNS: ReadonlyArray<{ readonly name: string; readonly regex: RegExp }> = [
+  { name: "simile (like/as if)", regex: /\b(?:like a|like an|as if|as though)\b/gi },
+  { name: "rhetorical question", regex: /\b(?:how could|why would|what if|wasn't it|isn't it|could it be)\b[^.!?]*\?/gi },
+  { name: "tricolon", regex: /\b\w+,\s+\w+,\s+and\s+\w+\b/gi },
+  { name: "short punchy rhythm", regex: /[.!?]\s+[A-Z][^.!?]{1,24}[.!?]/g },
+];
+
 /**
  * Analyze a reference text and extract its style profile.
  * The returned profile can be serialized to style_profile.json.
  */
-export function analyzeStyle(text: string, sourceName?: string): StyleProfile {
+export function analyzeStyle(
+  text: string,
+  sourceName?: string,
+  language: "zh" | "en" = "zh",
+): StyleProfile {
+  const isEn = language === "en";
+
   const sentences = text
-    .split(/[。！？\n]/)
+    .split(isEn ? /[.!?\n]+/ : /[。！？\n]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
@@ -30,8 +44,12 @@ export function analyzeStyle(text: string, sourceName?: string): StyleProfile {
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
 
+  // Measure length in the language's native unit: words for English, characters for Chinese.
+  const measure = (s: string): number =>
+    isEn ? (s.match(/[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?/g)?.length ?? 0) : s.replace(/\s+/g, "").length;
+
   // Sentence length stats
-  const sentenceLengths = sentences.map((s) => s.length);
+  const sentenceLengths = sentences.map(measure);
   const avgSentenceLength = sentenceLengths.length > 0
     ? sentenceLengths.reduce((a, b) => a + b, 0) / sentenceLengths.length
     : 0;
@@ -43,39 +61,44 @@ export function analyzeStyle(text: string, sourceName?: string): StyleProfile {
     : 0;
 
   // Paragraph length stats
-  const paragraphLengths = paragraphs.map((p) => p.length);
+  const paragraphLengths = paragraphs.map(measure);
   const avgParagraphLength = paragraphLengths.length > 0
     ? paragraphLengths.reduce((a, b) => a + b, 0) / paragraphLengths.length
     : 0;
   const minParagraph = paragraphLengths.length > 0 ? Math.min(...paragraphLengths) : 0;
   const maxParagraph = paragraphLengths.length > 0 ? Math.max(...paragraphLengths) : 0;
 
-  // Vocabulary diversity (TTR — Type-Token Ratio)
-  // Use character-level for Chinese (each char is roughly a "token")
-  const chars = text.replace(/[\s\n\r，。！？、：；""''（）【】《》\d]/g, "");
-  const uniqueChars = new Set(chars);
-  const vocabularyDiversity = chars.length > 0 ? uniqueChars.size / chars.length : 0;
+  // Vocabulary diversity (TTR — Type-Token Ratio): word-level for English, character-level for Chinese.
+  let vocabularyDiversity: number;
+  if (isEn) {
+    const words = text.toLowerCase().match(/[a-z0-9]+(?:'[a-z0-9]+)?/g) ?? [];
+    vocabularyDiversity = words.length > 0 ? new Set(words).size / words.length : 0;
+  } else {
+    const chars = text.replace(/[\s\n\r，。！？、：；""''（）【】《》\d]/g, "");
+    vocabularyDiversity = chars.length > 0 ? new Set(chars).size / chars.length : 0;
+  }
 
-  // Top sentence opening patterns (first 2 chars)
+  // Top sentence opening patterns: first word for English, first 2 chars for Chinese.
   const openingCounts: Record<string, number> = {};
   for (const s of sentences) {
-    if (s.length >= 2) {
-      const opening = s.slice(0, 2);
-      openingCounts[opening] = (openingCounts[opening] ?? 0) + 1;
-    }
+    const key = isEn
+      ? (s.match(/[A-Za-z']+/)?.[0]?.toLowerCase() ?? "")
+      : (s.length >= 2 ? s.slice(0, 2) : "");
+    if (key) openingCounts[key] = (openingCounts[key] ?? 0) + 1;
   }
   const topPatterns = Object.entries(openingCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .filter(([, count]) => count >= 3)
-    .map(([pattern, count]) => `${pattern}...(${count}次)`);
+    .map(([pattern, count]) => (isEn ? `${pattern}… (${count})` : `${pattern}...(${count}次)`));
 
   // Rhetorical features
+  const rhetoricalPatterns = isEn ? EN_RHETORICAL_PATTERNS : RHETORICAL_PATTERNS;
   const rhetoricalFeatures: string[] = [];
-  for (const { name, regex } of RHETORICAL_PATTERNS) {
+  for (const { name, regex } of rhetoricalPatterns) {
     const matches = text.match(regex);
     if (matches && matches.length >= 2) {
-      rhetoricalFeatures.push(`${name}(${matches.length}处)`);
+      rhetoricalFeatures.push(isEn ? `${name} (${matches.length})` : `${name}(${matches.length}处)`);
     }
   }
 

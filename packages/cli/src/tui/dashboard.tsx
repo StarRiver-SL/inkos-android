@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   appendInteractionMessage,
-  routeNaturalLanguageIntent,
-  type InteractionIntentType,
   type InteractionSession,
 } from "@actalk/inkos-core";
 import { Box, Text, useApp, useInput } from "ink";
@@ -175,14 +173,13 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
     cursor: null,
     draft: "",
   });
-  const [activityIntent, setActivityIntent] = useState<InteractionIntentType | "unknown">("unknown");
   const [activityFrameIndex, setActivityFrameIndex] = useState(0);
   const [chatDepth, setChatDepth] = useState<ChatDepth>("normal");
   const assistantDraftTimestampRef = useRef<number | null>(null);
   const submitLockRef = useRef(false);
   const slashSuggestions = getSlashSuggestions(inputValue, SLASH_COMMANDS);
   const inputHistory = buildInputHistory(session.messages);
-  const activity = describeActivityState(activityIntent, copy);
+  const activity = describeActivityState(copy);
   const chatDepthProfile = resolveChatDepthProfile(chatDepth);
   const composerCaret = resolveComposerCaretState({
     inputValue,
@@ -349,25 +346,15 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
       }
 
       const activeBookId = await resolveSessionActiveBook(props.projectRoot, session);
-      const routed = routeNaturalLanguageIntent(input, {
-        activeBookId,
-        hasCreationDraft: Boolean(session.creationDraft),
-        hasFailed: session.currentExecution?.status === "failed",
-      });
       const userTimestamp = Date.now();
       const assistantDraftTimestamp = userTimestamp + 1;
       assistantDraftTimestampRef.current = assistantDraftTimestamp;
-      setActivityIntent(routed.intent);
       setIsSubmitting(true);
       setLastError(undefined);
       setInputValue("");
       setScrollOffset(0);
       setHistoryState({ cursor: null, draft: "" });
       setSession((current) => createOptimisticUserMessageSession(current, input, userTimestamp));
-
-      if (routed.intent === "develop_book" && !session.creationDraft) {
-        appendSystemNote(copy.notes.newBookGuide);
-      }
 
       const result = await processTuiAgentInput({
         projectRoot: props.projectRoot,
@@ -387,7 +374,6 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
     } finally {
       assistantDraftTimestampRef.current = null;
       setIsSubmitting(false);
-      setActivityIntent("unknown");
       submitLockRef.current = false;
     }
   };

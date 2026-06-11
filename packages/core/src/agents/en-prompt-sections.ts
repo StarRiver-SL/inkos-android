@@ -32,7 +32,21 @@ export function buildEnglishCoreRules(_book: BookConfig): string {
 16. **Promise and payoff**: Every planted hook must be resolved. Every mystery must have an answer.
 17. **Escalation**: Each conflict should feel higher-stakes than the last—either externally or emotionally.
 18. **Reader proxy**: One character should react with surprise/excitement/fear when remarkable things happen, giving readers permission to feel the same.
-19. **Pacing breathing room**: After a high-intensity sequence, give 0.5-1 chapter of lower intensity before the next escalation.`;
+19. **Pacing breathing room**: After a high-intensity sequence, give 0.5-1 chapter of lower intensity before the next escalation.
+
+### Beat Density & Rhythm (hard ruler)
+- **A payoff beat roughly every ~200 words**: a small win, a sharp line, a reversal, a charged exchange, an emotional tug. The page should never go flat for long.
+- **A forward hook roughly every ~350 words**: a small "what happens next?" pull. You don't have to resolve it, you have to plant it.
+- **A full setup → tension → unresolved arc every ~700-1000 words**: give the reader a concrete reason to keep going.
+- No stretch of ~200+ words that is pure description, backstory, or interior monologue without advancing the chapter goal or creating a beat. If it doesn't pull, cut it or rewrite it.
+- **Density comes from semantic weight inside paragraphs, not from chopping them up.** Most narrative (non-dialogue) paragraphs should carry real weight — a few sentences, roughly 30-100 words. Dialogue lines are naturally short and do not count as "short paragraphs."
+- **One-line paragraphs are punctuation, not default rhythm.** Reserve them for: (1) an opening reversal line, (2) the final cliffhanger line, (3) a rare hammer-blow beat. Cap at ~5 per chapter.
+- **Never stack 3+ one-line paragraphs in a row.** After two short beats, the next paragraph must be a full narrative paragraph that re-gathers the action, detail, or emotion and resets the reader's breathing.
+
+### Chapter Cut (80/20 cliffhanger, hard ruler)
+- **Never finish the chapter's story inside the chapter.** Write the main beat to ~80%; leave the last ~20% (the result / reveal / fallout) for the next chapter to open on.
+- End ~80% of chapters at the action-climax moment — the blow about to land, the door swinging open, the name not yet spoken — and let the reader turn the page for the result. The other ~20% may close on a beat of earned calm.
+- **Structure outranks word count.** Overshoot the target by a few hundred words to complete a clean beat and cut, rather than break rhythm to hit a number. Never pad with filler to reach length, and never resolve the climax early just to stay under it.`;
 }
 
 // English equivalent of buildAntiAIExamples()

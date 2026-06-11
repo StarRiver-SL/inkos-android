@@ -3,7 +3,6 @@ import { fetchJson } from "../../hooks/use-api";
 import { useChatStore } from "../../store/chat";
 import { SidebarCard } from "./SidebarCard";
 import { cn } from "../../lib/utils";
-import { loadArtifactContent, prefetchArtifactContents } from "./artifact-content-cache";
 
 interface ChapterMeta {
   number: number;
@@ -11,8 +10,6 @@ interface ChapterMeta {
   status: string;
   wordCount: number;
 }
-
-const chaptersCache = new Map<string, ReadonlyArray<ChapterMeta>>();
 
 const STATUS_INDICATOR: Record<string, { symbol: string; color: string }> = {
   approved: { symbol: "✓", color: "text-emerald-500" },
@@ -28,44 +25,19 @@ interface ChaptersSectionProps {
 }
 
 export function ChaptersSection({ bookId, isZh }: ChaptersSectionProps) {
-  const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>(
-    () => chaptersCache.get(bookId) ?? [],
-  );
+  const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
 
   useEffect(() => {
-    let ignore = false;
-    const cached = chaptersCache.get(bookId);
-    if (cached) {
-      setChapters(cached);
-    }
-
     fetchJson<{ chapters: ChapterMeta[] }>(`/books/${bookId}`)
-      .then((data) => {
-        if (ignore) return;
-        const nextChapters = data.chapters ?? [];
-        chaptersCache.set(bookId, nextChapters);
-        setChapters(nextChapters);
-        prefetchArtifactContents(
-          bookId,
-          nextChapters.map((chapter) => ({ type: "chapter", chapter: chapter.number })),
-        );
-      })
-      .catch(() => {
-        if (!ignore && !chaptersCache.has(bookId)) {
-          setChapters([]);
-        }
-      });
-
-    return () => {
-      ignore = true;
-    };
+      .then((data) => setChapters(data.chapters))
+      .catch(() => setChapters([]));
   }, [bookId, bookDataVersion]);
 
   return (
     <SidebarCard title={isZh ? "章节" : "Chapters"}>
       {chapters.length === 0 ? (
-        <p className="text-xs text-muted-foreground/50 italic">
+        <p className="text-[15px] leading-6 text-muted-foreground/50 italic">
           {isZh ? "暂无章节" : "No chapters"}
         </p>
       ) : (
@@ -76,15 +48,12 @@ export function ChaptersSection({ bookId, isZh }: ChaptersSectionProps) {
               <li
                 key={`${ch.number}-${ch.title ?? ""}`}
                 onClick={() => useChatStore.getState().openChapterArtifact(ch.number)}
-                onFocus={() => void loadArtifactContent(bookId, { type: "chapter", chapter: ch.number })}
-                onMouseEnter={() => void loadArtifactContent(bookId, { type: "chapter", chapter: ch.number })}
-                onPointerDown={() => void loadArtifactContent(bookId, { type: "chapter", chapter: ch.number })}
-                className="flex items-center gap-2 py-0.5 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors rounded px-1 -mx-1 hover:bg-secondary/50">
-                <span className={cn("text-[10px] shrink-0", ind.color)}>{ind.symbol}</span>
+                className="flex items-center gap-2 py-1 text-[15px] leading-6 text-muted-foreground cursor-pointer hover:text-foreground transition-colors rounded px-1 -mx-1 hover:bg-secondary/50">
+                <span className={cn("text-[13px] shrink-0", ind.color)}>{ind.symbol}</span>
                 <span className="truncate flex-1">
                   {String(ch.number).padStart(2, "0")} {ch.title || (isZh ? `第${ch.number}章` : `Chapter ${ch.number}`)}
                 </span>
-                <span className="tabular-nums text-[10px] text-muted-foreground/50 shrink-0">
+                <span className="tabular-nums text-[13px] text-muted-foreground/50 shrink-0">
                   {(ch.wordCount ?? 0).toLocaleString()}
                 </span>
               </li>

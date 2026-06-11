@@ -1,7 +1,7 @@
 import type { AuditIssue } from "../agents/continuity.js";
 import type { HookRecord, RuntimeStateDelta } from "../models/runtime-state.js";
 import { classifyHookDisposition, collectStaleHookDebt } from "./hook-governance.js";
-import { describeHookLifecycle, localizeHookPayoffTiming } from "./hook-lifecycle.js";
+import { describeHookLifecycle, localizeHookPayoffTiming, normalizeStoredHookStatus } from "./hook-lifecycle.js";
 import { HOOK_HEALTH_DEFAULTS } from "./hook-policy.js";
 
 export function analyzeHookHealth(params: {
@@ -22,7 +22,10 @@ export function analyzeHookHealth(params: {
   const newHookBurstThreshold = params.newHookBurstThreshold ?? HOOK_HEALTH_DEFAULTS.newHookBurstThreshold;
   const issues: AuditIssue[] = [];
 
-  const activeHooks = params.hooks.filter((hook) => hook.status !== "resolved");
+  const activeHooks = params.hooks.filter((hook) => {
+    const status = normalizeStoredHookStatus(hook.status);
+    return status !== "resolved" && status !== "deferred";
+  });
   const lifecycleEntries = activeHooks.map((hook) => ({
     hook,
     lifecycle: describeHookLifecycle({

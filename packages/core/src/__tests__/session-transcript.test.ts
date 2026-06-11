@@ -10,7 +10,7 @@ import {
   readTranscriptEvents,
   transcriptPath,
 } from "../interaction/session-transcript.js";
-import { restoreAgentMessagesFromTranscript } from "../interaction/session-transcript-restore.js";
+import { deriveBookSessionFromTranscript, restoreAgentMessagesFromTranscript } from "../interaction/session-transcript-restore.js";
 import type {
   MessageEvent,
   RequestCommittedEvent,
@@ -186,10 +186,57 @@ describe("session transcript codec", () => {
     ]);
   });
 
+  it("appendManualSessionMessages can persist manual tool executions for Studio replay", async () => {
+    await appendManualSessionMessages(projectRoot, "s-tool", [{
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: "anthropic-messages",
+      provider: "openai",
+      model: "fake",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: 10,
+    }], "start play", {
+      sessionKind: "play",
+      legacyDisplay: {
+        toolExecutions: [{
+          id: "play-1",
+          tool: "play_start",
+          label: "启动互动世界",
+          status: "completed",
+          details: { kind: "play_world_started", suggestedActions: ["开门"] },
+          startedAt: 1,
+          completedAt: 2,
+        }],
+      },
+    });
+
+    const session = await deriveBookSessionFromTranscript(projectRoot, "s-tool");
+    expect(session?.messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: "",
+        toolExecutions: [
+          expect.objectContaining({
+            tool: "play_start",
+            details: expect.objectContaining({ suggestedActions: ["开门"] }),
+          }),
+        ],
+      }),
+    ]);
+  });
+
   it("从 core index 导出 transcript helper", async () => {
     const core = await import("../index.js");
     expect(typeof core.readTranscriptEvents).toBe("function");
     expect(typeof core.restoreAgentMessagesFromTranscript).toBe("function");
     expect(typeof core.TranscriptEventSchema.safeParse).toBe("function");
-  });
+  }, 15_000);
 });

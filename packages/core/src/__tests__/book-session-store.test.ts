@@ -99,6 +99,40 @@ describe("book-session-store", () => {
       expect(raw).not.toContain("保留问题");
     });
 
+    it("deletes only the selected assistant message from one request", async () => {
+      const session = createBookSession("book");
+      await persistBookSession(tempDir, session);
+      await appendManualSessionMessages(tempDir, session.sessionId, [
+        { role: "user", content: "继续", timestamp: 100 } as never,
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "第一段回答" }],
+          api: "anthropic-messages",
+          provider: "test",
+          model: "test",
+          timestamp: 200,
+        } as never,
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "第二段回答" }],
+          api: "anthropic-messages",
+          provider: "test",
+          model: "test",
+          timestamp: 201,
+        } as never,
+      ]);
+
+      await deleteBookSessionMessage(tempDir, session.sessionId, {
+        role: "assistant",
+        content: "第一段回答",
+        timestamp: 200,
+        messageIndex: 1,
+      });
+
+      expect((await loadBookSession(tempDir, session.sessionId))?.messages.map((message) => message.content))
+        .toEqual(["继续", "第二段回答"]);
+    });
+
     it("createBookSession initializes title as null", () => {
       const session = createBookSession("book");
       expect(session.title).toBeNull();
@@ -195,6 +229,16 @@ describe("book-session-store", () => {
       await expect(readFile(join(tempDir, ".inkos", "sessions", "123456-abcdef.json"), "utf-8"))
         .rejects
         .toThrow();
+    });
+
+    it("persists and restores playMode for play sessions", async () => {
+      const session = await createAndPersistBookSession(tempDir, null, "123456-playmd", "play", { playMode: "guided" });
+
+      expect(session.playMode).toBe("guided");
+      const loaded = await loadBookSession(tempDir, "123456-playmd");
+      expect(loaded?.playMode).toBe("guided");
+      const list = await listBookSessions(tempDir, null);
+      expect(list.find((item) => item.sessionId === "123456-playmd")?.playMode).toBe("guided");
     });
 
     it("does not duplicate session_created when explicit session creation races", async () => {

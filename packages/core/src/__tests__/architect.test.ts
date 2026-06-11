@@ -409,6 +409,72 @@ describe("ArchitectAgent", () => {
     expect(result.pendingHooks).toContain("| H13 | 22 | 舆情操盘 | 待推进 | 0 | 51-60章 | 中程 | 无 |  | 否 |  | 否 | 庄蔓出场后逐步揭露（初始线索：一家自媒体公司在多个旧案节点同步接单） |");
   });
 
+  it("keeps chapter-zero seed hooks dormant even when the model labels them open", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const book: BookConfig = {
+      id: "seed-book",
+      title: "地下站台",
+      platform: "tomato",
+      genre: "urban",
+      status: "active",
+      targetChapters: 80,
+      chapterWordCount: 2000,
+      language: "zh",
+      createdAt: "2026-03-25T00:00:00.000Z",
+      updatedAt: "2026-03-25T00:00:00.000Z",
+    };
+
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: [
+          "=== SECTION: story_frame ===",
+          "# 故事框架",
+          "主角在地下站台追查失踪案。",
+          "",
+          "=== SECTION: volume_map ===",
+          "# 卷纲",
+          "第一卷追出站台背后的旧案。",
+          "",
+          "=== SECTION: roles ===",
+          "---ROLE---",
+          "tier: major",
+          "name: 林渡",
+          "---CONTENT---",
+          "## 当前现状",
+          "他在站台值夜班。",
+          "",
+          "=== SECTION: book_rules ===",
+          "## 主角",
+          "- 名字：林渡",
+          "",
+          "=== SECTION: pending_hooks ===",
+          "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 上游依赖 | 回收卷 | 核心 | 半衰期 | 备注 |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| H00 | 0 | 初始状态 | open | 0 | 终局揭开站台旧案 | 慢烧 | 无 | 终卷 | false |  | 站台广播会在无人时自动报出失踪者名字 |",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    const result = await agent.generateFoundation(book);
+
+    expect(result.pendingHooks).toContain("| H00 | 0 | 初始状态 | 暂缓 | 0 | 终局揭开站台旧案 | 慢烧 | 无 | 终卷 | 否 |  | 否 | 站台广播会在无人时自动报出失踪者名字 |");
+  });
+
   it("accepts section labels with spacing and punctuation drift from non-strict models", async () => {
     const agent = new ArchitectAgent({
       client: {
@@ -470,7 +536,7 @@ describe("ArchitectAgent", () => {
     expect(result.volumeOutline).toBe("# 卷纲");
     expect(result.bookRules).toContain("version: \"1.0\"");
     expect(result.currentState).toBe("# 当前状态");
-    expect(result.pendingHooks).toContain("| H01 | 1 | mystery | open | 0 | 10章 | 中程 | 无 |  | 否 |  | 否 | 初始钩子 |");
+    expect(result.pendingHooks).toContain("| H01 | 1 | mystery | 暂缓 | 0 | 10章 | 中程 | 无 |  | 否 |  | 否 | 初始钩子 |");
   });
 
   it("throws when a required foundation section is missing", async () => {

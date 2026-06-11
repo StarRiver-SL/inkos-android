@@ -3,6 +3,11 @@ import { AutomationModeSchema, type AutomationMode } from "./modes.js";
 import { ExecutionStateSchema, InteractionEventSchema, type InteractionEvent } from "./events.js";
 import { assertSafeBookId, isSafeBookId } from "../utils/book-id.js";
 
+export const SessionKindSchema = z.enum(["chat", "book-create", "book", "short", "play", "edit"]);
+export type SessionKind = z.infer<typeof SessionKindSchema>;
+export const PlayModeSchema = z.enum(["open", "guided"]);
+export type PlayMode = z.infer<typeof PlayModeSchema>;
+
 export const PendingDecisionSchema = z.object({
   kind: z.string().min(1),
   bookId: z.string().min(1),
@@ -19,17 +24,6 @@ export const PipelineStageSchema = z.object({
 
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;
 
-export const TokenUsageSnapshotSchema = z.object({
-  promptTokens: z.number().nonnegative().optional(),
-  completionTokens: z.number().nonnegative().optional(),
-  totalTokens: z.number().nonnegative(),
-  estimated: z.boolean().optional(),
-  source: z.enum(["stream", "final", "tool"]).optional(),
-  updatedAt: z.number().int().nonnegative().optional(),
-});
-
-export type TokenUsageSnapshot = z.infer<typeof TokenUsageSnapshotSchema>;
-
 export const ToolExecutionSchema = z.object({
   id: z.string(),
   tool: z.string(),
@@ -41,7 +35,6 @@ export const ToolExecutionSchema = z.object({
   details: z.unknown().optional(),
   error: z.string().optional(),
   stages: z.array(PipelineStageSchema).optional(),
-  tokenUsage: TokenUsageSnapshotSchema.optional(),
   startedAt: z.number(),
   completedAt: z.number().optional(),
 });
@@ -50,10 +43,11 @@ export type ToolExecution = z.infer<typeof ToolExecutionSchema>;
 
 export const InteractionMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
-  content: z.string().min(1),
+  // Assistant turns may be tool-only. In that case the user-facing content is
+  // rendered from toolExecutions, not from free text.
+  content: z.string(),
   thinking: z.string().optional(),
   toolExecutions: z.array(ToolExecutionSchema).optional(),
-  tokenUsage: TokenUsageSnapshotSchema.optional(),
   timestamp: z.number().int().nonnegative(),
 });
 
@@ -116,6 +110,8 @@ export type InteractionSession = z.infer<typeof InteractionSessionSchema>;
 export const BookSessionSchema = z.object({
   sessionId: z.string().min(1),
   bookId: z.string().refine(isSafeBookId, "Invalid bookId").nullable(),
+  sessionKind: SessionKindSchema.optional(),
+  playMode: PlayModeSchema.optional(),
   title: z.string().nullable().default(null),
   messages: z.array(InteractionMessageSchema).default([]),
   creationDraft: BookCreationDraftSchema.optional(),
@@ -137,12 +133,19 @@ export const GlobalSessionSchema = z.object({
 
 export type GlobalSession = z.infer<typeof GlobalSessionSchema>;
 
-export function createBookSession(bookId: string | null, sessionId?: string): BookSession {
+export function createBookSession(
+  bookId: string | null,
+  sessionId?: string,
+  sessionKind?: SessionKind,
+  options?: { readonly playMode?: PlayMode },
+): BookSession {
   const now = Date.now();
   const safeBookId = bookId === null ? null : assertSafeBookId(bookId);
   return {
     sessionId: sessionId ?? `${now}-${Math.random().toString(36).slice(2, 8)}`,
     bookId: safeBookId,
+    sessionKind,
+    ...(options?.playMode ? { playMode: options.playMode } : {}),
     title: null,
     messages: [],
     draftRounds: [],

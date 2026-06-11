@@ -38,7 +38,7 @@ describe("LengthNormalizerAgent", () => {
   it("compresses a long draft while preserving required markers", async () => {
     const agent = createAgent();
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
-      content: "压缩后的正文。".repeat(8) + "[[KEEP_ME]]",
+      content: "压缩后的正文。".repeat(22) + "[[KEEP_ME]]",
       usage: ZERO_USAGE,
     });
     const lengthSpec = LengthSpecSchema.parse({
@@ -130,7 +130,7 @@ describe("LengthNormalizerAgent", () => {
     expect(result.warning).toContain("outside");
   });
 
-  it("sets explicit maxTokens=16384 to guard against unknown-model fallback", async () => {
+  it("does not override provider output budget for large compression outputs", async () => {
     const agent = createAgent();
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
       content: "压缩后的完整正文。".repeat(200),
@@ -152,7 +152,7 @@ describe("LengthNormalizerAgent", () => {
     });
 
     const options = chatSpy.mock.calls[0]?.[1] as { maxTokens?: number } | undefined;
-    expect(options?.maxTokens).toBe(16_384);
+    expect(options?.maxTokens).toBeUndefined();
   });
 
   it("falls back to the original chapter when normalized output is truncated mid-sentence", async () => {
@@ -180,6 +180,64 @@ describe("LengthNormalizerAgent", () => {
     expect(chatSpy).toHaveBeenCalledTimes(1);
     expect(result.normalizedContent).toBe(draft);
     expect(result.warning).toContain("truncated");
+  });
+
+  it("keeps the original chapter when compression crosses below the hard minimum", async () => {
+    const agent = createAgent();
+    const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
+      content: "压缩过头。".repeat(70),
+      usage: ZERO_USAGE,
+    });
+    const lengthSpec = LengthSpecSchema.parse({
+      target: 1000,
+      softMin: 864,
+      softMax: 1136,
+      hardMin: 728,
+      hardMax: 1272,
+      countingMode: "zh_chars",
+      normalizeMode: "compress",
+    });
+    const draft = "完整场景。".repeat(300);
+
+    const result = await agent.normalizeChapter({
+      chapterContent: draft,
+      lengthSpec,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.normalizedContent).toBe(draft);
+    expect(result.finalCount).toBe(countChapterLength(draft, "zh_chars"));
+    expect(result.applied).toBe(false);
+    expect(result.warning).toContain("crossed the hard range");
+  });
+
+  it("keeps the original chapter when expansion crosses above the hard maximum", async () => {
+    const agent = createAgent();
+    const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
+      content: "扩写过头。".repeat(400),
+      usage: ZERO_USAGE,
+    });
+    const lengthSpec = LengthSpecSchema.parse({
+      target: 1000,
+      softMin: 864,
+      softMax: 1136,
+      hardMin: 728,
+      hardMax: 1272,
+      countingMode: "zh_chars",
+      normalizeMode: "expand",
+    });
+    const draft = "短。".repeat(100);
+
+    const result = await agent.normalizeChapter({
+      chapterContent: draft,
+      lengthSpec,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.normalizedContent).toBe(draft);
+    expect(result.finalCount).toBe(countChapterLength(draft, "zh_chars"));
+    expect(result.applied).toBe(false);
+    expect(result.warning).toContain("crossed the hard range");
   });
 
   it("keeps a complete in-range rewrite even when it ends without punctuation", async () => {

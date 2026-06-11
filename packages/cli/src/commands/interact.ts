@@ -1,29 +1,11 @@
 import { Command } from "commander";
 import {
-  processProjectInteractionInput,
-  type InteractionRuntimeTools,
+  PipelineRunner,
+  runAgentSession,
 } from "@actalk/inkos-core";
-import { createInteractionTools } from "../interaction/tools.js";
+import { buildPipelineConfig, createClient, findProjectRoot, loadConfig } from "../utils.js";
 
 export interface InteractCommandHooks {
-  readonly runInteraction?: (params: {
-    readonly projectRoot: string;
-    readonly input: string;
-    readonly activeBookId?: string;
-    readonly tools: InteractionRuntimeTools;
-  }) => Promise<{
-    readonly request: unknown;
-    readonly responseText?: string;
-    readonly session: {
-      readonly automationMode: string;
-      readonly activeBookId?: string;
-      readonly currentExecution?: unknown;
-      readonly pendingDecision?: unknown;
-      readonly messages: ReadonlyArray<unknown>;
-      readonly events: ReadonlyArray<unknown>;
-    };
-  }>;
-  readonly createTools?: (projectRoot: string) => Promise<InteractionRuntimeTools>;
   readonly readInput?: () => Promise<string>;
 }
 
@@ -65,45 +47,69 @@ async function readInteractionInput(
 
 export function createInteractCommand(hooks: InteractCommandHooks = {}): Command {
   return new Command("interact")
-    .description("Run a shared natural-language interaction against the current project")
+    .description("Run a natural-language agent interaction against the current project")
     .argument("[message...]", "Natural-language message")
     .option("--message <text>", "Explicit natural-language message")
     .option("--book <bookId>", "Bind a specific active book for this interaction")
+    .option("--session <sessionId>", "Reuse an agent session id")
     .option("--json", "Emit structured JSON for external agents")
     .action(async (messageArgs: ReadonlyArray<string>, opts) => {
       const input = await readInteractionInput(messageArgs, opts.message, hooks.readInput);
-      const projectRoot = process.cwd();
-      const tools = hooks.createTools
-        ? await hooks.createTools(projectRoot)
-        : hooks.runInteraction
-          ? ({} as InteractionRuntimeTools)
-          : await createInteractionTools(projectRoot, undefined, { requireApiKey: false });
-      const runInteraction = hooks.runInteraction ?? processProjectInteractionInput;
-      const result = await runInteraction({
+      const projectRoot = findProjectRoot();
+      const config = await loadConfig({ requireApiKey: false, projectRoot });
+      const client = createClient(config);
+      const bookId = typeof opts.book === "string" && opts.book.trim() ? opts.book.trim() : null;
+      const trimmed = input.trim();
+      const actionSource = trimmed.startsWith("/") ? "slash" : "free-text";
+      const requestedIntent = bookId && trimmed === "/write"
+        ? "write_next"
+        : !bookId && trimmed === "/create"
+          ? "create_book"
+          : undefined;
+      const sessionKind = bookId
+        ? "book"
+        : requestedIntent === "create_book"
+          ? "book-create"
+          : "chat";
+      const sessionId = typeof opts.session === "string" && opts.session.trim()
+        ? opts.session.trim()
+        : `cli-interact-${Date.now().toString(36)}`;
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, projectRoot, {
+        quiet: opts.json,
+      }));
+
+      const result = await runAgentSession({
+        sessionId,
+        bookId,
+        sessionKind,
+        actionSource,
+        requestedIntent,
+        language: config.language ?? "zh",
+        pipeline,
         projectRoot,
-        input,
-        activeBookId: opts.book,
-        tools,
-      });
+        model: client._piModel
+          ? client._piModel
+          : { provider: config.llm.provider ?? "openai", modelId: config.llm.model },
+        apiKey: client._apiKey,
+      }, input);
+
+      const responseText = result.responseText;
+      const session = {
+        sessionId,
+        sessionKind,
+        activeBookId: bookId ?? undefined,
+      };
 
       if (opts.json) {
         process.stdout.write(`${JSON.stringify({
-          request: result.request,
-          responseText: result.responseText,
-          session: result.session,
-          currentExecution: result.session.currentExecution ?? null,
-          pendingDecision: result.session.pendingDecision ?? null,
-          events: result.session.events,
+          responseText,
+          session,
         }, null, 2)}\n`);
         return;
       }
 
-      const text = result.responseText
-        ?? (result.session.messages.at(-1) && "content" in (result.session.messages.at(-1) as Record<string, unknown>)
-          ? String((result.session.messages.at(-1) as Record<string, unknown>).content)
-          : "");
-      if (text) {
-        process.stdout.write(`${text}\n`);
+      if (responseText) {
+        process.stdout.write(`${responseText}\n`);
       }
     });
 }

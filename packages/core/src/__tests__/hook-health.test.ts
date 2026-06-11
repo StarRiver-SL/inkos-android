@@ -50,6 +50,21 @@ describe("analyzeHookHealth", () => {
     expect(issues.some((issue) => issue.category === "Hook Debt" && issue.description.includes("5 active hooks"))).toBe(true);
   });
 
+  it("does not count dormant seed aliases as active hook debt", () => {
+    const issues = analyzeHookHealth({
+      language: "zh",
+      chapterNumber: 1,
+      hooks: [
+        createHook({ hookId: "H001", status: "未开启" as any, lastAdvancedChapter: 0 }),
+        createHook({ hookId: "H002", status: "待推进" as any, lastAdvancedChapter: 0 }),
+        createHook({ hookId: "H003", status: "dormant" as any, lastAdvancedChapter: 0 }),
+      ],
+      maxActiveHooks: 1,
+    });
+
+    expect(issues.some((issue) => issue.description.includes("活跃伏笔"))).toBe(false);
+  });
+
   it("warns when a short-payoff hook is already under payoff pressure without real movement", () => {
     const issues = analyzeHookHealth({
       language: "en",

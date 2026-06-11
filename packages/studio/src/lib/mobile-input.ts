@@ -60,6 +60,9 @@ export function mobileTextInputHandlers(
   readonly onChange: (event: FormEvent<TextElement>) => void;
 } {
   return {
-    onChange: (event) => syncTextInput(event, setter),
+    onChange: (event) => {
+      const value = event.currentTarget.value;
+      setter(value);
+    },
   };
 }

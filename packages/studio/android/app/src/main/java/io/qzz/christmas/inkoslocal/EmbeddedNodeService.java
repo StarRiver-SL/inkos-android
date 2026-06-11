@@ -128,14 +128,23 @@ public class EmbeddedNodeService extends Service {
     }
 
     private void acquireWakeLock() {
+        acquireWakeLock(3L * 60L * 1000L);
+    }
+
+    private void acquireWakeLock(long timeoutMs) {
         try {
             PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
             if (powerManager == null) {
                 return;
             }
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "InkOS:NodeRuntime");
+            if (wakeLock == null) {
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "InkOS:NodeRuntime");
+            }
             wakeLock.setReferenceCounted(false);
-            wakeLock.acquire(10L * 60L * 1000L);
+            if (wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+            wakeLock.acquire(timeoutMs);
         } catch (Exception error) {
             Log.w(TAG, "Unable to acquire InkOS Node wake lock", error);
             writeRuntimeStatus("wake-lock-skipped", error.getClass().getSimpleName() + ": " + error.getMessage());
@@ -515,19 +524,34 @@ public class EmbeddedNodeService extends Service {
         File appExternal = externalDocuments == null ? null : new File(externalDocuments, "InkOS Studio");
 
         boolean publicWritable = ensureWritableDirectory(publicDocuments);
-        if (!publicWritable) {
-            Log.w(TAG, "Forced public Documents project root is not writable yet: " + publicDocuments);
-            writeRuntimeStatus("storage-public-not-writable", "Forced project root is not writable yet: " + publicDocuments.getAbsolutePath());
+        if (publicWritable) {
+            try {
+                migrateCandidateRoots(publicDocuments, privateRoot, appExternal);
+            } catch (IOException error) {
+                Log.w(TAG, "Unable to migrate InkOS data into public Documents", error);
+                writeRuntimeStatus("storage-migration-failed", "Unable to migrate data into Documents: " + error.getMessage());
+            }
+            Log.i(TAG, "Using public Documents project root: " + publicDocuments.getAbsolutePath());
+            writeRuntimeStatus("storage-documents", "Using Documents project root: " + publicDocuments.getAbsolutePath());
+            return publicDocuments;
         }
+
+        File fallbackRoot = appExternal != null && ensureWritableDirectory(appExternal)
+            ? appExternal
+            : privateRoot;
+        ensureWritableDirectory(fallbackRoot);
+        Log.w(TAG, "Public Documents is not writable; using app-scoped project root: " + fallbackRoot);
+        writeRuntimeStatus(
+            "storage-app-scoped",
+            "Documents permission is unavailable. Using app-scoped storage: " + fallbackRoot.getAbsolutePath()
+        );
         try {
-            migrateCandidateRoots(publicDocuments, privateRoot, appExternal);
+            migrateCandidateRoots(fallbackRoot, publicDocuments, privateRoot, appExternal);
         } catch (IOException error) {
-            Log.w(TAG, "Unable to migrate InkOS data into public Documents", error);
-            writeRuntimeStatus("storage-migration-failed", "Unable to migrate data into Documents: " + error.getMessage());
+            Log.w(TAG, "Unable to merge existing InkOS data into app-scoped storage", error);
+            writeRuntimeStatus("storage-migration-warning", "Using app-scoped storage without moving existing files: " + error.getMessage());
         }
-        Log.i(TAG, "Using forced public Documents project root: " + publicDocuments.getAbsolutePath());
-        writeRuntimeStatus("storage-documents", "Using Documents project root: " + publicDocuments.getAbsolutePath());
-        return publicDocuments;
+        return fallbackRoot;
     }
 
     private void migrateCandidateRoots(File target, File... candidates) throws IOException {
@@ -1037,6 +1061,11 @@ public class EmbeddedNodeService extends Service {
         }
         lastProgressSignature = signature;
         lastProgressText = safeTitle + " · " + safeText;
+        if (busy) {
+            acquireWakeLock(60L * 60L * 1000L);
+        } else {
+            releaseWakeLock();
+        }
         updateNotification(safeTitle, safeText, busy);
     }
 

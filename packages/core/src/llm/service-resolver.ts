@@ -41,7 +41,9 @@ export async function resolveServiceModel(
     ? (customApiFormat === "responses" ? "openai-responses" : "openai-completions")
     : (preset?.api ?? "openai-completions");
   const configuredBaseUrl = customBaseUrl ?? preset?.baseUrl ?? "";
-  const endpointModel = endpoint?.models.find((model) => model.id === modelId || model.deploymentName === modelId);
+  const endpointModel = baseService === "minimax"
+    ? endpoint?.models.find((model) => model.id === modelId || model.deploymentName === modelId)
+    : undefined;
 
   // Get pi-ai Model — may return undefined for model IDs not in the built-in registry
   const piModel = getModel(piProvider as any, modelId as any) as Model<Api> | undefined;
@@ -66,7 +68,7 @@ export async function resolveServiceModel(
   }
 
   const model: Model<Api> = {
-    id: endpointModel?.deploymentName ?? modelId,
+    id: modelId,
     name: piModel?.name ?? modelId,
     api: apiType as Api,
     provider: piProvider,

@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { EPub } from "epub-gen-memory";
 
 export interface ExportStateLike {
   readonly bookDir: (bookId: string) => string;
@@ -54,18 +55,6 @@ function markdownToSimpleHtml(markdown: string): { title: string; html: string }
   return { title, html };
 }
 
-async function createEpubPayload(
-  metadata: { readonly title: string; readonly lang: string },
-  chapters: Array<{ title: string; content: string }>,
-): Promise<Buffer> {
-  if (process.env.INKOS_ANDROID === "1") {
-    throw new Error("Android local Node runtime does not support EPUB export yet. Please export TXT or Markdown.");
-  }
-  const { EPub } = await import("epub-gen-memory");
-  const epubInstance = new EPub(metadata, chapters);
-  return epubInstance.genEpub();
-}
-
 export async function buildExportArtifact(
   state: ExportStateLike,
   bookId: string,
@@ -104,6 +93,10 @@ export async function buildExportArtifact(
       const { title, html } = markdownToSimpleHtml(markdown);
       epubChapters.push({ title, content: html });
     }
+    const epubInstance = new EPub(
+      { title: book.title, lang: book.language === "en" ? "en" : "zh-CN" },
+      epubChapters,
+    );
     return {
       outputPath,
       fileName: `${bookId}.epub`,
@@ -111,10 +104,7 @@ export async function buildExportArtifact(
       totalWords,
       format,
       contentType: "application/epub+zip",
-      payload: await createEpubPayload(
-        { title: book.title, lang: book.language === "en" ? "en" : "zh-CN" },
-        epubChapters,
-      ),
+      payload: await epubInstance.genEpub(),
     };
   }
 

@@ -1,13 +1,12 @@
-import { buildApiUrl, fetchJson, useApi, postApi } from "../hooks/use-api";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { fetchJson, useApi, postApi } from "../hooks/use-api";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import type { SSEMessage } from "../hooks/use-sse";
+import type { ActiveOperation, SSEMessage } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { StudioSelect } from "../components/StudioSelect";
-import { mobileTextInputHandlers } from "../lib/mobile-input";
 import { appAlert, appPrompt } from "../lib/app-dialog";
 import {
   ChevronLeft,
@@ -27,7 +26,9 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
-  Save
+  Save,
+  Hand,
+  Settings2
 } from "lucide-react";
 
 interface ChapterMeta {
@@ -55,7 +56,6 @@ interface BookData {
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
-type WriteMode = "quick" | "full";
 
 interface Nav {
   toDashboard: () => void;
@@ -84,6 +84,25 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
 };
 
+interface BookDetailSseState {
+  readonly messages: ReadonlyArray<SSEMessage>;
+  readonly activeOperations?: ReadonlyArray<ActiveOperation>;
+}
+
+function readMessageText(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const record = data as { message?: unknown; text?: unknown };
+  if (typeof record.message === "string") return record.message;
+  if (typeof record.text === "string") return record.text;
+  return null;
+}
+
+function readMessageBookId(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const record = data as { bookId?: unknown };
+  return typeof record.bookId === "string" ? record.bookId : null;
+}
+
 export function BookDetail({
   bookId,
   nav,
@@ -95,7 +114,7 @@ export function BookDetail({
   nav: Nav;
   theme: Theme;
   t: TFunction;
-  sse: { messages: ReadonlyArray<SSEMessage> };
+  sse: BookDetailSseState;
 }) {
   const c = useColors(theme);
   const { data, loading, error, refetch } = useApi<BookData>(`/books/${bookId}`);
@@ -112,16 +131,35 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
-  const [writeMode, setWriteMode] = useState<WriteMode>("quick");
+  const [bookActionPending, setBookActionPending] = useState<string | null>(null);
+  // C4a: auto (pipeline self-reviews) vs manual (write the draft and stop; you
+  // run audit / revise / approve as checkpoint actions). Project-level setting.
+  const [reviewMode, setReviewMode] = useState<"auto" | "manual">("auto");
+  useEffect(() => {
+    void fetchJson<{ mode?: string }>("/project/chapter-review-mode")
+      .then((r) => setReviewMode(r.mode === "manual" ? "manual" : "auto"))
+      .catch(() => undefined);
+  }, []);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
   const latestPersistedChapter = data ? data.nextChapter - 1 : 0;
-
   const [streamingText, setStreamingText] = useState("");
   const lastProcessedIndexRef = useRef<number>(-1);
+  const activeBookOperation = useMemo(() => {
+    return sse.activeOperations?.find((operation) => operation.bookId === bookId) ?? null;
+  }, [bookId, sse.activeOperations]);
+  const recentWorkflowLogs = useMemo(() => {
+    return sse.messages
+      .filter((message) => message.event === "log")
+      .map((message) => ({
+        timestamp: message.timestamp,
+        text: readMessageText(message.data),
+      }))
+      .filter((entry): entry is { timestamp: number; text: string } => Boolean(entry.text))
+      .slice(-6);
+  }, [sse.messages]);
 
-  // Clear streamingText when writing/drafting completes and becomes false
   useEffect(() => {
     if (!writing && !drafting) {
       setStreamingText("");
@@ -152,7 +190,6 @@ export function BookDetail({
     }
   }, [bookId, refetch, sse.messages]);
 
-  // Process real-time streaming text deltas
   useEffect(() => {
     if (sse.messages.length === 0) {
       lastProcessedIndexRef.current = -1;
@@ -166,46 +203,41 @@ export function BookDetail({
     let nextText = streamingText;
     let textChanged = false;
 
-    for (let i = lastProcessedIndexRef.current + 1; i < sse.messages.length; i++) {
-      const msg = sse.messages[i];
-      if (!msg) continue;
+    for (let i = lastProcessedIndexRef.current + 1; i < sse.messages.length; i += 1) {
+      const message = sse.messages[i];
+      if (!message) continue;
+      const messageBookId = readMessageBookId(message.data);
 
-      // Reset text on any start event for the current book
       if (
-        (msg.event === "write:start" ||
-         msg.event === "draft:start" ||
-         msg.event === "rewrite:start" ||
-         msg.event === "revise:start") &&
-        (msg.data as { bookId?: string })?.bookId === bookId
+        (message.event === "write:start" || message.event === "draft:start")
+        && messageBookId === bookId
       ) {
         nextText = "";
         textChanged = true;
       }
 
-      // Append text on delta event
-      if (msg.event === "write:delta") {
-        const d = msg.data as { bookId?: string; text?: string } | null;
-        if (d?.bookId === bookId && d?.text) {
-          nextText += d.text;
+      if ((message.event === "write:delta" || message.event === "draft:delta") && (!messageBookId || messageBookId === bookId)) {
+        const delta = readMessageText(message.data);
+        if (delta) {
+          nextText += delta;
           textChanged = true;
         }
       }
     }
 
     lastProcessedIndexRef.current = sse.messages.length - 1;
-
     if (textChanged) {
       setStreamingText(nextText);
     }
-  }, [sse.messages, bookId, streamingText]);
+  }, [bookId, sse.messages, streamingText]);
 
   const handleWriteNext = async () => {
     setWriteRequestPending(true);
     try {
-      await postApi(`/books/${bookId}/write-next`, { mode: writeMode });
+      await postApi(`/books/${bookId}/write-next`);
     } catch (e) {
       setWriteRequestPending(false);
-      await appAlert({ title: "写作启动失败", message: e instanceof Error ? e.message : "Failed", tone: "danger" });
+      await appAlert({ title: "操作失败", message: e instanceof Error ? e.message : "Failed", tone: "danger" });
     }
   };
 
@@ -215,7 +247,21 @@ export function BookDetail({
       await postApi(`/books/${bookId}/draft`);
     } catch (e) {
       setDraftRequestPending(false);
-      await appAlert({ title: "草稿生成失败", message: e instanceof Error ? e.message : "Failed", tone: "danger" });
+      await appAlert({ title: "操作失败", message: e instanceof Error ? e.message : "Failed", tone: "danger" });
+    }
+  };
+
+  const handleToggleReviewMode = async () => {
+    const next = reviewMode === "manual" ? "auto" : "manual";
+    setReviewMode(next);
+    try {
+      await fetchJson("/project/chapter-review-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: next }),
+      });
+    } catch {
+      setReviewMode(reviewMode); // revert on failure
     }
   };
 
@@ -223,7 +269,11 @@ export function BookDetail({
     setConfirmDeleteOpen(false);
     setDeleting(true);
     try {
-      await fetchJson(`/books/${bookId}`, { method: "DELETE" });
+      const res = await fetch(`/api/v1/books/${bookId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { error?: string }).error ?? `${res.status}`);
+      }
       nav.toDashboard();
     } catch (e) {
       await appAlert({ title: "删除失败", message: e instanceof Error ? e.message : "Delete failed", tone: "danger" });
@@ -234,12 +284,11 @@ export function BookDetail({
 
   const handleRewrite = async (chapterNum: number) => {
     const brief = await appPrompt({
-      title: data?.book.language === "en" ? "Rewrite brief" : "重写说明",
+      title: data?.book.language === "en" ? "Rewrite brief" : "重写补充说明",
       message: data?.book.language === "en"
         ? "Optional rewrite brief for this run only. Leave blank to use existing focus."
         : "可选：输入这次重写要遵循的补充想法。留空则沿用现有 focus。",
-      confirmLabel: data?.book.language === "en" ? "Rewrite" : "开始重写",
-      placeholder: data?.book.language === "en" ? "Optional brief..." : "可留空",
+      defaultValue: "",
     });
     if (brief === null) return;
     setRewritingChapters((prev) => [...prev, chapterNum]);
@@ -259,12 +308,11 @@ export function BookDetail({
 
   const handleRevise = async (chapterNum: number, mode: ReviseMode) => {
     const brief = await appPrompt({
-      title: data?.book.language === "en" ? "Revision brief" : "修订说明",
+      title: data?.book.language === "en" ? "Revise brief" : "修订补充说明",
       message: data?.book.language === "en"
         ? "Optional revise brief for this run only. Leave blank to use existing focus."
         : "可选：输入这次修订要遵循的补充想法。留空则沿用现有 focus。",
-      confirmLabel: data?.book.language === "en" ? "Revise" : "开始修订",
-      placeholder: data?.book.language === "en" ? "Optional brief..." : "可留空",
+      defaultValue: "",
     });
     if (brief === null) return;
     setRevisingChapters((prev) => [...prev, chapterNum]);
@@ -284,12 +332,11 @@ export function BookDetail({
 
   const handleSync = async (chapterNum: number) => {
     const brief = await appPrompt({
-      title: data?.book.language === "en" ? "Sync brief" : "同步说明",
+      title: data?.book.language === "en" ? "Sync brief" : "同步补充说明",
       message: data?.book.language === "en"
         ? "Optional sync brief for interpreting the edited chapter body. Leave blank to sync directly from the text."
         : "可选：输入这次同步时要遵循的补充说明。留空则直接按正文同步。",
-      confirmLabel: data?.book.language === "en" ? "Sync" : "开始同步",
-      placeholder: data?.book.language === "en" ? "Optional brief..." : "可留空",
+      defaultValue: "",
     });
     if (brief === null) return;
     setSyncingChapters((prev) => [...prev, chapterNum]);
@@ -345,6 +392,118 @@ export function BookDetail({
     refetch();
   };
 
+  const runBookAction = async (key: string, action: () => Promise<string>) => {
+    setBookActionPending(key);
+    try {
+      await appAlert({ title: "操作完成", message: await action(), tone: "success" });
+      refetch();
+    } catch (e) {
+      await appAlert({ title: "操作失败", message: e instanceof Error ? e.message : "Action failed", tone: "danger" });
+    } finally {
+      setBookActionPending(null);
+    }
+  };
+
+  const handleEvaluate = async () => {
+    await runBookAction("eval", async () => {
+      const result = await fetchJson<{
+        qualityScore: number;
+        totalChapters: number;
+        totalWords: number;
+        auditPassRate: number;
+        avgAiTellDensity: number;
+        hookResolveRate: number;
+      }>(`/books/${bookId}/eval`);
+      return [
+        `${t("book.evaluate")}: ${result.qualityScore}/100`,
+        `${t("dash.chapters")}: ${result.totalChapters}`,
+        `${t("book.words")}: ${result.totalWords.toLocaleString()}`,
+        `Audit: ${result.auditPassRate}%`,
+        `AI tells: ${result.avgAiTellDensity}/1k`,
+        `Hooks: ${result.hookResolveRate}%`,
+      ].join("\n");
+    });
+  };
+
+  const handleConsolidate = async () => {
+    await runBookAction("consolidate", async () => {
+      const result = await fetchJson<{ archivedVolumes?: number; retainedChapters?: number }>(`/books/${bookId}/consolidate`, {
+        method: "POST",
+      });
+      return data?.book.language === "en"
+        ? `Consolidated ${result.archivedVolumes ?? 0} volume(s). Retained ${result.retainedChapters ?? 0} recent chapter summaries.`
+        : `已归并 ${result.archivedVolumes ?? 0} 个卷摘要，保留最近 ${result.retainedChapters ?? 0} 条章节摘要。`;
+    });
+  };
+
+  const handleReviseFoundation = async () => {
+    const feedback = await appPrompt({
+      title: data?.book.language === "en" ? "Foundation revision" : "重修基础设定",
+      message: data?.book.language === "en"
+        ? "Foundation revision feedback. This rewrites the book foundation, not chapter body."
+        : "输入重修基础设定的反馈。此操作会重写基础设定，不直接改正文。",
+      defaultValue: "",
+    });
+    if (!feedback?.trim()) return;
+    await runBookAction("revise-foundation", async () => {
+      await fetchJson(`/books/${bookId}/foundation/revise`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedback }),
+      });
+      return data?.book.language === "en" ? "Foundation revised." : "基础设定已重修。";
+    });
+  };
+
+  const handlePlan = async () => {
+    const context = await appPrompt({
+      title: data?.book.language === "en" ? "Planning context" : "规划补充说明",
+      message: data?.book.language === "en"
+        ? "Optional planning context for the next chapter."
+        : "可选：下一章规划补充说明。",
+      defaultValue: "",
+    });
+    if (context === null) return;
+    await runBookAction("plan", async () => {
+      const result = await fetchJson<{ chapterNumber?: number; title?: string }>(`/books/${bookId}/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: context.trim() || undefined }),
+      });
+      return data?.book.language === "en"
+        ? `Planned chapter ${result.chapterNumber ?? "?"}: ${result.title ?? ""}`
+        : `已计划第 ${result.chapterNumber ?? "?"} 章：${result.title ?? ""}`;
+    });
+  };
+
+  const handleCompose = async () => {
+    const context = await appPrompt({
+      title: data?.book.language === "en" ? "Compose context" : "组装补充说明",
+      message: data?.book.language === "en"
+        ? "Optional compose context for the next chapter."
+        : "可选：下一章组装补充说明。",
+      defaultValue: "",
+    });
+    if (context === null) return;
+    await runBookAction("compose", async () => {
+      const result = await fetchJson<{ chapterNumber?: number; title?: string }>(`/books/${bookId}/compose`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: context.trim() || undefined }),
+      });
+      return data?.book.language === "en"
+        ? `Composed chapter ${result.chapterNumber ?? "?"}: ${result.title ?? ""}`
+        : `已组装第 ${result.chapterNumber ?? "?"} 章：${result.title ?? ""}`;
+    });
+  };
+
+  const handleRepairState = async (chapterNum: number) => {
+    await runBookAction(`repair-state-${chapterNum}`, async () => {
+      await fetchJson(`/books/${bookId}/repair-state/${chapterNum}`, { method: "POST" });
+      return data?.book.language === "en" ? `Chapter ${chapterNum} state repaired.` : `第 ${chapterNum} 章状态已修复。`;
+    });
+  };
+
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-32 space-y-4">
       <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
@@ -363,26 +522,7 @@ export function BookDetail({
   const currentTargetChapters = settingsTargetChapters ?? book.targetChapters ?? 0;
   const currentStatus = settingsStatus ?? (book.status as BookStatus);
 
-  const exportHref = buildApiUrl(`/books/${bookId}/export?format=${exportFormat}${exportApprovedOnly ? "&approvedOnly=true" : ""}`) ?? "#";
-  const exportFormatOptions = [
-    { value: "txt" as const, label: "TXT" },
-    { value: "md" as const, label: "MD" },
-    { value: "epub" as const, label: "EPUB" },
-  ];
-  const bookStatusOptions = [
-    { value: "active" as const, label: t("book.statusActive") },
-    { value: "paused" as const, label: t("book.statusPaused") },
-    { value: "outlining" as const, label: t("book.statusOutlining") },
-    { value: "completed" as const, label: t("book.statusCompleted") },
-    { value: "dropped" as const, label: t("book.statusDropped") },
-  ];
-  const reviseModeOptions = [
-    { value: "spot-fix" as const, label: t("book.spotFix") },
-    { value: "polish" as const, label: t("book.polish") },
-    { value: "rewrite" as const, label: t("book.rewrite") },
-    { value: "rework" as const, label: t("book.rework") },
-    { value: "anti-detect" as const, label: t("book.antiDetect") },
-  ];
+  const exportHref = `/api/v1/books/${bookId}/export?format=${exportFormat}${exportApprovedOnly ? "&approvedOnly=true" : ""}`;
 
   return (
     <div className="space-y-8 fade-in">
@@ -403,7 +543,7 @@ export function BookDetail({
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 border-b border-border/40 pb-8">
         <div className="space-y-2">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl sm:text-4xl font-serif font-medium">{book.title}</h1>
+            <h1 className="text-4xl font-serif font-medium">{book.title}</h1>
             {book.language === "en" && (
               <span className="px-1.5 py-0.5 rounded border border-primary/20 text-primary text-[10px] font-bold">EN</span>
             )}
@@ -427,40 +567,7 @@ export function BookDetail({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative grid h-10 w-40 grid-cols-2 overflow-hidden rounded-xl border border-border/60 bg-secondary/40 p-1">
-            <span
-              className={`pointer-events-none absolute bottom-1 top-1 rounded-lg border border-primary/30 bg-background shadow-sm transition-all duration-200 ${
-                writeMode === "quick"
-                  ? "left-1 w-[calc(50%-0.25rem)]"
-                  : "left-1/2 w-[calc(50%-0.25rem)]"
-              }`}
-            />
-            <button
-              type="button"
-              onClick={() => setWriteMode("quick")}
-              disabled={writing || drafting}
-              className={`relative z-10 inline-flex h-full items-center justify-center rounded-lg px-3 text-center text-xs font-extrabold leading-none transition-colors disabled:opacity-50 ${
-                writeMode === "quick"
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <span className="-translate-y-[2px]">快速</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setWriteMode("full")}
-              disabled={writing || drafting}
-              className={`relative z-10 inline-flex h-full items-center justify-center rounded-lg px-3 text-center text-xs font-extrabold leading-none transition-colors disabled:opacity-50 ${
-                writeMode === "full"
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <span className="-translate-y-[2px]">完整</span>
-            </button>
-          </div>
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={handleWriteNext}
             disabled={writing || drafting}
@@ -476,6 +583,16 @@ export function BookDetail({
           >
             {drafting ? <div className="w-4 h-4 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" /> : <Wand2 size={16} />}
             {drafting ? t("book.drafting") : t("book.draftOnly")}
+          </button>
+          <button
+            onClick={handleToggleReviewMode}
+            title={reviewMode === "manual"
+              ? "手动审查：写完即停，由你点 审稿/修订/通过（更快、更可控）。点此切回自动。"
+              : "自动审查：写完自动审校并按需重写（更省心，但更慢）。点此切到手动·写完即停。"}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-secondary/60 text-foreground rounded-xl border border-border/50 hover:bg-secondary transition-all"
+          >
+            {reviewMode === "manual" ? <Hand size={16} /> : <Settings2 size={16} />}
+            {reviewMode === "manual" ? "审查：手动·写完即停" : "审查：自动"}
           </button>
           <button
             onClick={() => setConfirmDeleteOpen(true)}
@@ -508,30 +625,57 @@ export function BookDetail({
         </div>
       )}
 
-      {/* Live Writing Stream Viewport */}
-      {(writing || drafting) && streamingText && (
-        <div className="paper-sheet rounded-2xl border border-primary/20 shadow-xl shadow-primary/5 p-6 space-y-4 fade-in">
-          <div className="flex items-center justify-between border-b border-border/40 pb-3">
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary"></span>
+      {(writing || drafting || activeBookOperation || streamingText) && (
+        <div className="paper-sheet rounded-2xl border border-primary/20 p-4 shadow-xl shadow-primary/5 sm:p-6">
+          <div className="flex flex-col gap-3 border-b border-border/40 pb-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-primary" />
               </span>
-              <span className="text-xs font-bold uppercase tracking-widest text-primary">
-                {writing ? t("dash.writing") : t("book.drafting")}...
+              <div className="min-w-0">
+                <div className="text-xs font-bold uppercase tracking-widest text-primary">
+                  {writing ? t("dash.writing") : drafting ? t("book.drafting") : "实时工作流"}
+                </div>
+                <div className="mt-1 truncate text-sm text-muted-foreground">
+                  {activeBookOperation?.label ?? activeBookOperation?.message ?? t("book.pipelineWriting")}
+                </div>
+              </div>
+            </div>
+            {streamingText && (
+              <span className="shrink-0 text-[11px] font-mono text-muted-foreground">
+                {t("book.words")}: {streamingText.length}
               </span>
-            </div>
-            <span className="text-[11px] font-mono text-muted-foreground">
-              {t("book.words")}: {streamingText.length}
-            </span>
+            )}
           </div>
-          
-          <div className="relative max-h-96 overflow-y-auto pr-2 rounded-xl bg-secondary/15 p-4 border border-border/20">
-            <div className="font-serif text-lg leading-relaxed text-foreground/90 whitespace-pre-wrap selection:bg-primary/10">
-              {streamingText}
-              <span className="inline-block w-1.5 h-5 ml-0.5 bg-primary animate-pulse align-middle" />
+
+          {streamingText ? (
+            <div className="mt-4 max-h-96 overflow-y-auto rounded-xl border border-border/20 bg-secondary/15 p-4">
+              <div className="whitespace-pre-wrap break-words font-serif text-base leading-8 text-foreground/90 sm:text-lg">
+                {streamingText}
+                <span className="ml-0.5 inline-block h-5 w-1.5 animate-pulse bg-primary align-middle" />
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="mt-4 rounded-xl border border-border/20 bg-secondary/15 p-3">
+              {recentWorkflowLogs.length > 0 ? (
+                <div className="space-y-2 font-mono text-[11px] leading-5 text-muted-foreground sm:text-xs">
+                  {recentWorkflowLogs.map((entry, index) => (
+                    <div key={`${entry.timestamp}-${index}`} className="grid grid-cols-[4.2rem_minmax(0,1fr)] gap-2">
+                      <span className="tabular-nums text-primary/70">
+                        {new Date(entry.timestamp).toLocaleTimeString()}
+                      </span>
+                      <span className="min-w-0 break-words text-foreground/80">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm leading-6 text-muted-foreground">
+                  {activeBookOperation?.message ?? "后端任务正在运行，日志同步后会显示在这里。"}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -560,12 +704,56 @@ export function BookDetail({
             <BarChart2 size={14} />
             {t("book.analytics")}
           </button>
+          <button
+            onClick={handleEvaluate}
+            disabled={bookActionPending === "eval"}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            <Search size={14} />
+            {bookActionPending === "eval" ? t("common.loading") : t("book.evaluate")}
+          </button>
+          <button
+            onClick={handleConsolidate}
+            disabled={bookActionPending === "consolidate"}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            <Database size={14} />
+            {bookActionPending === "consolidate" ? t("common.loading") : t("book.consolidate")}
+          </button>
+          <button
+            onClick={handleReviseFoundation}
+            disabled={bookActionPending === "revise-foundation"}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            <Sparkles size={14} />
+            {bookActionPending === "revise-foundation" ? t("common.loading") : t("book.reviseFoundation")}
+          </button>
+          <button
+            onClick={handlePlan}
+            disabled={bookActionPending === "plan"}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            <FileText size={14} />
+            {bookActionPending === "plan" ? t("common.loading") : t("book.planNext")}
+          </button>
+          <button
+            onClick={handleCompose}
+            disabled={bookActionPending === "compose"}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary/50 text-muted-foreground rounded-lg hover:text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            <Wand2 size={14} />
+            {bookActionPending === "compose" ? t("common.loading") : t("book.composeNext")}
+          </button>
           <div className="flex items-center gap-2">
-            <StudioSelect
+            <StudioSelect<ExportFormat>
               value={exportFormat}
               onValueChange={setExportFormat}
-              options={exportFormatOptions}
-              triggerClassName="h-9 w-24 rounded-lg bg-secondary/50 text-xs font-bold text-muted-foreground shadow-none"
+              options={[
+                { value: "txt", label: "TXT" },
+                { value: "md", label: "MD" },
+                { value: "epub", label: "EPUB" },
+              ]}
+              triggerClassName="h-10 w-28 bg-secondary/50 text-xs font-bold text-muted-foreground"
             />
             <label className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground cursor-pointer select-none">
               <input
@@ -584,7 +772,11 @@ export function BookDetail({
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ format: exportFormat, approvedOnly: exportApprovedOnly }),
                   });
-                  await appAlert({ title: t("common.exportSuccess"), message: `${data.path}\n(${data.chapters} ${t("dash.chapters")})`, tone: "success" });
+                  await appAlert({
+                    title: t("common.exportSuccess"),
+                    message: `${data.path}\n(${data.chapters} ${t("dash.chapters")})`,
+                    tone: "success",
+                  });
                 } catch (e) {
                   await appAlert({ title: "导出失败", message: e instanceof Error ? e.message : "Export failed", tone: "danger" });
                 }
@@ -598,7 +790,7 @@ export function BookDetail({
       </div>
 
       {/* Book Settings */}
-      <div className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-4 sm:p-6">
+      <div className="paper-sheet rounded-2xl border border-border/40 shadow-sm p-6">
         <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-4">{t("book.settings")}</h2>
         <div className="flex flex-wrap items-end gap-4">
           <div className="flex flex-col gap-1">
@@ -606,7 +798,7 @@ export function BookDetail({
             <input
               type="number"
               value={currentWordCount}
-              {...mobileTextInputHandlers((value) => setSettingsWordCount(Number(value)))}
+              onChange={(e) => setSettingsWordCount(Number(e.target.value))}
               className="px-3 py-2 text-sm rounded-lg border border-border/50 bg-secondary/30 outline-none focus:border-primary/50 w-32"
             />
           </div>
@@ -615,17 +807,23 @@ export function BookDetail({
             <input
               type="number"
               value={currentTargetChapters}
-              {...mobileTextInputHandlers((value) => setSettingsTargetChapters(Number(value)))}
+              onChange={(e) => setSettingsTargetChapters(Number(e.target.value))}
               className="px-3 py-2 text-sm rounded-lg border border-border/50 bg-secondary/30 outline-none focus:border-primary/50 w-32"
             />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">{t("book.status")}</label>
-            <StudioSelect
+            <StudioSelect<BookStatus>
               value={currentStatus}
               onValueChange={setSettingsStatus}
-              options={bookStatusOptions}
-              triggerClassName="h-10 min-w-36 rounded-lg bg-secondary/30 shadow-none"
+              options={[
+                { value: "active", label: t("book.statusActive") },
+                { value: "paused", label: t("book.statusPaused") },
+                { value: "outlining", label: t("book.statusOutlining") },
+                { value: "completed", label: t("book.statusCompleted") },
+                { value: "dropped", label: t("book.statusDropped") },
+              ]}
+              triggerClassName="min-h-10 bg-secondary/30"
             />
           </div>
           <button
@@ -646,7 +844,8 @@ export function BookDetail({
             const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
             const busy = rewritingChapters.includes(ch.number)
               || revisingChapters.includes(ch.number)
-              || syncingChapters.includes(ch.number);
+              || syncingChapters.includes(ch.number)
+              || bookActionPending === `repair-state-${ch.number}`;
             return (
               <div key={ch.number} className={`p-4 fade-in ${staggerClass}`}>
                 <div className="flex items-start gap-3">
@@ -664,9 +863,9 @@ export function BookDetail({
                       <span className="text-xs font-medium tabular-nums text-muted-foreground">
                         {(ch.wordCount ?? 0).toLocaleString()} {t("book.words")}
                       </span>
-                      <div className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
+                      <div className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
                         {STATUS_CONFIG[ch.status]?.icon}
-                        {translateChapterStatus(ch.status, t)}
+                        <span>{translateChapterStatus(ch.status, t)}</span>
                       </div>
                     </div>
                   </div>
@@ -705,7 +904,7 @@ export function BookDetail({
                         const auditResult = await fetchJson<{ passed?: boolean; issues?: unknown[] }>(`/books/${bookId}/audit/${ch.number}`, { method: "POST" });
                         await appAlert({
                           title: auditResult.passed ? "Audit passed" : "Audit failed",
-                          message: auditResult.passed ? "Audit passed" : `${auditResult.issues?.length ?? 0} issues`,
+                          message: auditResult.passed ? "Audit passed" : `Audit failed: ${auditResult.issues?.length ?? 0} issues`,
                           tone: auditResult.passed ? "success" : "danger",
                         });
                         refetch();
@@ -741,13 +940,32 @@ export function BookDetail({
                       ? <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground animate-spin" />
                       : <RefreshCw size={18} />}
                   </button>
-                  <StudioSelect
+                  {ch.status === "state-degraded" && (
+                    <button
+                      onClick={() => handleRepairState(ch.number)}
+                      disabled={busy}
+                      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-600 disabled:opacity-40"
+                      title={t("book.repairState")}
+                      aria-label={t("book.repairState")}
+                    >
+                      {bookActionPending === `repair-state-${ch.number}`
+                        ? <div className="h-4 w-4 rounded-full border-2 border-amber-600/20 border-t-amber-600 animate-spin" />
+                        : <Settings2 size={18} />}
+                    </button>
+                  )}
+                  <StudioSelect<ReviseMode>
                     disabled={revisingChapters.includes(ch.number)}
                     value=""
-                    onValueChange={(mode) => handleRevise(ch.number, mode)}
-                    options={reviseModeOptions}
+                    onValueChange={(mode) => { void handleRevise(ch.number, mode); }}
                     placeholder={revisingChapters.includes(ch.number) ? t("common.loading") : t("book.curate")}
-                    triggerClassName="h-11 w-28 rounded-2xl bg-secondary text-sm font-bold text-muted-foreground shadow-none disabled:opacity-40"
+                    options={[
+                      { value: "spot-fix", label: t("book.spotFix") },
+                      { value: "polish", label: t("book.polish") },
+                      { value: "rewrite", label: t("book.rewrite") },
+                      { value: "rework", label: t("book.rework") },
+                      { value: "anti-detect", label: t("book.antiDetect") },
+                    ]}
+                    triggerClassName="h-11 rounded-2xl bg-secondary px-3 text-sm font-bold text-muted-foreground disabled:opacity-40"
                   />
                 </div>
               </div>
@@ -756,14 +974,14 @@ export function BookDetail({
         </div>
 
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full text-sm border-collapse">
+          <table className="w-full min-w-[760px] text-sm border-collapse">
             <thead>
               <tr className="bg-muted/30 border-b border-border/50">
-                <th className="text-left px-3 sm:px-6 py-3 sm:py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-16">#</th>
-                <th className="text-left px-3 sm:px-6 py-3 sm:py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("book.manuscriptTitle")}</th>
-                <th className="text-left px-3 sm:px-6 py-3 sm:py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-28">{t("book.words")}</th>
-                <th className="text-left px-3 sm:px-6 py-3 sm:py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-36">{t("book.status")}</th>
-                <th className="text-right px-3 sm:px-6 py-3 sm:py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("book.curate")}</th>
+                <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-16">#</th>
+                <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("book.manuscriptTitle")}</th>
+                <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-28">{t("book.words")}</th>
+                <th className="text-left px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground w-36">{t("book.status")}</th>
+                <th className="text-right px-6 py-4 font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("book.curate")}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
@@ -771,24 +989,24 @@ export function BookDetail({
                 const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
                 return (
                 <tr key={ch.number} className={`group hover:bg-primary/[0.02] transition-colors fade-in ${staggerClass}`}>
-                  <td className="px-3 sm:px-6 py-3 sm:py-4 text-muted-foreground/60 font-mono text-xs">{ch.number.toString().padStart(2, '0')}</td>
-                  <td className="px-3 sm:px-6 py-3 sm:py-4">
+                  <td className="px-6 py-4 text-muted-foreground/60 font-mono text-xs">{ch.number.toString().padStart(2, '0')}</td>
+                  <td className="px-6 py-4">
                     <button
                       onClick={() => nav.toChapter(bookId, ch.number)}
-                      className="font-serif text-base sm:text-lg font-medium hover:text-primary transition-colors text-left"
+                      className="font-serif text-lg font-medium hover:text-primary transition-colors text-left"
                     >
                       {ch.title || t("chapter.label").replace("{n}", String(ch.number))}
                     </button>
                   </td>
-                  <td className="px-3 sm:px-6 py-3 sm:py-4 text-muted-foreground font-medium tabular-nums text-xs">{(ch.wordCount ?? 0).toLocaleString()}</td>
-                  <td className="px-3 sm:px-6 py-3 sm:py-4">
-                    <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
+                  <td className="px-6 py-4 text-muted-foreground font-medium tabular-nums text-xs">{(ch.wordCount ?? 0).toLocaleString()}</td>
+                  <td className="px-6 py-4">
+                    <div className={`inline-flex items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
                       {STATUS_CONFIG[ch.status]?.icon}
                       {translateChapterStatus(ch.status, t)}
                     </div>
                   </td>
-                  <td className="px-3 sm:px-6 py-3 sm:py-4 text-right">
-                    <div className="flex gap-1.5 justify-end opacity-100 transition-opacity">
+                  <td className="px-6 py-4 text-right">
+                    <div className="flex gap-1.5 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
                       {ch.status === "ready-for-review" && (
                         <>
                           <button
@@ -819,7 +1037,7 @@ export function BookDetail({
                             const auditResult = await fetchJson<{ passed?: boolean; issues?: unknown[] }>(`/books/${bookId}/audit/${ch.number}`, { method: "POST" });
                             await appAlert({
                               title: auditResult.passed ? "Audit passed" : "Audit failed",
-                              message: auditResult.passed ? "Audit passed" : `${auditResult.issues?.length ?? 0} issues`,
+                              message: auditResult.passed ? "Audit passed" : `Audit failed: ${auditResult.issues?.length ?? 0} issues`,
                               tone: auditResult.passed ? "success" : "danger",
                             });
                             refetch();
@@ -852,13 +1070,31 @@ export function BookDetail({
                           ? <div className="w-3.5 h-3.5 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" />
                           : <RefreshCw size={14} />}
                       </button>
-                      <StudioSelect
+                      {ch.status === "state-degraded" && (
+                        <button
+                          onClick={() => handleRepairState(ch.number)}
+                          disabled={bookActionPending === `repair-state-${ch.number}`}
+                          className="p-2 rounded-lg bg-amber-500/10 text-amber-600 hover:bg-amber-500 hover:text-white transition-all shadow-sm disabled:opacity-50"
+                          title={t("book.repairState")}
+                        >
+                          {bookActionPending === `repair-state-${ch.number}`
+                            ? <div className="w-3.5 h-3.5 border-2 border-amber-600/20 border-t-amber-600 rounded-full animate-spin" />
+                            : <Settings2 size={14} />}
+                        </button>
+                      )}
+                      <StudioSelect<ReviseMode>
                         disabled={revisingChapters.includes(ch.number)}
                         value=""
-                        onValueChange={(mode) => handleRevise(ch.number, mode)}
-                        options={reviseModeOptions}
+                        onValueChange={(mode) => { void handleRevise(ch.number, mode); }}
                         placeholder={revisingChapters.includes(ch.number) ? t("common.loading") : t("book.curate")}
-                        triggerClassName="h-8 w-24 rounded-lg bg-secondary text-[11px] font-bold text-muted-foreground shadow-none hover:text-primary hover:bg-primary/10 disabled:opacity-50"
+                        options={[
+                          { value: "spot-fix", label: t("book.spotFix") },
+                          { value: "polish", label: t("book.polish") },
+                          { value: "rewrite", label: t("book.rewrite") },
+                          { value: "rework", label: t("book.rework") },
+                          { value: "anti-detect", label: t("book.antiDetect") },
+                        ]}
+                        triggerClassName="h-9 rounded-lg bg-secondary px-2 text-[11px] font-bold text-muted-foreground hover:text-primary hover:bg-primary/10 disabled:opacity-50"
                       />
                     </div>
                   </td>

@@ -1,47 +1,10 @@
+import type { ActionPayload, ActionSource, PlayMode, RequestedIntent, SessionKind } from "@actalk/inkos-core";
+
 // -- Data types --
 
 export interface ToolCall {
   readonly name: string;
   readonly arguments: Record<string, unknown>;
-}
-
-export interface TokenUsageSnapshot {
-  readonly promptTokens?: number;
-  readonly completionTokens?: number;
-  readonly totalTokens: number;
-  readonly estimated?: boolean;
-  readonly source?: "stream" | "final" | "tool";
-  readonly updatedAt?: number;
-  readonly streamCallTokens?: number;
-  readonly streamAccumulatedTokens?: number;
-  readonly streamLastStatus?: string;
-  readonly tokenSavings?: {
-    readonly cacheSkippedCalls: number;
-    readonly semanticL1Hits: number;
-    readonly semanticL2Hits: number;
-    readonly semanticMisses: number;
-    readonly ccrBlocksCompressed: number;
-    readonly originalChars: number;
-    readonly optimizedChars: number;
-    readonly estimatedTokensSaved: number;
-    readonly pipeline?: ReadonlyArray<{
-      readonly kind: string;
-      readonly label: string;
-      readonly originalChars?: number;
-      readonly optimizedChars?: number;
-      readonly estimatedTokensSaved?: number;
-      readonly similarity?: number;
-      readonly at: number;
-    }>;
-    readonly lastEvent?: {
-      readonly kind: string;
-      readonly originalChars?: number;
-      readonly optimizedChars?: number;
-      readonly estimatedTokensSaved?: number;
-      readonly similarity?: number;
-      readonly at: number;
-    };
-  };
 }
 
 export interface PipelineStage {
@@ -67,11 +30,37 @@ export interface ToolExecution {
   details?: unknown;
   error?: string;
   stages?: PipelineStage[];
-  tokenUsage?: TokenUsageSnapshot;
   logs?: string[];
   streamingText?: string;
+  tokenUsage?: TokenUsageSnapshot;
   startedAt: number;
   completedAt?: number;
+}
+
+export interface TokenUsageSnapshot {
+  readonly promptTokens?: number;
+  readonly completionTokens?: number;
+  readonly totalTokens: number;
+  readonly estimated?: boolean;
+  readonly source?: "stream" | "final" | "estimated" | "response";
+  readonly updatedAt?: number;
+  readonly streamCallTokens?: number;
+  readonly streamAccumulatedTokens?: number;
+  readonly streamLastStatus?: string;
+  readonly tokenSavings?: {
+    readonly originalChars?: number;
+    readonly optimizedChars?: number;
+    readonly ccrBlocksCompressed?: number;
+    readonly cacheSkippedCalls?: number;
+    readonly estimatedTokensSaved?: number;
+    readonly pipeline?: ReadonlyArray<{
+      readonly kind: string;
+      readonly label: string;
+      readonly at: number;
+      readonly estimatedTokensSaved?: number;
+      readonly similarity?: number;
+    }>;
+  };
 }
 
 // -- Message parts (chronologically ordered for rendering) --
@@ -105,6 +94,8 @@ export interface SessionMessage {
 export interface SessionSummary {
   readonly sessionId: string;
   readonly bookId: string | null;
+  readonly sessionKind?: ChatSessionKind;
+  readonly playMode?: PlayMode;
   readonly title: string | null;
   readonly messageCount: number;
   readonly createdAt: number;
@@ -114,16 +105,17 @@ export interface SessionSummary {
 export interface AgentResponse {
   readonly response?: string;
   readonly error?: string | { code?: string; message?: string };
+  readonly tokenUsage?: TokenUsageSnapshot;
+  readonly tokenSavings?: TokenUsageSnapshot["tokenSavings"];
   readonly details?: {
     readonly draftRaw?: string;
     readonly toolCall?: ToolCall;
-    readonly toolExecutions?: ReadonlyArray<ToolExecution>;
   };
-  readonly tokenUsage?: TokenUsageSnapshot;
-  readonly tokenSavings?: TokenUsageSnapshot["tokenSavings"];
   readonly session?: {
     readonly sessionId?: string;
     readonly bookId?: string | null;
+    readonly sessionKind?: ChatSessionKind;
+    readonly playMode?: PlayMode;
     readonly title?: string | null;
     readonly activeBookId?: string;
     readonly creationDraft?: unknown;
@@ -136,6 +128,8 @@ export interface SessionResponse {
   readonly session?: {
     readonly sessionId?: string;
     readonly bookId?: string | null;
+    readonly sessionKind?: ChatSessionKind;
+    readonly playMode?: PlayMode;
     readonly title?: string | null;
     readonly activeBookId?: string;
     readonly messages?: ReadonlyArray<SessionMessage>;
@@ -151,9 +145,25 @@ export interface BookSummary {
   cast: string;
 }
 
+export type ChatSessionKind = SessionKind;
+export type ChatActionSource = ActionSource;
+export type ChatRequestedIntent = RequestedIntent;
+export type ChatActionPayload = ActionPayload;
+
+export interface SendMessageOptions {
+  readonly activeBookId?: string;
+  readonly sessionKind?: ChatSessionKind;
+  readonly actionSource?: ChatActionSource;
+  readonly requestedIntent?: ChatRequestedIntent;
+  readonly actionPayload?: ChatActionPayload;
+  readonly playMode?: PlayMode;
+}
+
 export interface SessionRuntime {
   readonly sessionId: string;
   readonly bookId: string | null;
+  readonly sessionKind?: ChatSessionKind;
+  readonly playMode?: PlayMode;
   readonly title: string | null;
   readonly messages: ReadonlyArray<Message>;
   readonly deletedMessageKeys: ReadonlyArray<string>;
@@ -180,6 +190,10 @@ export interface CreateState {
   artifactFile: string | null;         // foundation file name, e.g. "story_bible.md"
   artifactChapter: number | null;      // chapter number, e.g. 1
   bookSummary: BookSummary | null;
+  // Proposed-action cards (propose_action) are one-shot: once confirmed or
+  // rejected, the card locks so the user can't re-fire the production action.
+  // Keyed by the proposal's ToolExecution id.
+  resolvedProposals: Record<string, "confirmed" | "rejected">;
 }
 
 export type ChatState = MessageState & CreateState;
@@ -191,26 +205,21 @@ export interface MessageActions {
   setInput: (text: string) => void;
   addUserMessage: (sessionId: string, content: string) => void;
   appendStreamChunk: (sessionId: string, text: string, streamTs: number) => void;
-  finalizeStream: (
-    sessionId: string,
-    streamTs: number,
-    content: string,
-    toolCall?: ToolCall,
-    tokenUsage?: TokenUsageSnapshot,
-  ) => void;
+  finalizeStream: (sessionId: string, streamTs: number, content: string, toolCall?: ToolCall, tokenUsage?: TokenUsageSnapshot) => void;
   replaceStreamWithError: (sessionId: string, streamTs: number, errorMsg: string) => void;
   addErrorMessage: (sessionId: string, errorMsg: string) => void;
   deleteMessage: (sessionId: string, messageIndex: number) => Promise<void>;
+  cancelMessage: (sessionId: string) => Promise<void>;
   loadSessionMessages: (sessionId: string, msgs: ReadonlyArray<SessionMessage>) => void;
   loadSessionList: (bookId: string | null) => Promise<ReadonlyArray<SessionSummary>>;
-  createSession: (bookId: string | null) => Promise<string>;
-  createDraftSession: (bookId: string | null) => string;
+  createSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode) => Promise<string>;
+  createDraftSession: (bookId: string | null, sessionKind?: ChatSessionKind, playMode?: PlayMode) => string;
+  setSessionPlayMode: (sessionId: string, playMode: PlayMode) => void;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   loadSessionDetail: (sessionId: string) => Promise<void>;
-  sendMessage: (sessionId: string, text: string, activeBookId?: string) => Promise<void>;
-  cancelMessage: (sessionId: string) => Promise<void>;
-  setSelectedModel: (model: string | null, service: string | null) => void;
+  sendMessage: (sessionId: string, text: string, options?: SendMessageOptions) => Promise<void>;
+  setSelectedModel: (model: string, service: string) => void;
 }
 
 export interface CreateActions {
@@ -219,6 +228,7 @@ export interface CreateActions {
   openChapterArtifact: (chapterNum: number) => void;
   closeArtifact: () => void;
   setBookSummary: (summary: BookSummary | null) => void;
+  markProposalResolved: (execId: string, resolution: "confirmed" | "rejected") => void;
 }
 
 // -- Composed store type --

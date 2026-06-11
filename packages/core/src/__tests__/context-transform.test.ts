@@ -47,6 +47,61 @@ describe("createBookContextTransform", () => {
     expect(result[1]).toBe(original[0]);
   });
 
+  it("indexes large truth files structurally instead of selecting semantic keyword rows", async () => {
+    const storyDir = join(projectRoot, "books", bookId, "story");
+    await writeFile(
+      join(storyDir, "story_bible.md"),
+      [
+        "# Story Bible",
+        "## 关键设定",
+        "| 状态 | 条目 |",
+        "| active | 主角正在追查码头旧案 |",
+        "UNBOUNDED_BODY_SHOULD_NOT_BE_INJECTED ".repeat(500),
+      ].join("\n"),
+    );
+
+    const transform = createBookContextTransform(bookId, projectRoot);
+    const result = await transform([
+      { role: "user" as const, content: "讨论下一章", timestamp: Date.now() },
+    ]);
+    const content = (result[0] as { content: string }).content;
+
+    expect(content).toContain("上下文压缩包");
+    expect(content).toContain("story_bible.md");
+    expect(content).toContain("## 关键设定");
+    expect(content).toContain("Markdown 目录索引");
+    expect(content).not.toContain("| active | 主角正在追查码头旧案 |");
+    expect(content).toContain("未全文注入");
+    expect(content).not.toContain("UNBOUNDED_BODY_SHOULD_NOT_BE_INJECTED");
+  });
+
+  it("emits session context compression lifecycle events when compacting truth files", async () => {
+    const storyDir = join(projectRoot, "books", bookId, "story");
+    await writeFile(
+      join(storyDir, "story_bible.md"),
+      [
+        "# Story Bible",
+        "## 活跃设定",
+        "当前目标：继续追查旧案。",
+        "UNBOUNDED_BODY_SHOULD_NOT_BE_INJECTED ".repeat(500),
+      ].join("\n"),
+    );
+    const events: Array<{ readonly category: string; readonly phase: string; readonly sources?: readonly string[] }> = [];
+
+    const transform = createBookContextTransform(bookId, projectRoot, {
+      onContextCompression: (event) => events.push(event),
+    });
+    await transform([
+      { role: "user" as const, content: "讨论下一章", timestamp: Date.now() },
+    ]);
+
+    expect(events.map((event) => [event.category, event.phase])).toEqual([
+      ["session_context", "start"],
+      ["session_context", "end"],
+    ]);
+    expect(events[0].sources).toContain("story_bible.md");
+  });
+
   it("sorts truth files in priority order", async () => {
     const storyDir = join(projectRoot, "books", bookId, "story");
     await writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline");
@@ -104,5 +159,23 @@ describe("createBookContextTransform", () => {
     const injected = result[0] as { role: string; content: string };
     expect(injected.content).not.toContain("旧的条目式格式");
     expect(injected.content).not.toContain("revise: true");
+  });
+
+  it("injects authoritative new-layout outline files into active-book chat context", async () => {
+    const outlineDir = join(projectRoot, "books", bookId, "story", "outline");
+    await mkdir(outlineDir, { recursive: true });
+    await writeFile(join(outlineDir, "story_frame.md"), "## 故事基石\n主角以第一人称调查物业黑账。");
+    await writeFile(join(outlineDir, "volume_map.md"), "## 第一卷\n暴雨夜发现电表账单异常。");
+
+    const transform = createBookContextTransform(bookId, projectRoot);
+    const result = await transform([
+      { role: "user" as const, content: "继续讨论第一章", timestamp: Date.now() },
+    ]);
+
+    const injected = result[0] as { role: string; content: string };
+    expect(injected.content).toContain("outline/story_frame.md");
+    expect(injected.content).toContain("主角以第一人称调查物业黑账。");
+    expect(injected.content).toContain("outline/volume_map.md");
+    expect(injected.content).toContain("暴雨夜发现电表账单异常。");
   });
 });

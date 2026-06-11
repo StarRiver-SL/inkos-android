@@ -15,7 +15,7 @@
  */
 
 export interface HookLedgerViolation {
-  readonly severity: "critical";
+  readonly severity: "critical" | "warning";
   readonly category: string;
   readonly description: string;
   readonly suggestion: string;
@@ -132,10 +132,10 @@ export function validateHookLedger(
   for (const entry of committed) {
     if (!draftEchoesEntry(draftContent, entry)) {
       violations.push({
-        severity: "critical",
-        category: "hook 账未兑现",
-        description: `memo 在 advance/resolve 里声明要处理 ${entry.id}，但正文没有对应的落地动作`,
-        suggestion: `在正文中加入对 ${entry.id} 的具体情节推进（动作、对话、环境变化），或把它从 hook 账里移到 defer 并给出理由`,
+        severity: "warning",
+        category: "hook 账需语义复核",
+        description: `memo 在 advance/resolve 里声明要处理 ${entry.id}，但确定性关键词检查没有找到对应落点`,
+        suggestion: `复核正文是否已经用动作、对话、物件或信息变化推进了 ${entry.id}；若没有，请补具体场景，若已推进，可忽略这条确定性提示`,
       });
     }
   }
@@ -152,7 +152,7 @@ export function validateHookLedger(
       severity: "critical",
       category: "hook 账揭 1 埋 1 违规",
       description: `本章 resolve 了 ${resolvedCount} 个钩子，但 open 只有 ${openedCount} 个新钩子。只揭不埋会让读者豁然开朗后索然无味，本书的前进拉力被削弱。`,
-      suggestion: `在 memo 的 open 段下至少再埋 ${resolvedCount - openedCount} 个与本章已揭钩子相关的新钩子（番茄老师徐二家的猫："掀开一个伏笔的同时，再埋两个伏笔"）。新钩子最好与已揭钩子彼此关联，不要凭空冒出来。`,
+      suggestion: `在 memo 的 open 段下至少再埋 ${resolvedCount - openedCount} 个与本章已揭钩子相关的新钩子。新钩子最好与已揭钩子彼此关联，不要凭空冒出来。`,
     });
   }
 

@@ -1,18 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearBookCreateSessionId,
-  clearBookCreateAssistantInput,
-  ensureConfiguredModelGroup,
+  buildModelGroups,
   filterModelGroups,
-  getBookCreateAssistantInput,
   getBookCreateSessionId,
   getProjectChatSessionId,
   pickModelSelection,
   pickProjectChatSessionId,
-  resolveComposerTextSync,
-  setBookCreateAssistantInput,
   setBookCreateSessionId,
   setProjectChatSessionId,
+  isChatScrollNearBottom,
+  shouldShowPlayChoicePanel,
 } from "./chat-page-state";
 
 describe("book-create session localStorage helpers", () => {
@@ -63,18 +61,6 @@ describe("book-create session localStorage helpers", () => {
   it("clearBookCreateSessionId is safe when key doesn't exist", () => {
     clearBookCreateSessionId();
     expect(getBookCreateSessionId()).toBeNull();
-  });
-
-  it("persists the book-create assistant input separately from the session id", () => {
-    setBookCreateSessionId("sess-123");
-    setBookCreateAssistantInput("帮我写一本赛博修仙");
-
-    expect(getBookCreateSessionId()).toBe("sess-123");
-    expect(getBookCreateAssistantInput()).toBe("帮我写一本赛博修仙");
-
-    clearBookCreateAssistantInput();
-    expect(getBookCreateAssistantInput()).toBe("");
-    expect(getBookCreateSessionId()).toBe("sess-123");
   });
 
   it("keeps project chat session separate from book-create session", () => {
@@ -196,67 +182,38 @@ describe("pickModelSelection", () => {
     })).toBeNull();
   });
 
-  it("keeps the current selection while model lists are still loading", () => {
-    expect(pickModelSelection([], "manual-model", "custom:local", null, {
-      modelsLoading: true,
-    })).toBeNull();
-  });
-
   it("returns null when no models are available", () => {
     expect(pickModelSelection([], "gemini-3.1-flash-image-preview", "google")).toBeNull();
   });
 });
 
-describe("ensureConfiguredModelGroup", () => {
-  it("adds the configured custom model while its live model list is not loaded yet", () => {
-    expect(ensureConfiguredModelGroup([], [
-      { service: "custom:local", label: "Local API", connected: true },
-    ], {
-      service: "custom:local",
-      model: "mimo-v2.5",
+describe("buildModelGroups", () => {
+  const services = [
+    { service: "custom:GPT", label: "GPT", connected: true },
+  ] as const;
+
+  it("keeps a configured model visible when the gateway cannot list models", () => {
+    expect(buildModelGroups(services, { "custom:GPT": [] }, {
+      service: "custom:GPT",
+      model: "claude-sonnet-4-6",
     })).toEqual([
       {
-        service: "custom:local",
-        label: "Local API",
-        models: [{ id: "mimo-v2.5", name: "mimo-v2.5" }],
+        service: "custom:GPT",
+        label: "GPT",
+        models: [{ id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" }],
       },
     ]);
   });
 
-  it("adds the configured model even before the matching service has refreshed", () => {
-    expect(ensureConfiguredModelGroup([], [], {
-      service: "custom:local",
-      model: "mimo-v2.5",
-    })).toEqual([
-      {
-        service: "custom:local",
-        label: "custom:local",
-        models: [{ id: "mimo-v2.5", name: "mimo-v2.5" }],
-      },
-    ]);
-  });
-
-  it("prepends the configured model to an existing service group when missing", () => {
-    expect(ensureConfiguredModelGroup([
-      {
-        service: "custom:local",
-        label: "Local API",
-        models: [{ id: "other-model", name: "other-model" }],
-      },
-    ], [
-      { service: "custom:local", label: "Local API", connected: true },
-    ], {
-      service: "custom:local",
-      model: "mimo-v2.5",
-    })).toEqual([
-      {
-        service: "custom:local",
-        label: "Local API",
-        models: [
-          { id: "mimo-v2.5", name: "mimo-v2.5" },
-          { id: "other-model", name: "other-model" },
-        ],
-      },
+  it("keeps the configured model when discovery returns a different list", () => {
+    expect(buildModelGroups(services, {
+      "custom:GPT": [{ id: "gpt-5.5", name: "GPT 5.5" }],
+    }, {
+      service: "custom:GPT",
+      model: "claude-sonnet-4-6",
+    })[0]?.models).toEqual([
+      { id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" },
+      { id: "gpt-5.5", name: "GPT 5.5" },
     ]);
   });
 });
@@ -268,6 +225,13 @@ describe("pickProjectChatSessionId", () => {
       { sessionId: "short-fiction-session", messageCount: 3 },
       { sessionId: "older-session", messageCount: 1 },
     ])).toBe("short-fiction-session");
+  });
+
+  it("can restore the latest non-chat project session after refresh", () => {
+    expect(pickProjectChatSessionId([
+      { sessionId: "play-session", sessionKind: "play", messageCount: 4 },
+      { sessionId: "old-chat-session", sessionKind: "chat", messageCount: 9 },
+    ])).toBe("play-session");
   });
 
   it("falls back to the newest empty session when all sessions are empty", () => {
@@ -282,56 +246,32 @@ describe("pickProjectChatSessionId", () => {
   });
 });
 
-describe("resolveComposerTextSync", () => {
-  it("keeps focused textarea text when store input is stale or empty", () => {
-    expect(resolveComposerTextSync({
-      storeInput: "",
-      composerText: "本地草稿",
-      elementValue: "正在输入的新内容",
-      elementFocused: true,
-    })).toEqual({
-      text: "正在输入的新内容",
-      syncStoreText: "正在输入的新内容",
-      syncElementText: null,
-    });
+describe("shouldShowPlayChoicePanel", () => {
+  it("does not show choices outside guided Play mode", () => {
+    expect(shouldShowPlayChoicePanel({ playMode: "open", choiceSetKey: "a", consumedChoiceKey: null, choiceCount: 2 })).toBe(false);
+    expect(shouldShowPlayChoicePanel({ playMode: undefined, choiceSetKey: "a", consumedChoiceKey: null, choiceCount: 2 })).toBe(false);
   });
 
-  it("preserves the local composer snapshot when an external store refresh clears input", () => {
-    expect(resolveComposerTextSync({
-      storeInput: "",
-      composerText: "还没发送的草稿",
-      elementValue: "还没发送的草稿",
-      elementFocused: false,
-    })).toEqual({
-      text: "还没发送的草稿",
-      syncStoreText: "还没发送的草稿",
-      syncElementText: null,
-    });
+  it("shows a fresh guided choice set", () => {
+    expect(shouldShowPlayChoicePanel({ playMode: "guided", choiceSetKey: "turn-1", consumedChoiceKey: null, choiceCount: 2 })).toBe(true);
   });
 
-  it("allows an intentional clear after the composer snapshot is also empty", () => {
-    expect(resolveComposerTextSync({
-      storeInput: "",
-      composerText: "",
-      elementValue: "",
-      elementFocused: false,
-    })).toEqual({
-      text: "",
-      syncStoreText: null,
-      syncElementText: null,
-    });
+  it("hides a guided choice set after it has been consumed", () => {
+    expect(shouldShowPlayChoicePanel({ playMode: "guided", choiceSetKey: "turn-1", consumedChoiceKey: "turn-1", choiceCount: 2 })).toBe(false);
   });
 
-  it("syncs focused deletion back to the store instead of refilling old text", () => {
-    expect(resolveComposerTextSync({
-      storeInput: "旧内容",
-      composerText: "",
-      elementValue: "",
-      elementFocused: true,
-    })).toEqual({
-      text: "",
-      syncStoreText: "",
-      syncElementText: null,
-    });
+  it("shows choices again when a new tool result creates a new source key", () => {
+    expect(shouldShowPlayChoicePanel({ playMode: "guided", choiceSetKey: "turn-2", consumedChoiceKey: "turn-1", choiceCount: 2 })).toBe(true);
+  });
+});
+
+describe("isChatScrollNearBottom", () => {
+  it("treats the bottom and near-bottom positions as pinned", () => {
+    expect(isChatScrollNearBottom({ scrollTop: 900, clientHeight: 300, scrollHeight: 1200 })).toBe(true);
+    expect(isChatScrollNearBottom({ scrollTop: 830, clientHeight: 300, scrollHeight: 1200 })).toBe(true);
+  });
+
+  it("does not treat a user reading older messages as pinned to the bottom", () => {
+    expect(isChatScrollNearBottom({ scrollTop: 500, clientHeight: 300, scrollHeight: 1200 })).toBe(false);
   });
 });

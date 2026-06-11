@@ -17,6 +17,8 @@ const MODE_LABELS: Record<FanficMode, string> = {
   cp: "CP（以配对关系为核心）",
 };
 
+const SOURCE_CHUNK_CHARS = 50_000;
+
 export class FanficCanonImporter extends BaseAgent {
   get name(): string {
     return "fanfic-canon-importer";
@@ -27,10 +29,7 @@ export class FanficCanonImporter extends BaseAgent {
     sourceName: string,
     fanficMode: FanficMode,
   ): Promise<FanficCanonOutput> {
-    // Truncate if too long (>50k chars ≈ ~25k words)
-    const maxLen = 50000;
-    const truncated = sourceText.length > maxLen;
-    const text = truncated ? sourceText.slice(0, maxLen) : sourceText;
+    const source = await this.prepareSourceText(sourceText, sourceName);
 
     const modeLabel = MODE_LABELS[fanficMode];
 
@@ -87,12 +86,12 @@ export class FanficCanonImporter extends BaseAgent {
 - 信息不足时标注"（素材未提及）"而非编造
 - 角色语癖是最重要的字段——同人读者最在意角色"像不像"
 - 写作风格提取必须基于实际文本特征，附原文例句
-${truncated ? "\n注意：原作素材过长，已截断。请基于已有部分提取。" : ""}`;
+${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取完整素材后生成的语义资料包，不是截断文本；请以资料包中的片段编号和证据为准。" : ""}`;
 
     const response = await this.chat(
       [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `以下是原作《${sourceName}》的素材：\n\n${text}` },
+        { role: "user", content: `以下是原作《${sourceName}》的素材：\n\n${source.text}` },
       ],
       { temperature: 0.3 },
     );
@@ -143,4 +142,60 @@ ${truncated ? "\n注意：原作素材过长，已截断。请基于已有部分
 
     return { worldRules, characterProfiles, keyEvents, powerSystem, writingStyle, fullDocument };
   }
+
+  private async prepareSourceText(sourceText: string, sourceName: string): Promise<{ readonly text: string; readonly compiled: boolean }> {
+    if (sourceText.length <= SOURCE_CHUNK_CHARS) {
+      return { text: sourceText, compiled: false };
+    }
+
+    const chunks = splitIntoChunks(sourceText, SOURCE_CHUNK_CHARS);
+    const notes: string[] = [];
+    for (let index = 0; index < chunks.length; index++) {
+      const response = await this.chat(
+        [
+          {
+            role: "system",
+            content: [
+              "你是同人正典资料编译器。任务是把一个原作片段压成后续抽取可用的 Markdown 资料包。",
+              "不要续写、不要创作、不要补不存在的信息。只保留片段里实际出现的世界规则、人物、关系、关键事件、能力体系、口头禅、说话风格和原文证据。",
+              "如果片段没有某类信息，直接省略该类。保留片段编号，方便后续追溯。",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [
+              `原作：《${sourceName}》`,
+              `片段：${index + 1}/${chunks.length}`,
+              "",
+              chunks[index],
+            ].join("\n"),
+          },
+        ],
+        { temperature: 0.2 },
+      );
+      const content = response.content.trim();
+      if (content) {
+        notes.push([`## 片段 ${index + 1}/${chunks.length}`, content].join("\n\n"));
+      }
+    }
+
+    return {
+      compiled: true,
+      text: [
+        `# 《${sourceName}》语义资料包`,
+        "",
+        "以下内容由 InkOS 逐段读取完整原作素材后压缩生成，用于后续正典抽取。它不是原文截断。",
+        "",
+        ...notes,
+      ].join("\n"),
+    };
+  }
+}
+
+function splitIntoChunks(text: string, chunkChars: number): string[] {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < text.length; offset += chunkChars) {
+    chunks.push(text.slice(offset, offset + chunkChars));
+  }
+  return chunks;
 }

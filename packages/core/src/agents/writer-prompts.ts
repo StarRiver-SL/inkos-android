@@ -5,20 +5,12 @@ import type { LengthSpec } from "../models/length-governance.js";
 import { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./fanfic-prompt-sections.js";
 import { buildEnglishCoreRules, buildEnglishAntiAIRules, buildEnglishCharacterMethod, buildEnglishPreWriteChecklist, buildEnglishGenreIntro } from "./en-prompt-sections.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
-import { normalizePromptForCache, optimizePromptBlock } from "../utils/prompt-optimizer.js";
 
 export interface FanficContext {
   readonly fanficCanon: string;
   readonly fanficMode: FanficMode;
   readonly allowedDeviations: ReadonlyArray<string>;
 }
-
-const WRITER_SYSTEM_SECTION_BUDGET = {
-  genreBody: 8_000,
-  bookRulesBody: 6_000,
-  styleGuide: 8_000,
-  styleFingerprint: 2_000,
-} as const;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -43,9 +35,13 @@ export function buildWriterSystemPrompt(
   const governed = inputProfile === "governed";
   const resolvedLengthSpec = lengthSpec ?? buildLengthSpec(book.chapterWordCount, isEnglish ? "en" : "zh");
 
-  const outputSection = mode === "creative"
-    ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
-    : buildOutputFormat(book, genreProfile, resolvedLengthSpec);
+  const outputSection = isEnglish
+    ? (mode === "creative"
+        ? buildEnglishCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
+        : buildEnglishOutputFormat(book, genreProfile, resolvedLengthSpec))
+    : (mode === "creative"
+        ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
+        : buildOutputFormat(book, genreProfile, resolvedLengthSpec));
 
   const sections = isEnglish
     ? [
@@ -55,14 +51,16 @@ export function buildWriterSystemPrompt(
         buildChapterMemoContract("en", governed),
         buildLengthGuidance(resolvedLengthSpec, "en"),
         buildWritingCraftCard("en"),
+        buildProseExecutionRules("en"),
         buildCreativeConstitution("en"),
         buildImmersionPillars("en"),
         buildGoldenOpeningDiscipline(chapterNumber, "en"),
-        buildGenreRules(genreProfile, optimizePromptBlock(genreBody, "setting")),
+        buildGenreRules(genreProfile, genreBody),
         buildProtagonistRules(bookRules),
-        buildBookRulesBody(optimizePromptBlock(bookRulesBody, "setting")),
-        buildStyleGuide(optimizePromptBlock(styleGuide, "setting")),
-        buildStyleFingerprint(styleFingerprint ? optimizePromptBlock(styleFingerprint, "setting") : undefined),
+        buildNarrativePersonRule(bookRules, isEnglish ? "en" : "zh"),
+        buildBookRulesBody(bookRulesBody),
+        buildStyleGuide(styleGuide),
+        buildStyleFingerprint(styleFingerprint),
         fanficContext ? buildFanficCanonSection(fanficContext.fanficCanon, fanficContext.fanficMode) : "",
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
@@ -76,16 +74,18 @@ export function buildWriterSystemPrompt(
         buildChapterMemoContract("zh", governed),
         buildLengthGuidance(resolvedLengthSpec, "zh"),
         buildWritingCraftCard("zh"),
+        buildProseExecutionRules("zh"),
         buildCreativeConstitution("zh"),
         buildImmersionPillars("zh"),
         buildGoldenOpeningDiscipline(chapterNumber, "zh"),
         buildGoldenChaptersRules(chapterNumber, isEnglish ? "en" : "zh"),
         bookRules?.enableFullCastTracking ? buildFullCastTracking() : "",
-        buildGenreRules(genreProfile, optimizePromptBlock(genreBody, "setting")),
+        buildGenreRules(genreProfile, genreBody),
         buildProtagonistRules(bookRules),
-        buildBookRulesBody(optimizePromptBlock(bookRulesBody, "setting")),
-        buildStyleGuide(optimizePromptBlock(styleGuide, "setting")),
-        buildStyleFingerprint(styleFingerprint ? optimizePromptBlock(styleFingerprint, "setting") : undefined),
+        buildNarrativePersonRule(bookRules, isEnglish ? "en" : "zh"),
+        buildBookRulesBody(bookRulesBody),
+        buildStyleGuide(styleGuide),
+        buildStyleFingerprint(styleFingerprint),
         fanficContext ? buildFanficCanonSection(fanficContext.fanficCanon, fanficContext.fanficMode) : "",
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
@@ -93,7 +93,7 @@ export function buildWriterSystemPrompt(
         outputSection,
       ];
 
-  return normalizePromptForCache(sections.filter(Boolean).join("\n\n"));
+  return sections.filter(Boolean).join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
 }
 
 // ---------------------------------------------------------------------------
-// Chapter memo alignment — 7 sections from new.txt methodology
+// Chapter memo alignment — 7 sections from mobile web-fiction craft methodology
 // ---------------------------------------------------------------------------
 
 function buildChapterMemoContract(language: "zh" | "en", governed: boolean): string {
@@ -155,7 +155,7 @@ You will receive a chapter_memo composed of 7 markdown sections:
 - ## 本章 hook 账 → **hard correspondence rule**: each hook_id listed under advance/resolve MUST have a **concretely locatable payoff scene** in the prose — explicit characters acting on or talking about a specific object/event/piece of information, with observable actions. No "sideways hints" or "deferred to next chapter". Example: if the memo says 'advance: H007 Huzi's IOU → planted → pressured', the prose must contain a scene where Lin Qiu actually touches / sees / picks up that specific IOU and does something. An inner mention like "he remembered the IOU was still in the drawer" does NOT count. Each advance/resolve payoff scene must be at least 60 chars. Entries under defer need no prose. Entries under open only need a natural new-hook seed near the chapter end
 - ## 不要做 → hard prohibitions for this chapter
 
-Address each section in order when drafting the chapter. Every section must leave a visible trace in the prose — if a section is not reflected, the chapter is incomplete. **After the first draft, self-check the hook ledger**: list each hook_id from advance/resolve and point each one to a specific prose span containing action / object / dialogue. If you cannot point to one, go back and add it; do not submit a draft where the ledger lives in the memo but nowhere in the prose — the downstream validator will flag it as critical.`;
+Address each section in order when drafting the chapter. Every section must leave a visible trace in the prose — if a section is not reflected, the chapter is incomplete. **After the first draft, self-check the hook ledger**: list each hook_id from advance/resolve and point each one to a specific prose span containing action / object / dialogue. If you cannot point to one, go back and add it; do not submit a draft where the ledger lives in the memo but nowhere in the prose — review will flag the missing payoff and ask for a concrete scene.`;
   }
 
   return `## 章节备忘对齐
@@ -171,7 +171,7 @@ Address each section in order when drafting the chapter. Every section must leav
 - ## 本章 hook 账 → **硬对应规则**：advance/resolve 下面列出的每一个 hook_id 都必须在正文里有一个**具体可定位的兑现段**——写明人物对着什么物件/事件/信息做出什么可观察的动作或交谈。不允许"侧面暗示""留给下章"。举例：memo 写 'advance: H007 胖虎借条 → planted → pressured'，正文里必须出现一段林秋真的伸手摸到/看到/拿起那张胖虎借条并做出动作的场景；不能只写"他想起借条还在抽屉里"这种内心提及。每个 advance/resolve 的 hook 兑现段至少 60 字。defer 下的不用落，open 段只需要在章末附近安排一个自然引出的新悬念即可
 - ## 不要做 → 硬约束红线
 
-写作时按段落顺序落实，每一段都要在正文里有对应的兑现痕迹。如果某一段没有体现到正文里，本章不算完成。**写完初稿后自检一遍 hook 账**：把 advance 和 resolve 的 hook_id 列下来，对照正文，确认每一个都能指到一段带具体动作/物件/对话的 prose。如果指不到，回去补写；不要提交"账本在 memo 里、正文里没落"的稿子——下游 validator 会直接判 critical 退稿。`;
+写作时按段落顺序落实，每一段都要在正文里有对应的兑现痕迹。如果某一段没有体现到正文里，本章不算完成。**写完初稿后自检一遍 hook 账**：把 advance 和 resolve 的 hook_id 列下来，对照正文，确认每一个都能指到一段带具体动作/物件/对话的 prose。如果指不到，回去补写；不要提交"账本在 memo 里、正文里没落"的稿子——审稿会标记缺口并要求补出具体场景。`;
 }
 
 function buildLengthGuidance(lengthSpec: LengthSpec, language: "zh" | "en"): string {
@@ -220,7 +220,7 @@ function buildCoreRules(lengthSpec: LengthSpec): string {
 - 描写必须服务叙事：环境描写烘托氛围或暗示情节，一笔带过即可；禁止无效描写
 - 日常/过渡段落必须为后续剧情服务：或埋伏笔，或推进关系，或建立反差。纯填充式日常是流水账的温床
 
-## 看点密集度（番茄老师鎏旗，硬尺）
+## 看点密集度（硬尺）
 
 本章正文从头到尾必须满足以下节奏，写完后自检：
 
@@ -230,7 +230,7 @@ function buildCoreRules(lengthSpec: LengthSpec): string {
 - 不靠密度堆砌糊弄——单章里的爽点/钩子/悬念必须服务于本章 goal，不能是和主线无关的孤立段落
 - 如果某段连续 300 字以上是环境、回忆、议论、心理独白而没有推进主线或制造看点，就是水文，必须删或改
 - **密度是靠段落内的语义密度实现，不是靠把段落切碎**：
-  - 叙事段（非对话）**必须 ≥ 40 字**——差不多是手机屏 2 行，低于这个数就是"一句动作 / 一句观察 / 一句反应各自一段"，直接违反 new.txt 的"每段 3-5 行手机阅读"准则
+  - 叙事段（非对话）**必须 ≥ 40 字**——差不多是手机屏 2 行，低于这个数就是"一句动作 / 一句观察 / 一句反应各自一段"，直接违反移动端阅读节奏准则
   - 目标长度：叙事段 40-120 字（3-5 行手机屏），允许偶尔到 150 字讲一段连贯动作链
   - 对话段落不算入"短段"——它天然短，无需并段
   - **短段（<40 字）只在三个场景允许独立成段**：(1) 开场前 300 字里的反转金句（如"她突然跪下"），(2) 章末钩子最后一句（action-climax 定格），(3) 单章 ≤ 3 个"爆点短段"（一击命中、改变局势的关键台词、定格镜头）
@@ -243,7 +243,7 @@ function buildCoreRules(lengthSpec: LengthSpec): string {
     - ✗ "他一愣。/ 手停了。/ 嘴唇发白。"（3 连心理反应各自一段）
     - ✓ "他一愣，手停了，嘴唇发白。"（并段为 1 句节奏紧凑的叙事）
 
-## 章节 80/20 断章（番茄老师弈青锋，硬尺）
+## 章节 80/20 断章（硬尺）
 
 - **永远不要在一章里把本章故事讲完**：本章的主剧情写到 80%，剩下 20% 留给下一章开头消化/揭示/后果
 - 章末必须断在 action-climax 的那一刻：主角刚放大招尚未见效 / 刚拔刀尚未落下 / 刚塞出银行卡尚未转身——不给结果，让读者到下一章才看到
@@ -538,16 +538,16 @@ export function buildGoldenOpeningDiscipline(
   if (language === "en") {
     return `## Golden Opening Discipline — Chapter ${chapterNumber}
 
-This is chapter ${chapterNumber} of the opening three — your prose directly decides whether the reader stays. The Golden Three Chapters rule from new.txt is a hard constraint on your sentences, not advice. Chapter 1: within the first 800 words the protagonist must trip the main-line conflict (chase, dead-end, dispossession, transmigration-as-crisis); long background paragraphs are forbidden, and worldbuilding rides on the protagonist's actions instead of being explained in a block. **The last sentence of the first 300 words (the reader's first phone screen) must land a dramatic / reversal / striking beat — "Officer, I transmigrated"-level, "I'll probably die tomorrow"-level, "I'm attending my own funeral"-level — not background or scene-setting. When the reader scrolls to the bottom of the first screen they must feel pulled into the next line.** Chapter 2: the edge — power, system, rebirth-memory, information advantage — must be **performed** (one concrete event of using it, with a visible consequence), not **announced** (a narrator paragraph saying it exists). Chapter 3: somewhere in this chapter the protagonist's next quantifiable short-term goal must surface, so the reader can name what comes next when they close the page.
+This is chapter ${chapterNumber} of the opening three — your prose directly decides whether the reader stays. The Golden Three Chapters rule is a hard constraint on your sentences, not advice. Chapter 1: within the first 800 words the protagonist must trip the main-line conflict (chase, dead-end, dispossession, transmigration-as-crisis); long background paragraphs are forbidden, and worldbuilding rides on the protagonist's actions instead of being explained in a block. **The last sentence of the first 300 words (the reader's first phone screen) must land a dramatic / reversal / striking beat — "Officer, I transmigrated"-level, "I'll probably die tomorrow"-level, "I'm attending my own funeral"-level — not background or scene-setting. When the reader scrolls to the bottom of the first screen they must feel pulled into the next line.** Chapter 2: the edge — power, system, rebirth-memory, information advantage — must be **performed** (one concrete event of using it, with a visible consequence), not **announced** (a narrator paragraph saying it exists). Chapter 3: somewhere in this chapter the protagonist's next quantifiable short-term goal must surface, so the reader can name what comes next when they close the page.
 
 The discipline that runs across all three opening chapters: paragraphs of three to five lines (mobile reading), verbs over adjectives, and every chapter ends on a small hook — a cliff, an unresolved question, or an emotional gap. **At most two scenes and at most two named characters who actually clash in the chapter (protagonist + one trigger/opponent; walk-on roles get a role label only, no name, no expansion). Editor Cong Yue's rule tightens the cap from 3 to 2 — readers already mix up 3.** Information is layered into action: basic facts (looks, status, situation) emerge from what the protagonist does; key world rules (system mechanics, the deeper logic) attach to plot triggers; a paragraph of pure exposition is forbidden.`;
   }
 
   return `## 黄金三章写作纪律 — 第 ${chapterNumber} 章
 
-这是开篇三章中的第 ${chapterNumber} 章——你写出的每一句话都直接决定读者是否留下来。new.txt 的黄金三章法则对你不是建议，是对句子的硬约束。第 1 章：主角出场 800 字以内必须触发主线冲突（追杀、死局、被夺权、穿越即危机），禁止长段背景铺垫，世界观要通过主角的行动自然带出，不要整段解释。**第 1 章正文前 300 字（手机屏第一页）的最后一句必须是带戏剧性/反差/反转的收尾——警察叔叔我穿越了这类、我大概明天就要死了这类、我躺在自己的葬礼上这类——而不是介绍背景或交代环境。读者第一屏刷到页尾时必须产生"下一句是什么"的拉力。** 第 2 章：金手指/能力/系统/重生记忆/信息差必须"做出来"——一次具体使用的事件、一个看得见的后果——而不是"说出来"——旁白介绍它存在。第 3 章：本章中段必须让主角下一个可量化的短期目标浮上水面，读者合上页面要能说出"接下来他要干什么"。
+这是开篇三章中的第 ${chapterNumber} 章——你写出的每一句话都直接决定读者是否留下来。黄金三章法则对你不是建议，是对句子的硬约束。第 1 章：主角出场 800 字以内必须触发主线冲突（追杀、死局、被夺权、穿越即危机），禁止长段背景铺垫，世界观要通过主角的行动自然带出，不要整段解释。**第 1 章正文前 300 字（手机屏第一页）的最后一句必须是带戏剧性/反差/反转的收尾——警察叔叔我穿越了这类、我大概明天就要死了这类、我躺在自己的葬礼上这类——而不是介绍背景或交代环境。读者第一屏刷到页尾时必须产生"下一句是什么"的拉力。** 第 2 章：金手指/能力/系统/重生记忆/信息差必须"做出来"——一次具体使用的事件、一个看得见的后果——而不是"说出来"——旁白介绍它存在。第 3 章：本章中段必须让主角下一个可量化的短期目标浮上水面，读者合上页面要能说出"接下来他要干什么"。
 
-贯穿开篇三章的纪律：段落 3-5 行（手机阅读节奏），动词压过形容词，每一章结尾必有小钩子——小悬念、未解之问、情绪缺口。**本章场景 ≤ 2 个、有名有姓参与正面冲突的人物 ≤ 2 个（主角 + 1 个触发者或对手；路人甲乙只报身份不给名字，不展开）。番茄老师丛月把开篇人物上限从 3 收紧到 2——3 个已经够读者记混，2 个最稳。** 信息分层植入到动作里：基础信息（外貌、身份、处境）通过主角行动自然带出；关键设定（系统规则、世界底层）结合剧情节点揭示；禁止整段 exposition。`;
+贯穿开篇三章的纪律：段落 3-5 行（手机阅读节奏），动词压过形容词，每一章结尾必有小钩子——小悬念、未解之问、情绪缺口。**本章场景 ≤ 2 个、有名有姓参与正面冲突的人物 ≤ 2 个（主角 + 1 个触发者或对手；路人甲乙只报身份不给名字，不展开）。开篇人物上限从 3 收紧到 2：3 个已经够读者记混，2 个最稳。** 信息分层植入到动作里：基础信息（外貌、身份、处境）通过主角行动自然带出；关键设定（系统规则、世界底层）结合剧情节点揭示；禁止整段 exposition。`;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,13 +669,51 @@ function buildGenreRules(gp: GenreProfile, genreBody: string): string {
     fatigueLine,
     pacingLine,
     chapterTypesLine,
-    capWriterSystemSection(genreBody, "genre profile", WRITER_SYSTEM_SECTION_BUDGET.genreBody),
+    genreBody,
   ].filter(Boolean).join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
 // Protagonist rules from book_rules
 // ---------------------------------------------------------------------------
+
+// Narrative person is a durable user constraint: enforce it only when the user
+// explicitly set one (book_rules.narrativePerson). When unset, stay silent so the
+// genre default applies — we never impose a person the user didn't ask for.
+function buildNarrativePersonRule(bookRules: BookRules | null, language: "zh" | "en"): string {
+  const person = bookRules?.narrativePerson;
+  if (!person) return "";
+  if (language === "en") {
+    return person === "first"
+      ? "## Narrative person (hard constraint)\nWrite this book entirely in FIRST person (the protagonist's inner viewpoint). Do NOT slip into third person or an omniscient narrator — this overrides genre convention and your default."
+      : "## Narrative person (hard constraint)\nWrite this book in THIRD person.";
+  }
+  return person === "first"
+    ? "## 叙事人称（硬约束）\n本书必须全程使用第一人称（主角内心视角）叙述，禁止切换到第三人称或全知视角——此约束优先于题材惯例与你的默认倾向。"
+    : "## 叙事人称（硬约束）\n本书使用第三人称叙述。";
+}
+
+/**
+ * Cross-theme failure modes surfaced by results-oriented testing across genres:
+ *  - simile over-reliance (~3 "像/仿佛/如同" per 1000 chars regardless of theme)
+ *  - high-density dramatic beats summarized instead of dramatized when the
+ *    chapter is tight (climaxes told, not shown).
+ * Theme-independent, so this lives in the always-on writer discipline.
+ */
+function buildProseExecutionRules(language: "zh" | "en"): string {
+  if (language === "en") {
+    return `## Prose execution (cross-theme failure modes)
+
+**Simile restraint.** Do not lean on "like / as if / as though" as a default device. At most one simile per scene, and only when it lights the image up better than plain rendering would. Priority is always: a precise verb > a concrete action or sensory detail > direct description > simile. Before reaching for "like…", check whether an exact verb or a concrete action would hit harder.
+
+**Play out the climax — never summarize it.** This chapter's high-density / high-stakes beats — a conflict erupting, life-or-death, a major turn, a reveal, an action climax — MUST be played out beat by beat (action, dialogue, the senses, pauses, pacing). Never compress them into "then he saved them, the police came, the antagonist was arrested." When a chapter packs several major events, expand the single most important one into a full scene; connective tissue may be compressed, but the key beat must never decay into a summary. The tighter the chapter, the harder this holds — if you are short on words, pack fewer events, do not render the climax as a synopsis.`;
+  }
+  return `## 文笔执行（跨题材通病纠正）
+
+**明喻节制。** 不要把"像/仿佛/如同/像……一样"当默认修辞反复用。每个场景明喻最多 1 处，且只在它真能点亮画面、比直写更准时才用。优先级永远是：精确的动词 > 具体的动作或感官细节 > 直接描写 > 明喻。想写"像……"之前，先问一句：换成一个准确的动词或一个具体动作，是不是更狠。
+
+**高潮必须演出、不许概述。** 本章的高密度／高风险节拍——冲突爆发、生死、重大转折、真相揭露、动作高潮——必须一拍一拍现场演出（动作、对话、五感、停顿、节奏），绝不能用一两句"然后他救了人、警察来了、对手被捕"带过。当一章里挤了多个重大事件时，挑最关键的那一拍写成完整场景，次要的可压成过渡，但最关键那拍永远不许退化成总结。章节越紧凑越要守这条——字数不够就少塞事件，而不是把高潮写成梗概。`;
+}
 
 function buildProtagonistRules(bookRules: BookRules | null): string {
   if (!bookRules?.protagonist) return "";
@@ -713,7 +751,7 @@ function buildProtagonistRules(bookRules: BookRules | null): string {
 
 function buildBookRulesBody(body: string): string {
   if (!body) return "";
-  return `## 本书专属规则\n\n${capWriterSystemSection(body, "book rules", WRITER_SYSTEM_SECTION_BUDGET.bookRulesBody)}`;
+  return `## 本书专属规则\n\n${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +760,7 @@ function buildBookRulesBody(body: string): string {
 
 function buildStyleGuide(styleGuide: string): string {
   if (!styleGuide || styleGuide === "(文件尚未创建)") return "";
-  return `## 文风指南\n\n${capWriterSystemSection(styleGuide, "style guide", WRITER_SYSTEM_SECTION_BUDGET.styleGuide)}`;
+  return `## 文风指南\n\n${styleGuide}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -735,19 +773,7 @@ function buildStyleFingerprint(fingerprint?: string): string {
 
 以下是从参考文本中提取的写作风格特征。你的输出必须尽量贴合这些特征：
 
-${capWriterSystemSection(fingerprint, "style fingerprint", WRITER_SYSTEM_SECTION_BUDGET.styleFingerprint)}`;
-}
-
-function capWriterSystemSection(content: string, label: string, maxChars: number): string {
-  if (!content || content.length <= maxChars) return content;
-  const marker = `\n\n[InkOS prompt budget: omitted ${content.length - maxChars} chars from ${label}; kept beginning and latest tail.]\n\n`;
-  if (maxChars <= marker.length + 2) {
-    return content.slice(0, maxChars);
-  }
-  const keep = maxChars - marker.length;
-  const head = Math.max(1, Math.floor(keep * 0.55));
-  const tail = Math.max(1, keep - head);
-  return `${content.slice(0, head)}${marker}${content.slice(-tail)}`;
+${fingerprint}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -916,4 +942,115 @@ ${updatedLedger}
 - **关系**: 某角色(关系性质/Ch#) | ...
 - **已知**: 该角色已知的信息（仅限亲历或被告知）
 - **未知**: 该角色不知道的信息`;
+}
+
+// ---------------------------------------------------------------------------
+// English output formats (parser keys off the === MARKER === anchors, so the
+// table labels below are safely localized; persisted artifacts read English).
+// ---------------------------------------------------------------------------
+
+function buildEnglishPreWriteTable(gp: GenreProfile): string {
+  const resourceRow = gp.numericalSystem
+    ? "| Current resource total | X | match the ledger |\n| This chapter's gain | +X (source) | write +0 if none |\n"
+    : "";
+
+  return `=== PRE_WRITE_CHECK ===
+(Output a Markdown table. Every row aligns with the seven chapter_memo sections, not the volume outline.)
+| Check | This chapter | Note |
+|-------|--------------|------|
+| Current task | Restate the chapter_memo "Current task" and the concrete action this chapter takes | Be specific, not abstract |
+| What the reader is waiting for | How this chapter handles it: create / delay / pay off | Match the memo |
+| Pay off / keep hidden | Foreshadowing to pay off + cards that must stay down | Quote the memo |
+| Routine / transition duty | If any routine or transition passage exists, state each one's function | Match the memo mapping |
+| Required end-of-chapter change | 1-3 concrete changes from the memo's end-of-chapter change | Must land on the page |
+| Do not | Restate the memo "Do not" list | The prose must not touch these |
+| Context range | Ch X to Ch Y / state card / setting files | |
+| Current anchor | Location / opponent / payoff goal | Anchor must be concrete |
+${resourceRow}| Hooks to resolve | Real hook_id (write none if absent) | Match the hook pool |
+| This chapter's conflict | One line | |
+| Chapter type | ${gp.chapterTypes.join(" / ")} | |
+| Risk scan | OOC / info leak / canon conflict${gp.powerScaling ? " / power-scaling break" : ""} / pacing / word fatigue | |`;
+}
+
+function buildEnglishContentBlocks(lengthSpec: LengthSpec): string {
+  return `=== CHAPTER_TITLE ===
+(Chapter title, without "Chapter X". It must differ from existing titles; do not reuse the same or similar titles. If recent title history or high-frequency title words are provided, avoid repeated roots and overused imagery.)
+
+=== CHAPTER_CONTENT ===
+(Chapter prose. Target ${lengthSpec.target} words, acceptable range ${lengthSpec.softMin}-${lengthSpec.softMax} words.)`;
+}
+
+function buildEnglishCreativeOutputFormat(_book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec): string {
+  return `## Output Format (follow strictly)
+
+${buildEnglishPreWriteTable(gp)}
+
+${buildEnglishContentBlocks(lengthSpec)}
+
+[Important] Output only the three blocks above (PRE_WRITE_CHECK, CHAPTER_TITLE, CHAPTER_CONTENT). State cards, hook pool, and summaries are handled by the later settlement stage; do not output them.`;
+}
+
+function buildEnglishOutputFormat(_book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec): string {
+  const postSettlement = gp.numericalSystem
+    ? `=== POST_SETTLEMENT ===
+(If any numerical change occurred, output a Markdown table.)
+| Item | This chapter | Note |
+|------|--------------|------|
+| Resource ledger | open X / gain +Y / close Z | write +0 if none |
+| Key resources | name -> contribution +Y (basis) | write "none" if none |
+| Hook changes | new / resolved / deferred hook | sync the hook pool |`
+    : `=== POST_SETTLEMENT ===
+(If any hook changed, output this.)
+| Item | This chapter | Note |
+|------|--------------|------|
+| Hook changes | new / resolved / deferred hook | sync the hook pool |`;
+
+  const updatedLedger = gp.numericalSystem
+    ? `\n=== UPDATED_LEDGER ===\n(The full updated resource ledger, Markdown table.)`
+    : "";
+
+  return `## Output Format (follow strictly)
+
+${buildEnglishPreWriteTable(gp)}
+
+${buildEnglishContentBlocks(lengthSpec)}
+
+${postSettlement}
+
+=== UPDATED_STATE ===
+(The full updated state card, Markdown table.)
+${updatedLedger}
+=== UPDATED_HOOKS ===
+(The full updated hook pool, Markdown table.)
+
+=== CHAPTER_SUMMARY ===
+(Chapter summary as a Markdown table with these columns.)
+| Chapter | Title | Characters | Key events | State change | Hook dynamics | Emotional tone | Chapter type |
+|---------|-------|------------|------------|--------------|---------------|----------------|--------------|
+| N | this chapter's title | Char1, Char2 | one-line summary | key change | H01 planted / H02 advanced | emotional arc | ${gp.chapterTypes.length > 0 ? gp.chapterTypes.join(" / ") : "transition / conflict / climax / resolution"} |
+
+=== UPDATED_SUBPLOTS ===
+(The full updated subplot board, Markdown table.)
+| Subplot ID | Name | Characters | Start ch | Last active ch | Chapters since | Status | Progress | Resolve ETA |
+|------------|------|------------|----------|----------------|----------------|--------|----------|-------------|
+
+=== UPDATED_EMOTIONAL_ARCS ===
+(The full updated emotional arcs, Markdown table.)
+| Character | Chapter | Emotional state | Trigger | Intensity (1-10) | Arc direction |
+|-----------|---------|-----------------|---------|------------------|---------------|
+
+=== UPDATED_CHARACTER_MATRIX ===
+(The updated character matrix, one ## block per character.)
+
+## Character Name
+- **Role**: protagonist / antagonist / ally / supporting / mentioned
+- **Tags**: core identity tags
+- **Contrast**: a distinctive detail that breaks the stereotype
+- **Voice**: how they speak
+- **Personality**: underlying temperament
+- **Motivation**: core driving force
+- **Current**: this chapter's immediate goal
+- **Relations**: Character (relationship / Ch#) | ...
+- **Knows**: what this character knows (only what they witnessed or were told)
+- **Unknown**: what this character does not know`;
 }

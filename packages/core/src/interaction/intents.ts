@@ -15,6 +15,7 @@ export const InteractionIntentTypeSchema = z.enum([
   "revise_chapter",
   "rewrite_chapter",
   "patch_chapter_text",
+  "replace_chapter_text",
   "edit_truth",
   "rename_entity",
   "update_focus",
@@ -23,7 +24,6 @@ export const InteractionIntentTypeSchema = z.enum([
   "explain_status",
   "explain_failure",
   "export_book",
-  "switch_mode",
 ]);
 
 export type InteractionIntentType = z.infer<typeof InteractionIntentTypeSchema>;
@@ -56,6 +56,7 @@ export const InteractionRequestSchema = z.object({
   newValue: z.string().min(1).optional(),
   targetText: z.string().min(1).optional(),
   replacementText: z.string().min(1).optional(),
+  fullText: z.string().min(1).optional(),
   instruction: z.string().min(1).optional(),
   mode: AutomationModeSchema.optional(),
 });

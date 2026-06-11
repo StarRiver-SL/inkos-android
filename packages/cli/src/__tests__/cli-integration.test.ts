@@ -76,7 +76,7 @@ describe("CLI integration", () => {
     it("prints version number", () => {
       const output = run(["--version"]);
       expect(output.trim()).toMatch(/^\d+\.\d+\.\d+$/);
-    });
+    }, CLI_PROCESS_TIMEOUT_MS);
   });
 
   describe("inkos --help", () => {
@@ -216,7 +216,7 @@ describe("CLI integration", () => {
   });
 
   describe("inkos interact", () => {
-    it("returns structured JSON for shared interaction mode switches", async () => {
+    it("returns the agent-session JSON contract for natural-language interactions", async () => {
       const initialized = await stat(join(projectDir, "inkos.json")).then(() => true).catch(() => false);
       if (!initialized) run(["init"]);
       const envPath = join(projectDir, ".env");
@@ -230,13 +230,15 @@ describe("CLI integration", () => {
         const output = run(["interact", "--json", "--message", "切换到全自动"]);
         const data = JSON.parse(output);
 
-        expect(data.request.intent).toBe("switch_mode");
-        expect(data.request.mode).toBe("auto");
-        expect(data.session.automationMode).toBe("auto");
+        expect(data.request).toBeUndefined();
+        expect(data.responseText).toEqual(expect.any(String));
+        expect(data.session).toEqual(expect.objectContaining({
+          sessionKind: "chat",
+        }));
       } finally {
         await writeFile(envPath, originalEnv, "utf-8");
       }
-    });
+    }, CLI_PROCESS_TIMEOUT_MS);
 
     it("binds the requested book when interact is called with --book", async () => {
       const initialized = await stat(join(projectDir, "inkos.json")).then(() => true).catch(() => false);
@@ -271,7 +273,7 @@ describe("CLI integration", () => {
         await rm(join(projectDir, "books", "harbor"), { recursive: true, force: true });
         await rm(join(projectDir, ".inkos-session.json"), { force: true }).catch(() => {});
       }
-    });
+    }, CLI_PROCESS_TIMEOUT_MS);
   });
 
   describe("inkos config set-model", () => {
@@ -339,7 +341,7 @@ describe("CLI integration", () => {
       expect(exitCode).not.toBe(0);
       expect(stderr).toContain("Failed to create book");
       await expect(stat(staleDir)).rejects.toThrow();
-    });
+    }, CLI_PROCESS_TIMEOUT_MS);
   });
 
   describe("inkos status", () => {
@@ -575,7 +577,7 @@ describe("CLI integration", () => {
 
       await expect(readFile(join(projectDir, ".nvmrc"), "utf-8")).resolves.toBe("22\n");
       await expect(readFile(join(projectDir, ".node-version"), "utf-8")).resolves.toBe("22\n");
-    });
+    }, CLI_PROCESS_TIMEOUT_MS);
 
     it("treats localhost OpenAI-compatible endpoints as API-key optional", async () => {
       await stat(join(projectDir, "inkos.json")).catch(() => {

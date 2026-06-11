@@ -8,11 +8,6 @@ import type {
   ToolExecution,
 } from "../../types";
 import { localizeKnownRuntimeMessage } from "../../../../lib/error-copy";
-import {
-  extractToolDetails as extractToolDetailsFromResult,
-  extractToolError as extractToolErrorFromResult,
-  summarizeToolResult,
-} from "../../../../lib/tool-result";
 
 const NULL_BOOK_KEY = "__null__";
 
@@ -29,8 +24,14 @@ const TOOL_LABELS: Record<string, string> = {
   edit: "编辑文件",
   grep: "搜索",
   ls: "列目录",
+  context_compression: "整理上下文",
+  propose_action: "确认动作",
   short_fiction_run: "短篇生产",
   generate_cover: "生成封面",
+  play_edit: "编辑互动世界",
+  play_start: "启动互动世界",
+  play_revise: "重做互动回合",
+  play_step: "推进互动世界",
 };
 
 export function bookKey(bookId: string | null | undefined): string {
@@ -48,18 +49,40 @@ export function resolveToolLabel(tool: string, agent?: string): string {
 }
 
 export function summarizeResult(result: unknown): string {
-  return summarizeToolResult(result, { maxLength: 2000 });
+  if (typeof result === "string") return result.slice(0, 2000);
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (typeof record.content === "string") return record.content.slice(0, 2000);
+    if (Array.isArray(record.content)) {
+      const text = record.content
+        .map((part) => {
+          const item = part as { type?: unknown; text?: unknown };
+          return item.type === "text" && typeof item.text === "string" ? item.text : "";
+        })
+        .filter(Boolean)
+        .join("\n");
+      if (text.trim()) return text.slice(0, 2000);
+    }
+  }
+  return String(result).slice(0, 2000);
 }
 
 export function extractToolDetails(result: unknown): unknown {
-  return extractToolDetailsFromResult(result);
+  if (!result || typeof result !== "object") return undefined;
+  return (result as Record<string, unknown>).details;
 }
 
 export function extractToolError(result: unknown): string {
-  return extractToolErrorFromResult(result, {
-    maxLength: 500,
-    localize: localizeKnownRuntimeMessage,
-  });
+  if (typeof result === "string") return localizeKnownRuntimeMessage(result).slice(0, 500);
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (typeof record.content === "string") return localizeKnownRuntimeMessage(record.content).slice(0, 500);
+    if (record.content && Array.isArray(record.content)) {
+      const textPart = record.content.find((content: any) => content.type === "text");
+      if (textPart) return localizeKnownRuntimeMessage((textPart as any).text ?? "").slice(0, 500);
+    }
+  }
+  return localizeKnownRuntimeMessage(String(result)).slice(0, 500);
 }
 
 export function getOrCreateStream(
@@ -86,7 +109,10 @@ export function findRunningToolPart(
 ): (MessagePart & { type: "tool" }) | undefined {
   for (let i = parts.length - 1; i >= 0; i -= 1) {
     const part = parts[i];
-    if (part.type === "tool" && part.execution.status === "running") {
+    if (
+      part.type === "tool"
+      && (part.execution.status === "running" || part.execution.status === "processing")
+    ) {
       return part as MessagePart & { type: "tool" };
     }
   }
@@ -128,6 +154,8 @@ export function deriveFlat(
 export function createSessionRuntime(input: {
   sessionId: string;
   bookId: string | null;
+  sessionKind?: SessionRuntime["sessionKind"];
+  playMode?: SessionRuntime["playMode"];
   title: string | null;
   messages?: ReadonlyArray<Message>;
   deletedMessageKeys?: ReadonlyArray<string>;
@@ -136,6 +164,8 @@ export function createSessionRuntime(input: {
   return {
     sessionId: input.sessionId,
     bookId: input.bookId,
+    sessionKind: input.sessionKind,
+    playMode: input.playMode,
     title: input.title,
     messages: input.messages ?? [],
     deletedMessageKeys: input.deletedMessageKeys ?? [],
@@ -161,8 +191,7 @@ export function filterDeletedMessages(
 ): ReadonlyArray<Message> {
   if (deletedMessageKeys.length === 0) return messages;
   const deleted = new Set(deletedMessageKeys);
-
-  const parsedDeletedKeys = deletedMessageKeys.map(key => {
+  const parsedDeletedKeys = deletedMessageKeys.map((key) => {
     const parts = key.split("\u001f");
     return {
       role: parts[0],
@@ -172,17 +201,12 @@ export function filterDeletedMessages(
   });
 
   return messages.filter((message) => {
-    const exactKey = messageDeletionKey(message);
-    if (deleted.has(exactKey)) return false;
-
-    // Backend timestamps can differ from local frontend timestamps significantly (e.g. streaming time)
-    const msgContent = message.content.trim().slice(0, 240);
-    for (const dKey of parsedDeletedKeys) {
-      if (dKey.role === message.role && dKey.content === msgContent) {
-        return false; // Match by role and content only to handle timestamp mismatches
-      }
-    }
-    return true;
+    if (deleted.has(messageDeletionKey(message))) return false;
+    const messageContent = message.content.trim().slice(0, 240);
+    return !parsedDeletedKeys.some((key) =>
+      key.role === message.role
+      && key.content === messageContent,
+    );
   });
 }
 
@@ -192,7 +216,7 @@ export function deserializeMessages(
   return msgs
     .filter((message) => message.role === "user" || message.role === "assistant")
     .map((message) => {
-      const toolExecutions = message.toolExecutions ? [...message.toolExecutions] : undefined;
+      const toolExecutions = (message as any).toolExecutions as ToolExecution[] | undefined;
       const parts: MessagePart[] = [];
       if (message.thinking) parts.push({ type: "thinking", content: message.thinking, streaming: false });
       if (toolExecutions) {
@@ -213,6 +237,53 @@ export function deserializeMessages(
     });
 }
 
+type ProposalResolution = "confirmed" | "rejected";
+
+function proposedActionFrom(exec: ToolExecution): string | null {
+  if (exec.tool !== "propose_action" || exec.status !== "completed") return null;
+  if (!exec.details || typeof exec.details !== "object") return null;
+  const record = exec.details as Record<string, unknown>;
+  if (record.kind !== "proposed_action") return null;
+  return typeof record.action === "string" && record.action.trim() ? record.action : null;
+}
+
+function completesProposedAction(exec: ToolExecution, action: string): boolean {
+  if (exec.status !== "completed") return false;
+  if (action === "create_book") return exec.tool === "sub_agent" && exec.agent === "architect";
+  if (action === "short_run") return exec.tool === "short_fiction_run";
+  if (action === "play_start") return exec.tool === "play_start";
+  if (action === "generate_cover") return exec.tool === "generate_cover";
+  return false;
+}
+
+export function deriveResolvedProposals(
+  messages: ReadonlyArray<Message>,
+): Record<string, ProposalResolution> {
+  const pending = new Map<string, string>();
+  const resolved: Record<string, ProposalResolution> = {};
+
+  for (const message of messages) {
+    for (const exec of message.toolExecutions ?? []) {
+      const proposedAction = proposedActionFrom(exec);
+      if (proposedAction) {
+        pending.set(exec.id, proposedAction);
+        continue;
+      }
+
+      const pendingEntries = Array.from(pending.entries());
+      for (let i = pendingEntries.length - 1; i >= 0; i -= 1) {
+        const [proposalId, action] = pendingEntries[i]!;
+        if (!completesProposedAction(exec, action)) continue;
+        resolved[proposalId] = "confirmed";
+        pending.delete(proposalId);
+        break;
+      }
+    }
+  }
+
+  return resolved;
+}
+
 export function updateSession(
   sessions: Record<string, SessionRuntime>,
   sessionId: string,
@@ -231,13 +302,19 @@ export function updateSession(
 
 export function upsertSessionSummary(
   sessions: Record<string, SessionRuntime>,
-  summary: Pick<SessionSummary, "sessionId" | "bookId" | "title">,
+  summary: Pick<SessionSummary, "sessionId" | "bookId" | "sessionKind" | "playMode" | "title">,
 ): Record<string, SessionRuntime> {
   const existing = sessions[summary.sessionId];
   return {
     ...sessions,
     [summary.sessionId]: existing
-      ? { ...existing, bookId: summary.bookId, title: summary.title }
+      ? {
+          ...existing,
+          bookId: summary.bookId,
+          sessionKind: summary.sessionKind ?? existing.sessionKind,
+          playMode: summary.playMode ?? existing.playMode,
+          title: summary.title,
+        }
       : createSessionRuntime(summary),
   };
 }

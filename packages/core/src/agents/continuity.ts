@@ -19,6 +19,8 @@ export interface AuditResult {
   readonly passed: boolean;
   readonly issues: ReadonlyArray<AuditIssue>;
   readonly summary: string;
+  /** True when the auditor response itself was not parseable; callers must not auto-revise content from this result. */
+  readonly parseFailed?: boolean;
   /** 0-100 overall quality score. Present when the auditor supports scoring. */
   readonly overallScore?: number;
   readonly tokenUsage?: {
@@ -33,9 +35,15 @@ export interface AuditIssue {
   readonly category: string;
   readonly description: string;
   readonly suggestion: string;
+  readonly repairScope?: "local" | "structural" | "unknown";
 }
 
 type PromptLanguage = "zh" | "en";
+
+function normalizeRepairScope(value: unknown): AuditIssue["repairScope"] {
+  if (value === "local" || value === "structural" || value === "unknown") return value;
+  return undefined;
+}
 
 const DIMENSION_LABELS: Record<number, { readonly zh: string; readonly en: string }> = {
   1: { zh: "OOC检查", en: "OOC Check" },
@@ -203,7 +211,7 @@ function buildDimensionNote(
         ? `Hook-debt escalation (Phase 7 + hotfixes 2/3). Read the pending_hooks.md ledger and escalate based on the stale / blocked / core_hook / depends_on / promoted columns, NOT only on "undelivered hook present":
 
 • Critical severity only applies to hooks with promoted=true in the ledger. A stale/blocked non-promoted hook stays at info — the promotion flag is the gate that keeps reviewer noise down, because architect-seed emits many non-load-bearing seeds.
-• A promoted core_hook=true hook that has been stale for over 10 chapters → escalate from warning to critical. The book has only 3-7 core hooks; letting one drift that long is the lead symptom of narrative rot (cf. new.txt L1569).
+• A promoted core_hook=true hook that has been stale for over 10 chapters → escalate from warning to critical. The book has only 3-7 core hooks; letting one drift that long is the lead symptom of narrative rot.
 • A promoted hook whose status cell contains "blocked on X (blocked Y chapters)" with Y >= 6 → warning. The literal "blocked Y chapters" token comes straight from the ledger — read it, don't guess. Call out the upstream hook id so the planner can route the resolution.
 • At volume end (final chapter of any volume per volume_map) a promoted core_hook that is still open or stale without explicit "carried over to volume N+1" planning → critical.
 • Any non-promoted stale hook → info-level log; do not fail the chapter on it, but note it so the planner can schedule cleanup.
@@ -212,7 +220,7 @@ Quote the exact hook_id in description and include the stale / blocked marker te
         : `Phase 7 hook-debt 升级规则（含 hotfix 2/3）。阅读 pending_hooks.md 伏笔池时不要只看"有没有悬而未决的伏笔"，要读状态列中的 stale / blocked 标记、core_hook 列、depends_on 列、以及升级列：
 
 • critical 级别仅适用于升级=是（promoted=true）的伏笔。非升级的 stale/blocked 伏笔一律保持 info——升级标志是降噪的开关，因为架构师阶段会产出大量非承重的伏笔种子。
-• 升级=是且 core_hook=是 的伏笔过期超过 10 章未回收 → warning 升级为 critical。全书只有 3-7 条核心伏笔，任何一条漂移这么久都是烂尾前兆（对应 new.txt L1569"严禁烂尾逻辑"）。
+• 升级=是且 core_hook=是 的伏笔过期超过 10 章未回收 → warning 升级为 critical。全书只有 3-7 条核心伏笔，任何一条漂移这么久都是烂尾前兆。
 • 升级=是的受阻伏笔，状态列中"受阻于 X (已阻 Y 章)"且 Y ≥ 6 → warning。"已阻 Y 章"这个字面 token 直接读自账本，不要猜。描述中要写出具体的上游 hook_id，让 planner 能安排落地路径。
 • 卷尾（volume_map 中任一卷的末章）仍有升级=是的主线伏笔处于 open 或 stale 且没有显式"延至下一卷"规划 → critical。
 • 升级=否的 stale 伏笔 → info 级记录，不判本章失败，但保留以便 planner 安排清理。
@@ -466,6 +474,8 @@ Sparse chapter_memo is legitimate. Breather / aftermath / transition chapters ma
 
 If the chapter memo, rule stack, or supplied context specifies content proportions between lines (politics/romance, career/relationship, case/character, etc.), audit whether those lines appear as actual scenes, dialogue, action, or relationship movement. A line that is only summarized in one sentence counts as missing. Mark it critical only when the memo explicitly required it for this chapter.
 
+For every issue, set repair_scope as a typed routing hint: "local" for wording, paragraph shape, small repetition, or narrow sentence-level fixes; "structural" for plot drift, timeline break, missing scene/payoff, character logic collapse, POV/knowledge boundary failure, or anything requiring a rewritten scene/chapter; "unknown" only when you genuinely cannot decide.
+
 Audit dimensions:
 ${dimList}
 
@@ -474,12 +484,13 @@ Output format MUST be JSON:
   "passed": true/false,
   "overall_score": 0-100,
   "issues": [
-    {
-      "severity": "critical|warning|info",
-      "category": "dimension name",
-      "description": "specific issue description",
-      "suggestion": "fix suggestion"
-    }
+	    {
+	      "severity": "critical|warning|info",
+	      "repair_scope": "local|structural|unknown",
+	      "category": "dimension name",
+	      "description": "specific issue description",
+	      "suggestion": "fix suggestion"
+	    }
   ],
   "summary": "one-sentence audit conclusion"
 }
@@ -505,6 +516,8 @@ Score holistically — do not let a single minor issue tank the score.`
 
 如果章节备忘、规则栈或输入上下文明确指定多条剧情线的比例（权谋/感情、事业/恋爱、案件/人物等），要审它们是否真正落成了场景、对话、行动或关系变化。只用一句总结带过的线，视为缺失。只有当 memo 明确要求本章必须推进该线时，才标 critical。
 
+每条 issue 必须给 repair_scope 作为 typed 路由提示："local" 表示措辞、段落形状、小重复、句段级小修；"structural" 表示主线偏离、时间线断裂、场面/回报缺失、人物逻辑崩、视角/信息边界失败，或任何需要重写场景/整章的问题；只有确实无法判断时才写 "unknown"。
+
 审查维度：
 ${dimList}
 
@@ -513,12 +526,13 @@ ${dimList}
   "passed": true/false,
   "overall_score": 0-100,
   "issues": [
-    {
-      "severity": "critical|warning|info",
-      "category": "审查维度名称",
-      "description": "具体问题描述",
-      "suggestion": "修改建议"
-    }
+	    {
+	      "severity": "critical|warning|info",
+	      "repair_scope": "local|structural|unknown",
+	      "category": "审查维度名称",
+	      "description": "具体问题描述",
+	      "suggestion": "修改建议"
+	    }
   ],
   "summary": "一句话总结审查结论"
 }
@@ -641,7 +655,7 @@ ${chapterContent}`;
     // Use web search for fact verification when eraResearch is enabled
     const response = gp.eraResearch
       ? await this.chatWithSearch(chatMessages, chatOptions)
-      : await this.chat(chatMessages, { ...chatOptions, taskType: 'audit' });
+      : await this.chat(chatMessages, chatOptions);
 
     const result = this.parseAuditResult(response.content, resolvedLanguage);
     return { ...result, tokenUsage: response.usage };
@@ -684,12 +698,13 @@ ${chapterContent}`;
         while ((match = issuePattern.exec(issuesMatch[1]!)) !== null) {
           try {
             const issue = JSON.parse(match[0]);
-            issues.push({
-              severity: issue.severity ?? "warning",
-              category: issue.category ?? (language === "en" ? "Uncategorized" : "未分类"),
-              description: issue.description ?? "",
-              suggestion: issue.suggestion ?? "",
-            });
+	            issues.push({
+	              severity: issue.severity ?? "warning",
+	              category: issue.category ?? (language === "en" ? "Uncategorized" : "未分类"),
+	              description: issue.description ?? "",
+	              suggestion: issue.suggestion ?? "",
+	              repairScope: normalizeRepairScope(issue.repair_scope ?? issue.repairScope),
+	            });
           } catch {
             // skip malformed individual issue
           }
@@ -704,6 +719,7 @@ ${chapterContent}`;
 
     return {
       passed: false,
+      parseFailed: true,
       issues: [{
         severity: "critical",
         category: language === "en" ? "System Error" : "系统错误",
@@ -785,12 +801,13 @@ ${overrides}\n`;
       return {
         passed: Boolean(parsed.passed ?? false),
         issues: Array.isArray(parsed.issues)
-          ? parsed.issues.map((i: Record<string, unknown>) => ({
-              severity: (i.severity as string) ?? "warning",
-              category: (i.category as string) ?? (language === "en" ? "Uncategorized" : "未分类"),
-              description: (i.description as string) ?? "",
-              suggestion: (i.suggestion as string) ?? "",
-            }))
+	          ? parsed.issues.map((i: Record<string, unknown>) => ({
+	              severity: (i.severity as string) ?? "warning",
+	              category: (i.category as string) ?? (language === "en" ? "Uncategorized" : "未分类"),
+	              description: (i.description as string) ?? "",
+	              suggestion: (i.suggestion as string) ?? "",
+	              repairScope: normalizeRepairScope(i.repair_scope ?? i.repairScope),
+	            }))
           : [],
         summary: String(parsed.summary ?? ""),
         overallScore,

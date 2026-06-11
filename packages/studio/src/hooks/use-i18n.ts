@@ -1,15 +1,25 @@
 import { useApi } from "./use-api";
-import { useEffect, useState } from "react";
 
 type Lang = "zh" | "en";
-const LANGUAGE_EVENT = "inkos:language-change";
 const LANGUAGE_STORAGE_KEY = "inkos:language";
 
 const strings = {
   // Header
   "nav.books": { zh: "书籍", en: "Books" },
   "nav.newBook": { zh: "新建书籍", en: "New Book" },
+  "nav.createSection": { zh: "开始创作", en: "Start Creating" },
+  "nav.myBooks": { zh: "我的创作", en: "My Works" },
+  "nav.createNovel": { zh: "长篇小说", en: "Long Novel" },
+  "nav.createShort": { zh: "短篇小说", en: "Short Story" },
+  "nav.createPlay": { zh: "InkOS 互动", en: "InkOS Play" },
+  "nav.createBranching": { zh: "分支互动", en: "Branching Play" },
+  "nav.createFree": { zh: "开放世界", en: "Open World" },
+  "nav.createFanfic": { zh: "同人创作", en: "Fanfic" },
+  "nav.createContinuation": { zh: "续写创作", en: "Continuation" },
+  "nav.createSpinoff": { zh: "番外创作", en: "Side-story" },
+  "nav.createImitation": { zh: "仿写创作", en: "Imitation" },
   "nav.config": { zh: "模型配置", en: "Model Config" },
+  "nav.projectSettings": { zh: "项目设置", en: "Project Settings" },
   "nav.connected": { zh: "已连接", en: "Connected" },
   "nav.disconnected": { zh: "未连接", en: "Disconnected" },
 
@@ -87,6 +97,7 @@ const strings = {
   "nav.agentOffline": { zh: "代理离线", en: "Agent Offline" },
   "nav.tools": { zh: "工具", en: "Tools" },
   "nav.chat": { zh: "普通聊天", en: "Chat" },
+  "nav.history": { zh: "会话记录", en: "Sessions" },
   "nav.style": { zh: "文风", en: "Style" },
   "nav.import": { zh: "导入", en: "Import" },
   "nav.radar": { zh: "市场雷达", en: "Radar" },
@@ -119,6 +130,12 @@ const strings = {
   "book.statusCompleted": { zh: "已完成", en: "Completed" },
   "book.statusDropped": { zh: "已放弃", en: "Dropped" },
   "book.truthFiles": { zh: "真相文件", en: "Truth Files" },
+  "book.evaluate": { zh: "质量评估", en: "Evaluate" },
+  "book.consolidate": { zh: "归并记忆", en: "Consolidate" },
+  "book.reviseFoundation": { zh: "重修设定", en: "Revise Foundation" },
+  "book.planNext": { zh: "计划", en: "Plan" },
+  "book.composeNext": { zh: "组装", en: "Compose" },
+  "book.repairState": { zh: "修复状态", en: "Repair State" },
 
   // Style
   "style.title": { zh: "文风分析", en: "Style Analyzer" },
@@ -151,9 +168,22 @@ const strings = {
   "import.selectSource": { zh: "选择源（母本）...", en: "Select source (parent)..." },
   "import.selectDerivative": { zh: "选择目标（衍生）...", en: "Select target (derivative)..." },
   "import.fanficTitle": { zh: "同人小说标题", en: "Fanfic title" },
+  "import.fanficDone": { zh: "同人已创建", en: "Fanfic created" },
   "import.pasteMaterial": { zh: "粘贴原作文本/设定/角色资料...", en: "Paste source material..." },
   "import.importing": { zh: "导入中...", en: "Importing..." },
   "import.creating": { zh: "创建中...", en: "Creating..." },
+  "import.spinoff": { zh: "番外创作", en: "Side-story" },
+  "import.spinoffHint": { zh: "选一本已有书做正传，系统生成一本独立番外书：继承其角色与世界设定，但讲一个不进主线的侧篇故事。", en: "Pick an existing book as the canon; a standalone side-story book is generated — it inherits the cast and world but tells a side plot outside the main line." },
+  "import.spinoffTitle": { zh: "番外标题", en: "Side-story title" },
+  "import.selectParent": { zh: "选择正传母书...", en: "Select parent book..." },
+  "import.spinoffDirection": { zh: "番外方向（可选）：聚焦哪个角色 / 哪条支线 / 什么 what-if...", en: "Side-story direction (optional): which character / subplot / what-if..." },
+  "import.spinoffDone": { zh: "番外已创建", en: "Side-story created" },
+  "import.imitation": { zh: "仿写创作", en: "Imitation" },
+  "import.imitationHint": { zh: "给一段参考作品文本 + 你的原创故事梗概，系统建一本模仿该文风的原创新书。", en: "Give a reference text + your own story idea; a new original book is created in that writing style." },
+  "import.imitationTitle": { zh: "新书标题", en: "New book title" },
+  "import.imitationIdea": { zh: "你的原创故事梗概（写什么）...", en: "Your original story idea (what it's about)..." },
+  "import.imitationRef": { zh: "粘贴参考作品文本（仿其文风，不抄其情节）...", en: "Paste reference text to imitate its style (not its plot)..." },
+  "import.imitationDone": { zh: "仿写新书已创建", en: "Imitation book created" },
 
   // Radar
   "radar.title": { zh: "市场雷达", en: "Market Radar" },
@@ -237,6 +267,33 @@ const strings = {
   "config.enabled": { zh: "启用", en: "Enabled" },
   "config.disabled": { zh: "禁用", en: "Disabled" },
 
+  // Project Settings
+  "settings.title": { zh: "项目设置", en: "Project Settings" },
+  "settings.subtitle": { zh: "集中管理写作运行时的项目级开关，不替代模型服务商配置。", en: "Manage project-level runtime switches without replacing model service configuration." },
+  "settings.inputGovernance": { zh: "输入治理", en: "Input Governance" },
+  "settings.inputGovernanceHint": { zh: "控制 planner/composer 对用户意图、约束和上下文的组装方式。", en: "Controls how planner/composer assemble user intent, constraints, and context." },
+  "settings.modelOverrides": { zh: "Agent 模型路由", en: "Agent Model Routing" },
+  "settings.modelOverridesHint": { zh: "为每个 agent 指定模型（贵模型写正文、便宜模型审稿等）。服务商、密钥和基础 URL 仍在模型配置页管理。", en: "Route each agent to a model (e.g. premium model for drafting, cheaper for review). Providers, keys, and base URLs stay in Model Config." },
+  "settings.notify": { zh: "通知渠道", en: "Notification Channels" },
+  "settings.notifyHint": { zh: "配置 Telegram、飞书、企微或 webhook 等后台通知渠道。", en: "Configure Telegram, Feishu, WeCom, or webhook notifications for background jobs." },
+  "settings.detection": { zh: "AI 检测配置", en: "AI Detection Config" },
+  "settings.detectionHint": { zh: "配置外部 AIGC 检测服务、阈值和自动改写策略；关闭即不配置检测。", en: "Configure an external AIGC detection service, threshold, and auto-rewrite policy; turn off to clear it." },
+  "settings.openModelConfig": { zh: "打开模型配置", en: "Open Model Config" },
+  "settings.saved": { zh: "已保存", en: "Saved" },
+  "settings.noOverrides": { zh: "暂无模型路由，所有 agent 使用默认模型。", en: "No overrides — every agent uses the default model." },
+  "settings.agentName": { zh: "agent（如 writer / architect）", en: "agent (e.g. writer / architect)" },
+  "settings.modelId": { zh: "模型 ID", en: "model id" },
+  "settings.addOverride": { zh: "添加路由", en: "Add override" },
+  "settings.noChannels": { zh: "暂无通知渠道。", en: "No channels yet." },
+  "settings.addChannel": { zh: "添加渠道", en: "Add channel" },
+  "settings.detectionEnable": { zh: "启用检测配置", en: "Enable detection config" },
+  "settings.detectionProvider": { zh: "检测服务商", en: "Provider" },
+  "settings.detectionApiKeyEnv": { zh: "API Key 环境变量名", en: "API key env var" },
+  "settings.detectionApiUrl": { zh: "检测 API 地址", en: "Detection API URL" },
+  "settings.detectionThreshold": { zh: "阈值", en: "Threshold" },
+  "settings.detectionMaxRetries": { zh: "最大重试", en: "Max retries" },
+  "settings.detectionAutoRewrite": { zh: "命中后自动反检测改写", en: "Auto anti-detect rewrite on hit" },
+
   // Truth Files extras
   "truth.title": { zh: "真相文件", en: "Truth Files" },
   "truth.edit": { zh: "编辑", en: "Edit" },
@@ -300,15 +357,6 @@ const strings = {
   "chapter.label": { zh: "第{n}章", en: "Chapter {n}" },
   "common.exportSuccess": { zh: "已导出到项目目录", en: "Exported to project directory" },
   "common.exportFormat": { zh: "导出格式", en: "Export format" },
-  "reader.copy": { zh: "复制", en: "Copy" },
-  "reader.copied": { zh: "已复制", en: "Copied" },
-  "reader.exportTxt": { zh: "导出 TXT", en: "Export TXT" },
-  "reader.exported": { zh: "已导出", en: "Exported" },
-  "reader.exportedTxt": { zh: "TXT 已导出", en: "TXT exported" },
-  "reader.exportFailed": { zh: "导出失败，已尝试复制正文到剪贴板。", en: "Export failed; chapter text was copied as a fallback." },
-  "reader.deleteChapter": { zh: "删除章节", en: "Delete" },
-  "reader.deleting": { zh: "删除中...", en: "Deleting..." },
-  "reader.deleteConfirm": { zh: "确认删除这一章？该操作会删除章节文件并从章节列表移除。", en: "Delete this chapter? This removes the chapter file and its list entry." },
   "logs.title": { zh: "日志", en: "Logs" },
   "logs.empty": { zh: "暂无日志", en: "No log entries yet" },
   "logs.showingRecent": { zh: "当前展示最近日志记录。", en: "Showing recent log entries." },
@@ -317,47 +365,13 @@ const strings = {
 export type StringKey = keyof typeof strings;
 export type TFunction = (key: StringKey) => string;
 
-function normalizeLang(value: unknown): Lang | null {
-  return value === "en" || value === "zh" ? value : null;
-}
-
-function getStoredLang(): Lang | null {
-  if (typeof window === "undefined") return null;
-  return normalizeLang(window.localStorage.getItem(LANGUAGE_STORAGE_KEY));
-}
-
 export function publishLanguageChange(lang: Lang): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
-  window.dispatchEvent(new CustomEvent<{ lang: Lang }>(LANGUAGE_EVENT, {
-    detail: { lang },
-  }));
+  if (typeof window !== "undefined") window.localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
 }
 
 export function useI18n() {
   const { data } = useApi<{ language: string }>("/project");
-  const [lang, setLang] = useState<Lang>(() => getStoredLang() ?? "zh");
-
-  useEffect(() => {
-    const nextLang = normalizeLang(data?.language);
-    if (!nextLang) return;
-    setLang(nextLang);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLang);
-    }
-  }, [data?.language]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const handleLanguageChange = (event: Event) => {
-      const nextLang = normalizeLang((event as CustomEvent<{ lang?: unknown }>).detail?.lang);
-      if (nextLang) setLang(nextLang);
-    };
-    window.addEventListener(LANGUAGE_EVENT, handleLanguageChange);
-    return () => {
-      window.removeEventListener(LANGUAGE_EVENT, handleLanguageChange);
-    };
-  }, []);
+  const lang: Lang = data?.language === "en" ? "en" : "zh";
 
   function t(key: StringKey): string {
     return strings[key][lang];

@@ -110,13 +110,20 @@ describe("architect agent — BookConfig construction", () => {
     expect(options.externalContext).toBe("Create a xuanhuan novel");
   });
 
-  it("uses defaults when optional params are omitted", async () => {
+  it("infers language and applies native defaults when optional params are omitted", async () => {
     await tool.execute("tc2", { agent: "architect", instruction: "Create a book", title: "Test Book" });
     const [bookConfig] = initBookMock.mock.calls[0];
     expect(bookConfig.genre).toBe("general");
     expect(bookConfig.platform).toBe("other");
-    expect(bookConfig.language).toBe("zh");
+    expect(bookConfig.language).toBe("en"); // inferred from the English instruction
     expect(bookConfig.targetChapters).toBe(200);
+    expect(bookConfig.chapterWordCount).toBe(2000); // English native default (words)
+  });
+
+  it("infers zh and its native chapter length from a Chinese brief", async () => {
+    await tool.execute("tc2b", { agent: "architect", instruction: "写一本都市重生爽文", title: "回到二零零八" });
+    const [bookConfig] = initBookMock.mock.calls[0];
+    expect(bookConfig.language).toBe("zh");
     expect(bookConfig.chapterWordCount).toBe(3000);
   });
 
@@ -147,12 +154,12 @@ describe("writer agent — wordCount passthrough", () => {
 
   it("passes chapterWordCount as wordCount", async () => {
     await tool.execute("tc1", { agent: "writer", instruction: "Write", bookId: "my-book", chapterWordCount: 5000 });
-    expect(writeNextChapterMock).toHaveBeenCalledWith("my-book", 5000, undefined, { mode: "quick" });
+    expect(writeNextChapterMock).toHaveBeenCalledWith("my-book", 5000);
   });
 
   it("passes undefined when chapterWordCount omitted", async () => {
     await tool.execute("tc2", { agent: "writer", instruction: "Write", bookId: "my-book" });
-    expect(writeNextChapterMock).toHaveBeenCalledWith("my-book", undefined, undefined, { mode: "quick" });
+    expect(writeNextChapterMock).toHaveBeenCalledWith("my-book", undefined);
   });
 });
 

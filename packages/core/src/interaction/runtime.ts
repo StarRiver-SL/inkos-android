@@ -2,7 +2,7 @@ import type { AutomationMode } from "./modes.js";
 import { routeInteractionRequest } from "./request-router.js";
 import type { InteractionRequest } from "./intents.js";
 import type { ExecutionState, InteractionEvent } from "./events.js";
-import type { PendingDecision, InteractionSession, DraftRound } from "./session.js";
+import type { PendingDecision, InteractionSession } from "./session.js";
 import {
   appendInteractionEvent,
   bindActiveBook,
@@ -17,10 +17,6 @@ type RuntimeLanguage = "zh" | "en";
 
 export interface InteractionRuntimeTools {
   readonly listBooks: () => Promise<ReadonlyArray<string>>;
-  readonly developBookDraft?: (
-    input: string,
-    existingDraft?: InteractionSession["creationDraft"],
-  ) => Promise<unknown>;
   readonly createBook?: (input: {
     readonly title: string;
     readonly genre?: string;
@@ -58,6 +54,11 @@ export interface InteractionRuntimeTools {
     chapterNumber: number,
     targetText: string,
     replacementText: string,
+  ) => Promise<unknown>;
+  readonly replaceChapterText: (
+    bookId: string,
+    chapterNumber: number,
+    fullText: string,
   ) => Promise<unknown>;
   readonly renameEntity: (
     bookId: string,
@@ -177,15 +178,6 @@ function buildTaskStartedState(
           en: "preparing chapter inputs",
         }),
       };
-    case "develop_book":
-      return {
-        status: "planning",
-        bookId: request.bookId ?? session.activeBookId,
-        stageLabel: localize(language, {
-          zh: "收敛创作草案",
-          en: "developing book draft",
-        }),
-      };
     case "create_book":
       return {
         status: "planning",
@@ -259,7 +251,8 @@ function shouldWaitForHuman(
     || request.intent === "continue_book"
     || request.intent === "revise_chapter"
     || request.intent === "rewrite_chapter"
-    || request.intent === "patch_chapter_text";
+    || request.intent === "patch_chapter_text"
+    || request.intent === "replace_chapter_text";
   const editIntent = request.intent === "update_focus"
     || request.intent === "update_author_intent"
     || request.intent === "edit_truth"
@@ -358,58 +351,6 @@ async function handleDraftLifecycleRequest(params: {
   const { language, addEvent, markCompleted } = helpers;
 
   switch (request.intent) {
-    case "develop_book": {
-      if (!tools.developBookDraft) {
-        throw new Error(localize(language, {
-          zh: "创作草案会话暂未实现。",
-          en: "Book-draft ideation is not implemented yet.",
-        }));
-      }
-      if (!request.instruction) {
-        throw new Error(localize(language, {
-          zh: "创作草案需要一条用户输入。",
-          en: "Book-draft ideation requires user input.",
-        }));
-      }
-      const toolResult = await tools.developBookDraft(request.instruction, session.creationDraft);
-      const metadata = extractToolMetadata(toolResult);
-      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
-      if (!draft) {
-        throw new Error(localize(language, {
-          zh: "创作草案工具没有返回草案数据。",
-          en: "Book-draft tool did not return draft data.",
-        }));
-      }
-      const newRound: DraftRound = {
-        roundId: (session.draftRounds?.length ?? 0) + 1,
-        userMessage: request.instruction ?? "",
-        assistantRaw: metadata.details?.draftRaw as string ?? "",
-        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
-        summary: metadata.details?.draftSummary as string ?? "",
-        timestamp: Date.now(),
-      };
-      const withDraft = updateCreationDraft(session, draft);
-      const withRounds = {
-        ...withDraft,
-        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
-      };
-      const nextSession = appendToolEvents(withRounds, metadata.events);
-      const completed = {
-        ...markCompleted(nextSession),
-        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
-      };
-      return {
-        session: addEvent(completed, "task.completed", "completed", localize(language, {
-          zh: "已更新创作草案。",
-          en: "Updated the book draft.",
-        })),
-        responseText: metadata.responseText ?? localize(language, {
-          zh: "已更新创作草案。",
-          en: "Updated the book draft.",
-        }),
-        details: metadata.details,
-      };
-    }
     case "show_book_draft": {
       if (!session.creationDraft) {
         return {
@@ -808,6 +749,63 @@ export async function runInteractionRequest(params: {
         ),
       };
     }
+    case "replace_chapter_text": {
+      const bookId = request.bookId ?? session.activeBookId;
+      if (!bookId) {
+        throw new Error(localize(language, {
+          zh: "当前交互会话还没有绑定作品。",
+          en: "No active book is bound to the interaction session.",
+        }));
+      }
+      if (!request.chapterNumber || !request.fullText) {
+        throw new Error(localize(language, {
+          zh: "整章替换需要章节号和完整正文。",
+          en: "Whole-chapter replacement requires chapter number and fullText.",
+        }));
+      }
+      const toolResult = await params.tools.replaceChapterText(
+        bookId,
+        request.chapterNumber,
+        request.fullText,
+      );
+      const metadata = extractToolMetadata(toolResult);
+      const chapterNumber = metadata.activeChapterNumber ?? request.chapterNumber;
+      session = bindActiveBook(session, bookId, chapterNumber);
+      session = appendToolEvents(session, metadata.events);
+      const pendingDecision = metadata.pendingDecision ?? buildPendingDecision(
+        session,
+        request,
+        language,
+        chapterNumber,
+      );
+      const completed = pendingDecision
+        ? {
+            ...session,
+            pendingDecision,
+            currentExecution: metadata.currentExecution ?? buildWaitingExecution(session, request, language, chapterNumber),
+          }
+        : {
+            ...markCompleted(session),
+            currentExecution: metadata.currentExecution ?? markCompleted(session).currentExecution,
+          };
+      return {
+        session: addEvent(completed, "task.completed", "completed", localize(language, {
+          zh: `已替换 ${bookId} 的第 ${chapterNumber} 章。`,
+          en: `Replaced chapter ${chapterNumber} for ${bookId}.`,
+        })),
+        responseText: metadata.responseText ?? (
+          pendingDecision
+            ? localize(language, {
+                zh: `已替换 ${bookId} 的第 ${chapterNumber} 章，等待你的下一步决定。`,
+                en: `Replaced chapter ${chapterNumber} for ${bookId}; waiting for your next decision.`,
+              })
+            : localize(language, {
+                zh: `已替换 ${bookId} 的第 ${chapterNumber} 章。`,
+                en: `Replaced chapter ${chapterNumber} for ${bookId}.`,
+              })
+        ),
+      };
+    }
     case "rename_entity": {
       const bookId = request.bookId ?? session.activeBookId;
       if (!bookId) {
@@ -1039,18 +1037,6 @@ export async function runInteractionRequest(params: {
         details: metadata.details,
       };
     }
-    case "switch_mode":
-      session = markCompleted(session);
-      return {
-        session: addEvent(session, "task.completed", "completed", localize(language, {
-          zh: `已切换到${localizeMode(session.automationMode, language)}模式。`,
-          en: `Switched mode to ${session.automationMode}.`,
-        })),
-        responseText: localize(language, {
-          zh: `已切换到${localizeMode(session.automationMode, language)}模式。`,
-          en: `Switched mode to ${session.automationMode}.`,
-        }),
-      };
     case "pause_book": {
       const bookId = request.bookId ?? session.activeBookId;
       const paused = {

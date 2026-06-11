@@ -3,6 +3,7 @@ import type { BookConfig } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { LengthSpecSchema } from "../models/length-governance.js";
 import { buildWriterSystemPrompt, buildGoldenOpeningDiscipline } from "../agents/writer-prompts.js";
+import { BookRulesSchema } from "../models/book-rules.js";
 
 const BOOK: BookConfig = {
   id: "prompt-book",
@@ -53,6 +54,46 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("写作铁律");
     expect(prompt).toContain("盐溶于汤");
     expect(prompt).toContain("黄金3章");
+  });
+
+  it("injects cross-theme prose-execution rules: simile restraint + dramatize the climax (zh)", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK, GENRE, null, "", "", "", undefined, 5, "creative", undefined, "zh", "governed",
+    );
+    expect(prompt).toContain("明喻节制");
+    expect(prompt).toContain("高潮必须演出");
+    expect(prompt).toContain("不许概述");
+  });
+
+  it("injects cross-theme prose-execution rules into the English prompt", () => {
+    const prompt = buildWriterSystemPrompt(
+      { ...BOOK }, { ...GENRE, language: "en" }, null, "", "", "", undefined, 5, "creative", undefined, "en", "governed",
+    );
+    expect(prompt).toContain("Simile restraint");
+    expect(prompt).toContain("Play out the climax");
+  });
+
+  it("enforces narrative person only when the user explicitly set one (#290)", () => {
+    const firstPerson = BookRulesSchema.parse({ narrativePerson: "first" });
+    const promptFirst = buildWriterSystemPrompt(
+      BOOK, GENRE, firstPerson, "# Book Rules", "# Genre Body", "# Style Guide",
+      undefined, 3, "creative", undefined, "zh", "governed",
+    );
+    expect(promptFirst).toContain("叙事人称（硬约束）");
+    expect(promptFirst).toContain("第一人称");
+
+    // Unset → no narrative-person section is imposed (the genre default applies).
+    const noPerson = BookRulesSchema.parse({});
+    const promptNone = buildWriterSystemPrompt(
+      BOOK, GENRE, noPerson, "# Book Rules", "# Genre Body", "# Style Guide",
+      undefined, 3, "creative", undefined, "zh", "governed",
+    );
+    expect(promptNone).not.toContain("叙事人称（硬约束）");
+  });
+
+  it("tolerates a stray narrativePerson value (degrades to no constraint, fail-open)", () => {
+    const rules = BookRulesSchema.parse({ narrativePerson: "(仅当用户指定)" });
+    expect(rules.narrativePerson).toBeUndefined();
   });
 
   it("uses target-range wording when a length spec is provided", () => {
@@ -107,36 +148,6 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("## 硬性禁令");
     expect(prompt).toContain("Do not reveal the mastermind");
     expect(prompt).toContain("Keep the prose restrained");
-  });
-
-  it("caps oversized style material in the writer system prompt", () => {
-    const oversizedStyleGuide = [
-      "STYLE-BEGIN",
-      "短句和克制叙述。".repeat(1600),
-      "STYLE-MIDDLE-MARKER",
-      "章尾保持余韵。".repeat(1600),
-      "STYLE-END",
-    ].join("\n");
-
-    const prompt = buildWriterSystemPrompt(
-      BOOK,
-      GENRE,
-      null,
-      "# Book Rules",
-      "# Genre Body",
-      oversizedStyleGuide,
-      undefined,
-      4,
-      "creative",
-      undefined,
-      "zh",
-      "governed",
-    );
-
-    expect(prompt).toContain("STYLE-BEGIN");
-    expect(prompt).toContain("STYLE-END");
-    expect(prompt).toContain("InkOS prompt budget");
-    expect(prompt).not.toContain("STYLE-MIDDLE-MARKER");
   });
 
   it("injects the creative constitution and six pillars of immersion as prose (zh)", () => {

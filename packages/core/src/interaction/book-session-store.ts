@@ -1,6 +1,6 @@
 import { readdir, unlink } from "node:fs/promises";
 import { createBookSession } from "./session.js";
-import type { BookSession } from "./session.js";
+import type { BookSession, PlayMode, SessionKind } from "./session.js";
 import {
   appendTranscriptEvents,
   compactDeletedTranscriptMessages,
@@ -68,6 +68,8 @@ async function appendSessionCreatedEvent(
       seq: nextSeq,
       timestamp: session.createdAt,
       bookId: session.bookId,
+      ...(session.sessionKind ? { sessionKind: session.sessionKind } : {}),
+      ...(session.playMode ? { playMode: session.playMode } : {}),
       title: session.title,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
@@ -80,6 +82,8 @@ async function appendSessionMetadataUpdatedEvent(
   sessionId: string,
   metadata: {
     readonly bookId?: string | null;
+    readonly sessionKind?: SessionKind;
+    readonly playMode?: PlayMode;
     readonly title?: string | null;
     readonly updatedAt: number;
   },
@@ -92,6 +96,8 @@ async function appendSessionMetadataUpdatedEvent(
     timestamp: metadata.updatedAt,
     updatedAt: metadata.updatedAt,
     ...("bookId" in metadata ? { bookId: metadata.bookId } : {}),
+    ...(metadata.sessionKind ? { sessionKind: metadata.sessionKind } : {}),
+    ...(metadata.playMode ? { playMode: metadata.playMode } : {}),
     ...("title" in metadata ? { title: metadata.title } : {}),
   }]);
 }
@@ -112,6 +118,8 @@ export async function persistBookSession(
 
   await appendSessionMetadataUpdatedEvent(projectRoot, session.sessionId, {
     bookId: session.bookId,
+    ...(session.sessionKind ? { sessionKind: session.sessionKind } : {}),
+    ...(session.playMode ? { playMode: session.playMode } : {}),
     title: session.title,
     updatedAt: session.updatedAt,
   });
@@ -120,6 +128,8 @@ export async function persistBookSession(
 export interface BookSessionSummary {
   readonly sessionId: string;
   readonly bookId: string | null;
+  readonly sessionKind?: SessionKind;
+  readonly playMode?: PlayMode;
   readonly title: string | null;
   readonly messageCount: number;
   readonly createdAt: number;
@@ -156,6 +166,8 @@ export async function listBookSessions(
         return {
           sessionId: session.sessionId,
           bookId: session.bookId,
+          sessionKind: session.sessionKind,
+          playMode: session.playMode,
           title: session.title,
           messageCount: session.messages.length,
           createdAt: session.createdAt,
@@ -202,10 +214,10 @@ function textFromTranscriptMessage(event: MessageEvent): string {
   if (!Array.isArray(content)) return "";
   return content
     .filter((part): part is { type: string; text: string } =>
-      !!part &&
-      typeof part === "object" &&
-      (part as { type?: unknown }).type === "text" &&
-      typeof (part as { text?: unknown }).text === "string",
+      !!part
+      && typeof part === "object"
+      && (part as { type?: unknown }).type === "text"
+      && typeof (part as { text?: unknown }).text === "string",
     )
     .map((part) => part.text)
     .join("");
@@ -233,37 +245,28 @@ export async function deleteBookSessionMessage(
   );
   const liveMessages = events.filter(
     (event): event is MessageEvent =>
-      event.type === "message" &&
-      event.role !== "system" &&
-      !alreadyDeleted.has(event.uuid),
+      event.type === "message"
+      && event.role !== "system"
+      && !alreadyDeleted.has(event.uuid),
   );
   const candidates = liveMessages.filter(
     (event): event is MessageEvent =>
-      event.role === input.role &&
-      textFromTranscriptMessage(event).trim() === input.content.trim(),
+      event.role === input.role
+      && textFromTranscriptMessage(event).trim() === input.content.trim(),
   );
+  const indexedTarget = typeof input.messageIndex === "number" && Number.isInteger(input.messageIndex)
+    ? liveMessages[input.messageIndex]
+    : undefined;
   const matchedTarget = candidates
     .sort((left, right) =>
       Math.abs(left.timestamp - input.timestamp) - Math.abs(right.timestamp - input.timestamp),
     )[0];
-  const indexedTarget = typeof input.messageIndex === "number" && Number.isInteger(input.messageIndex)
-    ? liveMessages[input.messageIndex]
-    : undefined;
-  const target = matchedTarget ?? (
-    indexedTarget?.role === input.role ? indexedTarget : undefined
-  );
+  const target = indexedTarget?.role === input.role
+    ? indexedTarget
+    : matchedTarget;
   if (!target) return null;
 
-  const targets = input.role === "assistant"
-    ? events.filter(
-        (event): event is MessageEvent =>
-          event.type === "message" &&
-          event.requestId === target.requestId &&
-          event.role !== "user" &&
-          event.role !== "system" &&
-          !alreadyDeleted.has(event.uuid),
-      )
-    : [target];
+  const targets = [target];
 
   await appendTranscriptEvents(projectRoot, sessionId, ({ nextSeq }) => {
     const now = Date.now();
@@ -293,6 +296,7 @@ export async function migrateBookSession(
 
   await appendSessionMetadataUpdatedEvent(projectRoot, sessionId, {
     bookId: newBookId,
+    sessionKind: "book",
     updatedAt: Date.now(),
   });
   return loadBookSession(projectRoot, sessionId);
@@ -302,13 +306,25 @@ export async function createAndPersistBookSession(
   projectRoot: string,
   bookId: string | null,
   sessionId?: string,
+  sessionKind?: SessionKind,
+  options?: { readonly playMode?: PlayMode },
 ): Promise<BookSession> {
   // 如果指定了 sessionId 且对应文件已存在，视为幂等操作直接返回（支持"用户发消息时才持久化 draft"流程）
   if (sessionId) {
     const existing = await loadBookSession(projectRoot, sessionId);
-    if (existing) return existing;
+    if (existing) {
+      if ((sessionKind && existing.sessionKind !== sessionKind) || (options?.playMode && existing.playMode !== options.playMode)) {
+        await appendSessionMetadataUpdatedEvent(projectRoot, sessionId, {
+          ...(sessionKind ? { sessionKind } : {}),
+          ...(options?.playMode ? { playMode: options.playMode } : {}),
+          updatedAt: Date.now(),
+        });
+        return await loadBookSession(projectRoot, sessionId) ?? existing;
+      }
+      return existing;
+    }
   }
-  const session = createBookSession(bookId, sessionId);
+  const session = createBookSession(bookId, sessionId, sessionKind, options);
   await appendSessionCreatedEvent(projectRoot, session);
   return session;
 }

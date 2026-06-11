@@ -1,33 +1,19 @@
 import type { LLMConfig } from "../models/project.js";
 import {
   streamSimple as piStreamSimple,
-  stream as piStream,
   completeSimple as piCompleteSimple,
-  complete as piComplete,
 } from "@mariozechner/pi-ai";
 import type {
   Api as PiApi,
   Model as PiModel,
   Context as PiContext,
   AssistantMessageEvent,
-  Tool as PiTool,
-  TextContent as PiTextContent,
-  ToolCall as PiToolCall,
 } from "@mariozechner/pi-ai";
 import { resolveServicePreset } from "./service-presets.js";
 import { getEndpoint } from "./providers/index.js";
 import { lookupModel } from "./providers/lookup.js";
 import { fetchWithProxy } from "../utils/proxy-fetch.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
-import {
-  applyOfficialOptimizationConfig,
-  getSemanticCache,
-  optimizeMessagesForTokenPipelineAsync,
-  putSemanticCache,
-  recordTokenCompressionSavings,
-  recordTokenOptimizationEvent,
-} from "../utils/headroom-cache.js";
-import { headroomLightCompress, normalizePromptForCache, type HeadroomLightMode } from "../utils/prompt-optimizer.js";
 
 
 // === Streaming Monitor Types ===
@@ -41,26 +27,10 @@ export interface StreamProgress {
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
 
-const INKOS_USER_AGENT = "curl/8.0.1";
-const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 16_384;
-/** Dedicated max output tokens for creative writing agents (writer / settler). */
-export const WRITING_MAX_OUTPUT_TOKENS = 24_576;
+const INKOS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
+const CUSTOM_COMPAT_SAFE_MAX_TOKENS = 16_384;
 const TRANSIENT_LLM_RETRIES = 2;
-const RETRY_INITIAL_DELAY_MS = 1000;
-const RETRY_BACKOFF_MULTIPLIER = 2;
-const RETRY_MAX_ATTEMPTS_RATE_LIMIT = 5;
-const STABLE_PI_CONTEXT_TIMESTAMP = 0;
-const DEFAULT_LLM_CALL_TIMEOUT_MS = 60 * 60 * 1000;
-const BOOK_CREATE_TIMEOUT_MS = 90 * 60 * 1000;
-const CHAPTER_WRITE_TIMEOUT_MS = 75 * 60 * 1000;
-const AUDIT_TIMEOUT_MS = 30 * 60 * 1000;
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal?.aborted) return;
-  const reason = signal.reason;
-  if (reason instanceof Error) throw reason;
-  throw new Error(typeof reason === "string" && reason.trim() ? reason : "用户已停止当前生成。");
-}
 
 function isByteString(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
@@ -90,7 +60,7 @@ function mergeUserAgent(headers?: Record<string, string>): Record<string, string
 
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
-  intervalMs: number = 2000,
+  intervalMs: number = 30000,
 ): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
@@ -139,66 +109,34 @@ export interface LLMResponse {
   };
 }
 
-function resolveLLMCallTimeoutMs(taskType?: 'book-create' | 'chapter-write' | 'audit' | 'default'): number {
-  let defaultTimeout = DEFAULT_LLM_CALL_TIMEOUT_MS;
-
-  if (taskType === 'book-create') defaultTimeout = BOOK_CREATE_TIMEOUT_MS;
-  else if (taskType === 'chapter-write') defaultTimeout = CHAPTER_WRITE_TIMEOUT_MS;
-  else if (taskType === 'audit') defaultTimeout = AUDIT_TIMEOUT_MS;
-
-  const raw = Number(process.env.INKOS_LLM_CALL_TIMEOUT_MS ?? defaultTimeout);
-  if (!Number.isFinite(raw) || raw <= 0) return defaultTimeout;
-  return Math.max(30_000, Math.trunc(raw));
-}
-
-function createChildAbortSignal(
-  parent: AbortSignal | undefined,
-  timeoutMs: number,
-  label: string,
-): { readonly signal: AbortSignal; readonly dispose: () => void } {
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(parent?.reason ?? new Error("用户已停止当前生成。"));
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`${label} 超时（${Math.round(timeoutMs / 1000)} 秒无完成响应）。请稍后重试，或减少任务规模/切换更稳定的模型。`));
-  }, timeoutMs);
-
-  if (parent?.aborted) {
-    abortFromParent();
-  } else {
-    parent?.addEventListener("abort", abortFromParent, { once: true });
-  }
-
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      clearTimeout(timer);
-      parent?.removeEventListener("abort", abortFromParent);
-    },
-  };
-}
-
-async function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  throwIfAborted(signal);
-  let onAbort: (() => void) | undefined;
-  const abortPromise = new Promise<T>((_, reject) => {
-    onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "用户已停止当前生成。"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([promise, abortPromise]);
-  } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
-  }
-}
-
 export interface LLMMessage {
   readonly role: "system" | "user" | "assistant";
   readonly content: string;
 }
+
+export interface LLMRequestDiagnostics {
+  readonly service?: string;
+  readonly model: string;
+  readonly apiFormat: "chat" | "responses";
+  readonly stream: boolean;
+  readonly maxTokens: number;
+  readonly hasSystemRole: boolean;
+  readonly messageCount: number;
+  readonly promptChars: number;
+  readonly systemChars: number;
+  readonly userChars: number;
+  readonly assistantChars: number;
+  readonly endpoint: "chat/completions" | "responses" | "messages" | "pi-ai";
+  readonly compatibility: {
+    readonly omitTemperature?: boolean;
+    readonly tokenLimitField?: "max_tokens" | "max_completion_tokens";
+    readonly omitStreamOptions?: boolean;
+    readonly forceNonStream?: boolean;
+    readonly maxTokensCappedFrom?: number;
+  };
+}
+
+export type LLMRequestDiagnosticsSink = (diagnostics: LLMRequestDiagnostics) => void;
 
 export interface LLMClient {
   readonly provider: "openai" | "anthropic";
@@ -209,6 +147,7 @@ export interface LLMClient {
   readonly proxyUrl?: string;
   readonly _piModel?: PiModel<PiApi>;
   readonly _apiKey?: string;
+  readonly onRequestDiagnostics?: LLMRequestDiagnosticsSink;
   readonly defaults: {
     readonly temperature: number;
     /**
@@ -227,48 +166,9 @@ export interface LLMClient {
   };
 }
 
-export interface TokenOptimizationOptions {
-  readonly enabled?: boolean;
-  readonly projectRoot?: string;
-  readonly bookId?: string;
-  readonly compress?: boolean;
-  readonly cache?: boolean;
-  /**
-   * Disable semantic cache reads for creative/side-effectful requests while
-   * keeping compression and cache writes enabled for diagnostics/statistics.
-   */
-  readonly cacheRead?: boolean;
-  readonly cacheWrite?: boolean;
-}
-
-// === Tool-calling Types ===
-
-export interface ToolDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly parameters: Record<string, unknown>;
-}
-
-export interface ToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly arguments: string;
-}
-
-export type AgentMessage =
-  | { readonly role: "system"; readonly content: string }
-  | { readonly role: "user"; readonly content: string }
-  | { readonly role: "assistant"; readonly content: string | null; readonly toolCalls?: ReadonlyArray<ToolCall> }
-  | { readonly role: "tool"; readonly toolCallId: string; readonly content: string };
-
-export interface ChatWithToolsResult {
-  readonly content: string;
-  readonly toolCalls: ReadonlyArray<ToolCall>;
-}
-
 // === Factory ===
 
-export function createLLMClient(config: LLMConfig): LLMClient {
+export function createLLMClient(config: LLMConfig & { readonly onRequestDiagnostics?: LLMRequestDiagnosticsSink }): LLMClient {
   // C1 (v2.0.0)：config.maxTokens / maxTokensCap 已删除；defaults.maxTokens 完全从 modelCard 推导。
   const _earlyCard = lookupModel(config.service ?? "custom", config.model);
   const defaults = {
@@ -334,95 +234,9 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     proxyUrl: config.proxyUrl,
     _piModel: piModel,
     _apiKey: config.apiKey,
+    onRequestDiagnostics: config.onRequestDiagnostics,
     defaults,
   };
-}
-
-function resolveTokenOptimization(options?: TokenOptimizationOptions): TokenOptimizationOptions | undefined {
-  if (options?.enabled === false) return options;
-  const projectRoot = options?.projectRoot ?? process.env.INKOS_PROJECT_ROOT;
-  if (!projectRoot) return options;
-  return { ...options, projectRoot };
-}
-
-function resolveTokenOptimizationContext(
-  options: TokenOptimizationOptions | undefined,
-  client: LLMClient,
-  model: string,
-  variant?: string,
-): {
-  readonly projectRoot: string;
-  readonly bookId?: string;
-  readonly model: string;
-  readonly service?: string;
-  readonly variant?: string;
-} | null {
-  const projectRoot = options?.projectRoot ?? process.env.INKOS_PROJECT_ROOT;
-  if (!projectRoot) return null;
-  return {
-    projectRoot,
-    ...(options?.bookId ? { bookId: options.bookId } : {}),
-    model,
-    service: client.service,
-    ...(variant ? { variant } : {}),
-  };
-}
-
-function optimizeAgentMessagesForTokenPipeline(
-  messages: ReadonlyArray<AgentMessage>,
-  options?: TokenOptimizationOptions,
-): ReadonlyArray<AgentMessage> {
-  const compress = options?.compress ?? true;
-  const lastUserIndex = findLastAgentUserIndex(messages);
-  return messages.map((message, index) => {
-    if (typeof message.content !== "string") return message;
-    const normalized = normalizePromptForCache(message.content);
-    recordTokenOptimizationEvent({
-      kind: "standardized",
-      label: `Prompt 标准化：${message.role}`,
-      originalChars: message.content.length,
-      optimizedChars: normalized.length,
-      estimatedTokensSaved: Math.max(0, Math.ceil((message.content.length - normalized.length) / 2)),
-    });
-    if (!compress || index === lastUserIndex || normalized.length < 600) {
-      recordTokenOptimizationEvent({
-        kind: "compression-skipped",
-        label: index === lastUserIndex ? "保留当前用户指令原文" : "内容较短，无需压缩",
-        originalChars: normalized.length,
-        optimizedChars: normalized.length,
-        estimatedTokensSaved: 0,
-      });
-      return { ...message, content: normalized } as AgentMessage;
-    }
-    const mode = inferAgentCompressionMode(message.role, normalized);
-    const compressed = headroomLightCompress(normalized, mode);
-    const content = compressed.length < normalized.length ? compressed : normalized;
-    recordTokenCompressionSavings(normalized.length, content.length);
-    recordTokenOptimizationEvent({
-      kind: content.length < normalized.length ? "compressed" : "compression-skipped",
-      label: content.length < normalized.length ? `Headroom 压缩：${mode}` : "压缩收益不足，保留标准化文本",
-      originalChars: normalized.length,
-      optimizedChars: content.length,
-      estimatedTokensSaved: Math.max(0, Math.ceil((normalized.length - content.length) / 2)),
-    });
-    return { ...message, content } as AgentMessage;
-  });
-}
-
-function inferAgentCompressionMode(role: AgentMessage["role"], content: string): HeadroomLightMode {
-  const trimmed = content.trim();
-  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-    return "json";
-  }
-  if (role === "assistant") return "narrative";
-  return "setting";
-}
-
-function findLastAgentUserIndex(messages: ReadonlyArray<AgentMessage>): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") return index;
-  }
-  return -1;
 }
 
 function resolvePiApi(
@@ -430,7 +244,7 @@ function resolvePiApi(
   apiFormat: LLMConfig["apiFormat"] | undefined,
   presetApi: PiApi | undefined,
 ): PiApi {
-  if (serviceName === "custom") {
+  if (serviceName === "custom" || serviceName.startsWith("custom:")) {
     return apiFormat === "responses" ? "openai-responses" : "openai-completions";
   }
   return (presetApi ?? "openai-completions") as PiApi;
@@ -478,6 +292,30 @@ export class PartialResponseError extends Error {
 
 /** Minimum chars to consider a partial response salvageable (Chinese ~2 chars/word → 500 chars ≈ 250 words) */
 const MIN_SALVAGEABLE_CHARS = 500;
+
+export class ContextWindowExceededError extends Error {
+  readonly estimatedInputTokens: number;
+  readonly reservedOutputTokens: number;
+  readonly contextWindow: number;
+
+  constructor(params: {
+    readonly estimatedInputTokens: number;
+    readonly reservedOutputTokens: number;
+    readonly contextWindow: number;
+    readonly model: string;
+  }) {
+    super(
+      `InkOS context window guard: estimated input ${params.estimatedInputTokens} tokens + ` +
+      `reserved output ${params.reservedOutputTokens} tokens exceeds context window ${params.contextWindow} ` +
+      `for model "${params.model}". Please compress the active book/session context before retrying; ` +
+      `InkOS will not truncate semantic text automatically.`,
+    );
+    this.name = "ContextWindowExceededError";
+    this.estimatedInputTokens = params.estimatedInputTokens;
+    this.reservedOutputTokens = params.reservedOutputTokens;
+    this.contextWindow = params.contextWindow;
+  }
+}
 
 /** Keys managed by the provider layer — prevent extra from overriding them. */
 const RESERVED_KEYS = new Set(["max_tokens", "temperature", "model", "messages", "stream"]);
@@ -527,6 +365,97 @@ export function __resetFixedTemperatureWarnings(): void {
   warnedFixedTemperatureModels.clear();
 }
 
+export function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+  const cjk = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  const nonCjk = text.length - cjk;
+  return Math.ceil(cjk + nonCjk / 4);
+}
+
+function estimateJsonTokens(value: unknown): number {
+  try {
+    return estimateTextTokens(JSON.stringify(value) ?? "");
+  } catch {
+    return estimateTextTokens(String(value));
+  }
+}
+
+function estimateLLMMessagesTokens(messages: ReadonlyArray<LLMMessage>): number {
+  return messages.reduce((total, message) => total + estimateTextTokens(message.content), 0);
+}
+
+type PiMessageContent = PiContext["messages"][number]["content"];
+
+function estimatePiContentTokens(content: PiMessageContent): number {
+  if (typeof content === "string") return estimateTextTokens(content);
+  let total = 0;
+  for (const block of content) {
+    if (block.type === "text") {
+      total += estimateTextTokens(typeof block.text === "string" ? block.text : "");
+      continue;
+    }
+    if (block.type === "thinking") {
+      total += estimateTextTokens(typeof block.thinking === "string" ? block.thinking : "");
+      continue;
+    }
+    if (block.type === "toolCall") {
+      total += estimateTextTokens(typeof block.name === "string" ? block.name : "");
+      total += estimateTextTokens(typeof block.id === "string" ? block.id : "");
+      total += estimateJsonTokens(block.arguments);
+      continue;
+    }
+    if (block.type === "image") {
+      total += estimateTextTokens(typeof block.mimeType === "string" ? block.mimeType : "");
+      total += estimateTextTokens(typeof block.data === "string" ? block.data : "");
+      continue;
+    }
+    total += estimateJsonTokens(block);
+  }
+  return total;
+}
+
+export function estimatePiContextTokens(context: PiContext): number {
+  let total = estimateTextTokens(context.systemPrompt ?? "");
+  for (const message of context.messages) {
+    total += estimateTextTokens(message.role);
+    if (message.role === "assistant") {
+      total += estimatePiContentTokens(message.content);
+      total += estimateTextTokens(message.model ?? "");
+      total += estimateTextTokens(message.provider ?? "");
+      total += estimateTextTokens(message.api ?? "");
+      continue;
+    }
+    if (message.role === "toolResult") {
+      total += estimateTextTokens(message.toolCallId);
+      total += estimateTextTokens(message.toolName);
+      total += estimatePiContentTokens(message.content);
+      continue;
+    }
+    total += estimatePiContentTokens(message.content);
+  }
+  if (context.tools && context.tools.length > 0) {
+    total += estimateJsonTokens(context.tools);
+  }
+  return total;
+}
+
+export function assertWithinContextWindow(params: {
+  readonly piModel: PiModel<PiApi>;
+  readonly model: string;
+  readonly estimatedInputTokens: number;
+  readonly reservedOutputTokens: number;
+}): void {
+  const contextWindow = params.piModel.contextWindow;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
+  if (params.estimatedInputTokens + params.reservedOutputTokens <= contextWindow) return;
+  throw new ContextWindowExceededError({
+    estimatedInputTokens: params.estimatedInputTokens,
+    reservedOutputTokens: params.reservedOutputTokens,
+    contextWindow,
+    model: params.model,
+  });
+}
+
 // === Error Wrapping ===
 
 function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; readonly model?: string; readonly service?: string }): Error {
@@ -556,24 +485,14 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
     );
   }
   if (msg.includes("403")) {
-    const normalized = msg.toLowerCase();
-    const likelyModelAccess =
-      normalized.includes("model")
-      || normalized.includes("not access")
-      || normalized.includes("permission")
-      || normalized.includes("forbidden")
-      || normalized.includes("无权")
-      || normalized.includes("权限")
-      || normalized.includes("未开通")
-      || normalized.includes("不可用");
     return new Error(
-      `API 返回 403 (请求被拒绝)。可能原因：\n` +
-      (likelyModelAccess
-        ? `  1. 当前账号/API Key 没有访问该模型的权限，或该模型在服务商侧未开通/已下线\n`
-        : `  1. API Key 无效、过期，或当前账号没有访问该模型的权限\n`) +
-      `  2. API 提供方的内容审查拦截了请求（公益/免费 API 常见）\n` +
-      `  3. 账户余额不足或套餐不支持该模型\n` +
-      `  建议：在模型选择器换用同服务下的稳定文本模型，或到服务商控制台确认该模型已开通；也可用 inkos doctor 测试 API 连通性${ctxLine}`,
+      `API 返回 403（请求被渠道或上游拒绝）。\n` +
+      `上游详情：${msg.replace(/^Error:\s*/, "")}\n` +
+      `请在 New API 的调用日志中检查命中的渠道和失败原因。常见原因：\n` +
+      `  1. Token 未授权访问该模型或分组\n` +
+      `  2. 模型映射存在，但没有可用渠道\n` +
+      `  3. 上游 WAF、地区限制或内容策略拦截长提示词\n` +
+      `  4. 渠道余额不足、Key 失效或账号风控${ctxLine}`,
     );
   }
   if (msg.includes("401")) {
@@ -660,27 +579,38 @@ function isTransientLLMTransportError(error: unknown): boolean {
   ].some((needle) => text.includes(needle));
 }
 
-function shouldRetryError(error: unknown, attempt: number): { retry: boolean; delayMs: number } {
-  const errorStr = String(error);
-
-  if (errorStr.includes('429') || errorStr.toLowerCase().includes('rate limit')) {
-    const maxAttempts = RETRY_MAX_ATTEMPTS_RATE_LIMIT;
-    if (attempt >= maxAttempts) return { retry: false, delayMs: 0 };
-    const delayMs = RETRY_INITIAL_DELAY_MS * Math.pow(RETRY_BACKOFF_MULTIPLIER, attempt);
-    return { retry: true, delayMs: Math.min(delayMs, 30000) };
+/**
+ * Transient *HTTP-level* upstream failures worth retrying: 429 (rate limit),
+ * 502/503/504 (gateway / temporarily unavailable / overloaded). These are the
+ * aggregator blips that previously aborted whole architect/writer/short runs
+ * because only transport-level errors were retried.
+ *
+ * Deliberately does NOT match a bare 500 / "MODEL_NOT_AVAILABLE": on providers
+ * like PPIO a 500 means the model isn't on inference at all — retrying is futile
+ * and just delays the real error.
+ */
+export function isTransientLLMHttpError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase();
+  if (text.includes("model_not_available") || text.includes("model not available")) {
+    return false;
   }
+  const statusHit = /\b(429|502|503|504)\b/.test(text);
+  const phraseHit = [
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+    "rate limit",
+    "overloaded",
+    "please retry",
+    "try again later",
+  ].some((needle) => text.includes(needle));
+  return statusHit || phraseHit;
+}
 
-  if (errorStr.includes('500') || errorStr.includes('502') || errorStr.includes('503')) {
-    if (attempt >= TRANSIENT_LLM_RETRIES) return { retry: false, delayMs: 0 };
-    return { retry: true, delayMs: RETRY_INITIAL_DELAY_MS * (attempt + 1) };
-  }
-
-  if (errorStr.includes('400') || errorStr.includes('401') || errorStr.includes('403')) {
-    return { retry: false, delayMs: 0 };
-  }
-
-  if (attempt >= TRANSIENT_LLM_RETRIES) return { retry: false, delayMs: 0 };
-  return { retry: isTransientLLMTransportError(error), delayMs: 0 };
+function isRetryableLLMError(error: unknown): boolean {
+  return isTransientLLMTransportError(error) || isTransientLLMHttpError(error);
 }
 
 async function withTransientLLMRetry<T>(
@@ -689,23 +619,22 @@ async function withTransientLLMRetry<T>(
 ): Promise<T> {
   const enabled = options?.enabled ?? true;
   let lastError: unknown;
-  for (let attempt = 0; attempt <= RETRY_MAX_ATTEMPTS_RATE_LIMIT; attempt++) {
+  for (let attempt = 0; attempt <= TRANSIENT_LLM_RETRIES; attempt++) {
     try {
       return await run();
     } catch (error) {
       lastError = error;
-      if (!enabled || error instanceof PartialResponseError) {
+      if (
+        !enabled
+        || attempt >= TRANSIENT_LLM_RETRIES
+        || error instanceof PartialResponseError
+        || !isRetryableLLMError(error)
+      ) {
         throw error;
       }
-
-      const retryDecision = shouldRetryError(error, attempt);
-      if (!retryDecision.retry) {
-        throw error;
-      }
-
-      if (retryDecision.delayMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, retryDecision.delayMs));
-      }
+      // Back off before retrying — immediate re-fire on a 429/503 just makes it
+      // worse. Linear is enough for a 2-retry budget (~0.8s, ~1.6s).
+      await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
     }
   }
   throw lastError;
@@ -715,7 +644,7 @@ function shouldUseNativeCustomTransport(client: LLMClient): boolean {
   if (client.service === "kkaiapi" && client.provider === "openai") {
     return true;
   }
-  if (client.service === "custom") {
+  if (client.service === "custom" || client.service?.startsWith("custom:")) {
     if (
       client.configSource === "studio"
       && (client.provider === "openai" || client.provider === "anthropic")
@@ -741,9 +670,23 @@ function buildCustomHeaders(client: LLMClient): Record<string, string> {
   const apiKey = sanitizeHeaderApiKey(client._apiKey);
   return sanitizeHttpHeaders({
     "Content-Type": "application/json",
+    "User-Agent": INKOS_USER_AGENT,
     ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     ...(client._piModel?.headers ?? {}),
   }) ?? { "Content-Type": "application/json" };
+}
+
+function formatResponseTrace(headers?: Headers): string {
+  if (!headers) return "";
+  const parts = [
+    ["x-oneapi-request-id", headers.get("x-oneapi-request-id")],
+    ["request-id", headers.get("request-id")],
+    ["x-request-id", headers.get("x-request-id")],
+    ["cf-ray", headers.get("cf-ray")],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    .map(([key, value]) => `${key}: ${value}`);
+  return parts.length > 0 ? `响应追踪：${parts.join("，")}` : "";
 }
 
 function sanitizeHeaderApiKey(apiKey: string | undefined): string {
@@ -821,57 +764,109 @@ function isSystemRoleUnsupportedErrorText(text: string): boolean {
     || normalized.includes("不允许");
 }
 
-function isOpenAICompatibleRequestParameterErrorText(text: string): boolean {
+function isUnsupportedParameterErrorText(text: string, parameter: string): boolean {
   const normalized = text.toLowerCase();
-  if (!normalized.includes("400")) return false;
-  return normalized.includes("parameter")
-    || normalized.includes("param")
-    || normalized.includes("max_tokens")
-    || normalized.includes("temperature")
-    || normalized.includes("messages")
-    || normalized.includes("role")
-    || normalized.includes("请求参数")
-    || normalized.includes("参数");
+  if (!normalized.includes(parameter.toLowerCase())) return false;
+  return normalized.includes("unsupported")
+    || normalized.includes("not support")
+    || normalized.includes("does not support")
+    || normalized.includes("unknown parameter")
+    || normalized.includes("unrecognized")
+    || normalized.includes("invalid parameter")
+    || normalized.includes("不支持")
+    || normalized.includes("未知参数")
+    || normalized.includes("无效参数");
 }
 
-function shouldRetryWithConservativeChatPayload(
-  detail: string,
-  messages: ReadonlyArray<LLMMessage>,
-  resolved: { readonly temperature: number; readonly maxTokens: number },
-  compatibilityFallbackLevel: number,
-): boolean {
-  if (!isOpenAICompatibleRequestParameterErrorText(detail)) return false;
-  if (compatibilityFallbackLevel >= 2) return false;
-  if (compatibilityFallbackLevel > 0) return true;
-  return hasSystemMessages(messages) || resolved.maxTokens > 4096 || resolved.temperature !== 1;
+function shouldUseMaxCompletionTokens(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("max_completion_tokens")
+    || isUnsupportedParameterErrorText(normalized, "max_tokens");
 }
 
-function conservativeChatResolved(
-  resolved: { readonly temperature: number; readonly maxTokens: number; readonly extra: Record<string, unknown> },
-  compatibilityFallbackLevel: number,
-): { readonly temperature: number; readonly maxTokens: number; readonly extra: Record<string, unknown> } {
-  const maxTokens = compatibilityFallbackLevel >= 2 ? 2048 : 4096;
-  return {
-    ...resolved,
-    temperature: 1,
-    maxTokens: Math.min(resolved.maxTokens, maxTokens),
-    extra: {},
-  };
+function isTokenLimitRejectedErrorText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("max_tokens")
+    || normalized.includes("max completion")
+    || normalized.includes("max output")
+    || normalized.includes("output tokens")
+    || normalized.includes("too many tokens")
+    || normalized.includes("maximum context")
+    || normalized.includes("exceeds")
+    || normalized.includes("超过")
+    || normalized.includes("输出")
+    || normalized.includes("token");
+}
+
+function capCustomCompatMaxTokens(current: number): number {
+  if (!Number.isFinite(current) || current <= 0) return CUSTOM_COMPAT_SAFE_MAX_TOKENS;
+  return Math.min(current, CUSTOM_COMPAT_SAFE_MAX_TOKENS);
+}
+
+function extractStreamError(json: any): string | null {
+  if (typeof json?.error === "string" && json.error.trim()) return json.error.trim();
+  if (typeof json?.error?.message === "string" && json.error.message.trim()) {
+    const status = json.error.status ?? json.error.code;
+    return `${status ? `${status} ` : ""}${json.error.message}`.trim();
+  }
+  if (json?.type === "error" && typeof json?.message === "string" && json.message.trim()) {
+    return json.message.trim();
+  }
+  return null;
+}
+
+function emitRequestDiagnostics(
+  client: LLMClient,
+  params: {
+    readonly model: string;
+    readonly messages: ReadonlyArray<LLMMessage>;
+    readonly apiFormat: "chat" | "responses";
+    readonly stream: boolean;
+    readonly maxTokens: number;
+    readonly endpoint: LLMRequestDiagnostics["endpoint"];
+    readonly compatibility?: LLMRequestDiagnostics["compatibility"];
+  },
+): void {
+  if (!client.onRequestDiagnostics) return;
+  const counts = params.messages.reduce(
+    (acc, message) => {
+      const length = message.content.length;
+      acc.promptChars += length;
+      if (message.role === "system") acc.systemChars += length;
+      else if (message.role === "user") acc.userChars += length;
+      else acc.assistantChars += length;
+      return acc;
+    },
+    { promptChars: 0, systemChars: 0, userChars: 0, assistantChars: 0 },
+  );
+  client.onRequestDiagnostics({
+    service: client.service,
+    model: params.model,
+    apiFormat: params.apiFormat,
+    stream: params.stream,
+    maxTokens: params.maxTokens,
+    hasSystemRole: params.messages.some((message) => message.role === "system" && message.content.trim().length > 0),
+    messageCount: params.messages.length,
+    ...counts,
+    endpoint: params.endpoint,
+    compatibility: params.compatibility ?? {},
+  });
 }
 
 async function readErrorResponse(res: Response): Promise<string> {
+  const trace = formatResponseTrace(res.headers);
   const text = await res.text().catch(() => "");
   try {
     const json = JSON.parse(text) as { error?: { message?: string } | string; detail?: string };
-    if (typeof json.error === "string" && json.error) return `${res.status} ${json.error}`;
+    if (typeof json.error === "string" && json.error) return `${res.status} ${json.error}${trace ? `\n${trace}` : ""}`;
     if (json.error && typeof json.error === "object" && typeof json.error.message === "string") {
-      return `${res.status} ${json.error.message}`;
+      return `${res.status} ${json.error.message}${trace ? `\n${trace}` : ""}`;
     }
-    if (typeof json.detail === "string" && json.detail) return `${res.status} ${json.detail}`;
+    if (typeof json.detail === "string" && json.detail) return `${res.status} ${json.detail}${trace ? `\n${trace}` : ""}`;
   } catch {
     // fall through
   }
-  return `${res.status} ${text || res.statusText}`.trim();
+  return `${res.status} ${text || res.statusText}${trace ? `\n${trace}` : ""}`.trim();
 }
 
 type ParsedSseEvent = {
@@ -906,85 +901,46 @@ function parseSseEvents(buffer: string): { readonly events: ParsedSseEvent[]; re
   return { events, rest };
 }
 
-function isJsonRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function readJsonPath(value: unknown, path: ReadonlyArray<string | number>): unknown {
-  let current = value;
-  for (const segment of path) {
-    if (typeof segment === "number") {
-      if (!Array.isArray(current)) return undefined;
-      current = current[segment];
-      continue;
-    }
-    if (!isJsonRecord(current)) return undefined;
-    current = current[segment];
-  }
-  return current;
-}
-
-function readJsonString(value: unknown, path: ReadonlyArray<string | number>): string | undefined {
-  const candidate = readJsonPath(value, path);
-  return typeof candidate === "string" ? candidate : undefined;
-}
-
-function readJsonNumber(value: unknown, path: ReadonlyArray<string | number>): number | undefined {
-  const candidate = readJsonPath(value, path);
-  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
-}
-
-function extractOpenAITextPart(value: unknown): string {
+function extractOpenAITextPart(value: any): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
     return value
-      .map((item) => {
-        if (!isJsonRecord(item)) return "";
-        if (typeof item.text === "string") return item.text;
-        if (typeof item.content === "string") return item.content;
-        return "";
-      })
+      .map((item) => typeof item?.text === "string" ? item.text : typeof item?.content === "string" ? item.content : "")
       .join("");
   }
   return "";
 }
 
-function extractChatContent(json: unknown): string {
-  return extractOpenAITextPart(readJsonPath(json, ["choices", 0, "message", "content"]))
-    || extractOpenAITextPart(readJsonPath(json, ["choices", 0, "message", "reasoning_content"]));
+function extractChatContent(json: any): string {
+  const message = json?.choices?.[0]?.message;
+  return extractOpenAITextPart(message?.content) || extractOpenAITextPart(message?.reasoning_content);
 }
 
-function extractChatDeltaContent(json: unknown): string {
-  return extractOpenAITextPart(readJsonPath(json, ["choices", 0, "delta", "content"]));
+function extractChatDeltaContent(json: any): string {
+  return extractOpenAITextPart(json?.choices?.[0]?.delta?.content);
 }
 
-function extractChatDeltaReasoningContent(json: unknown): string {
-  return extractOpenAITextPart(readJsonPath(json, ["choices", 0, "delta", "reasoning_content"]));
+function extractChatDeltaReasoningContent(json: any): string {
+  return extractOpenAITextPart(json?.choices?.[0]?.delta?.reasoning_content);
 }
 
-function extractResponsesContent(json: unknown): string {
-  const output = readJsonPath(json, ["output"]);
-  const outputItems = Array.isArray(output) ? output : [];
-  return outputItems
-    .flatMap((item) => {
-      if (!isJsonRecord(item) || !Array.isArray(item.content)) return [];
-      return item.content;
-    })
-    .map((part) => {
-      if (!isJsonRecord(part)) return "";
-      if (typeof part.text === "string") return part.text;
-      if (typeof part.content === "string") return part.content;
-      if (typeof part.output_text === "string") return part.output_text;
+function extractResponsesContent(json: any): string {
+  const output = Array.isArray(json?.output) ? json.output : [];
+  return output
+    .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
+    .map((part: any) => {
+      if (typeof part?.text === "string") return part.text;
+      if (typeof part?.content === "string") return part.content;
+      if (typeof part?.output_text === "string") return part.output_text;
       return "";
     })
     .join("");
 }
 
-function extractAnthropicContent(json: unknown): string {
-  const rawContent = readJsonPath(json, ["content"]);
-  const content = Array.isArray(rawContent) ? rawContent : [];
+function extractAnthropicContent(json: any): string {
+  const content = Array.isArray(json?.content) ? json.content : [];
   return content
-    .map((part) => isJsonRecord(part) && typeof part.text === "string" ? part.text : "")
+    .map((part: any) => typeof part?.text === "string" ? part.text : "")
     .join("");
 }
 
@@ -995,7 +951,6 @@ async function chatCompletionViaCustomAnthropicCompatible(
   resolved: { readonly temperature: number; readonly maxTokens: number; readonly extra: Record<string, unknown> },
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
-  signal?: AbortSignal,
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
   const errorCtx = { baseUrl, model, service: client.service };
@@ -1012,6 +967,14 @@ async function chatCompletionViaCustomAnthropicCompatible(
   if (system) payload.system = system;
 
   const apiKey = sanitizeHeaderApiKey(client._apiKey);
+  emitRequestDiagnostics(client, {
+    model,
+    messages,
+    apiFormat: "chat",
+    stream: client.stream,
+    maxTokens: resolved.maxTokens,
+    endpoint: "messages",
+  });
   const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/messages`, {
     method: "POST",
     headers: sanitizeHttpHeaders({
@@ -1023,7 +986,6 @@ async function chatCompletionViaCustomAnthropicCompatible(
       ...(client._piModel?.headers ?? {}),
     }) ?? { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-    signal,
   }, client.proxyUrl);
 
   if (!response.ok) {
@@ -1031,19 +993,17 @@ async function chatCompletionViaCustomAnthropicCompatible(
   }
 
   if (!client.stream) {
-    const json = await response.json() as unknown;
+    const json = await response.json() as any;
     const content = extractAnthropicContent(json);
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
-    const promptTokens = readJsonNumber(json, ["usage", "input_tokens"]) ?? 0;
-    const completionTokens = readJsonNumber(json, ["usage", "output_tokens"]) ?? 0;
     return {
       content,
       usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens: promptTokens + completionTokens,
+        promptTokens: json?.usage?.input_tokens ?? 0,
+        completionTokens: json?.usage?.output_tokens ?? 0,
+        totalTokens: (json?.usage?.input_tokens ?? 0) + (json?.usage?.output_tokens ?? 0),
       },
     };
   }
@@ -1058,32 +1018,26 @@ async function chatCompletionViaCustomAnthropicCompatible(
 
   try {
     while (true) {
-      throwIfAborted(signal);
       const { value, done } = await reader.read();
-      throwIfAborted(signal);
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSseEvents(buffer);
       buffer = parsed.rest;
       for (const event of parsed.events) {
         if (!event.data) continue;
-        const json = JSON.parse(event.data) as unknown;
-        const type = readJsonString(json, ["type"]);
-        if (type === "message_start") {
-          usage.promptTokens = readJsonNumber(json, ["message", "usage", "input_tokens"]) ?? usage.promptTokens;
+        const json = JSON.parse(event.data);
+        if (json.type === "message_start" && json.message?.usage) {
+          usage.promptTokens = json.message.usage.input_tokens ?? usage.promptTokens;
         }
-        if (type === "content_block_delta" && readJsonString(json, ["delta", "type"]) === "text_delta") {
-          const text = readJsonString(json, ["delta", "text"]);
-          if (text) {
-            content += text;
-            monitor.onChunk(text);
-            onTextDelta?.(text);
-          }
+        if (json.type === "content_block_delta" && json.delta?.type === "text_delta" && typeof json.delta.text === "string") {
+          content += json.delta.text;
+          monitor.onChunk(json.delta.text);
+          onTextDelta?.(json.delta.text);
         }
-        if (type === "message_delta") {
-          usage.completionTokens = readJsonNumber(json, ["usage", "output_tokens"]) ?? usage.completionTokens;
+        if (json.type === "message_delta" && json.usage) {
+          usage.completionTokens = json.usage.output_tokens ?? usage.completionTokens;
         }
-        if (type === "message_stop") {
+        if (json.type === "message_stop") {
           usage.totalTokens = usage.promptTokens + usage.completionTokens;
         }
       }
@@ -1108,42 +1062,78 @@ async function chatCompletionViaCustomOpenAICompatible(
   resolved: { readonly temperature: number; readonly maxTokens: number; readonly extra: Record<string, unknown> },
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
-  signal?: AbortSignal,
-  compatibilityFallbackLevel = 0,
+  compatibility: {
+    readonly allowSystemRoleFallback: boolean;
+    readonly omitTemperature: boolean;
+    readonly tokenLimitField: "max_tokens" | "max_completion_tokens";
+    readonly omitStreamOptions: boolean;
+    readonly forceNonStream: boolean;
+    readonly maxTokensOverride?: number;
+  } = {
+    allowSystemRoleFallback: true,
+    omitTemperature: false,
+    tokenLimitField: "max_tokens",
+    omitStreamOptions: false,
+    forceNonStream: false,
+  },
 ): Promise<LLMResponse> {
   if (client.provider === "anthropic") {
-    return chatCompletionViaCustomAnthropicCompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+    return chatCompletionViaCustomAnthropicCompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
   }
   const baseUrl = client._piModel?.baseUrl ?? "";
   const headers = buildCustomHeaders(client);
   const errorCtx = { baseUrl, model, service: client.service };
   const extra = stripReservedKeys(resolved.extra);
+  const effectiveMaxTokens = compatibility.maxTokensOverride ?? resolved.maxTokens;
+  const maxTokensCappedFrom = compatibility.maxTokensOverride !== undefined && compatibility.maxTokensOverride < resolved.maxTokens
+    ? resolved.maxTokens
+    : undefined;
 
   if (client.apiFormat === "responses") {
     const payload: Record<string, unknown> = {
       model,
       input: buildResponsesInput(messages),
-      stream: client.stream,
+      stream: compatibility.forceNonStream ? false : client.stream,
       store: false,
-      max_output_tokens: resolved.maxTokens,
-      temperature: resolved.temperature,
+      max_output_tokens: effectiveMaxTokens,
       ...extra,
     };
+    if (!compatibility.omitTemperature) payload.temperature = resolved.temperature;
     const instructions = joinSystemPrompt(messages);
     if (instructions) payload.instructions = instructions;
 
+    emitRequestDiagnostics(client, {
+      model,
+      messages,
+      apiFormat: "responses",
+      stream: compatibility.forceNonStream ? false : client.stream,
+      maxTokens: effectiveMaxTokens,
+      endpoint: "responses",
+      compatibility: {
+        omitTemperature: compatibility.omitTemperature,
+        forceNonStream: compatibility.forceNonStream,
+        maxTokensCappedFrom,
+      },
+    });
     const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/responses`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal,
     }, client.proxyUrl);
     if (!response.ok) {
-      throw wrapLLMError(new Error(await readErrorResponse(response)), errorCtx);
+      const detail = await readErrorResponse(response);
+      if ((response.status === 400 || response.status === 403) && effectiveMaxTokens > CUSTOM_COMPAT_SAFE_MAX_TOKENS && isTokenLimitRejectedErrorText(detail)) {
+        return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+          ...compatibility,
+          forceNonStream: true,
+          maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+        });
+      }
+      throw wrapLLMError(new Error(detail), errorCtx);
     }
 
-    if (!client.stream) {
-      const json = await response.json() as unknown;
+    if (compatibility.forceNonStream || !client.stream) {
+      const json = await response.json() as any;
       const content = extractResponsesContent(json);
       if (!content) {
         throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
@@ -1151,15 +1141,16 @@ async function chatCompletionViaCustomOpenAICompatible(
       return {
         content,
         usage: {
-          promptTokens: readJsonNumber(json, ["usage", "input_tokens"]) ?? 0,
-          completionTokens: readJsonNumber(json, ["usage", "output_tokens"]) ?? 0,
-          totalTokens: readJsonNumber(json, ["usage", "total_tokens"]) ?? 0,
+          promptTokens: json?.usage?.input_tokens ?? 0,
+          completionTokens: json?.usage?.output_tokens ?? 0,
+          totalTokens: json?.usage?.total_tokens ?? 0,
         },
       };
     }
 
     const reader = response.body?.getReader();
     if (!reader) throw wrapLLMError(new Error("Streaming body unavailable"), errorCtx);
+    const responseTrace = formatResponseTrace(response.headers);
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
@@ -1168,33 +1159,36 @@ async function chatCompletionViaCustomOpenAICompatible(
 
     try {
       while (true) {
-        throwIfAborted(signal);
         const { value, done } = await reader.read();
-        throwIfAborted(signal);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const parsed = parseSseEvents(buffer);
         buffer = parsed.rest;
         for (const event of parsed.events) {
           if (!event.data) continue;
-          const json = JSON.parse(event.data) as unknown;
-          const type = readJsonString(json, ["type"]);
-          if (type === "response.output_text.delta") {
-            const delta = readJsonString(json, ["delta"]);
-            if (delta) {
-              content += delta;
-              monitor.onChunk(delta);
-              onTextDelta?.(delta);
-            }
+          const json = JSON.parse(event.data);
+          const streamError = extractStreamError(json);
+          if (streamError?.includes("403") && !compatibility.forceNonStream) {
+            return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+              ...compatibility,
+              forceNonStream: true,
+              maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+            });
           }
-          if (type === "response.completed") {
+          if (streamError) throw wrapLLMError(new Error(`${streamError}${responseTrace ? `\n${responseTrace}` : ""}`), errorCtx);
+          if (json.type === "response.output_text.delta" && typeof json.delta === "string") {
+            content += json.delta;
+            monitor.onChunk(json.delta);
+            onTextDelta?.(json.delta);
+          }
+          if (json.type === "response.completed") {
             usage = {
-              promptTokens: readJsonNumber(json, ["response", "usage", "input_tokens"]) ?? 0,
-              completionTokens: readJsonNumber(json, ["response", "usage", "output_tokens"]) ?? 0,
-              totalTokens: readJsonNumber(json, ["response", "usage", "total_tokens"]) ?? 0,
+              promptTokens: json.response?.usage?.input_tokens ?? 0,
+              completionTokens: json.response?.usage?.output_tokens ?? 0,
+              totalTokens: json.response?.usage?.total_tokens ?? 0,
             };
             if (!content) {
-              content = extractResponsesContent(readJsonPath(json, ["response"]));
+              content = extractResponsesContent(json.response);
             }
           }
         }
@@ -1217,37 +1211,70 @@ async function chatCompletionViaCustomOpenAICompatible(
         .map((message) => ({ role: "system", content: message.content })),
       ...buildChatMessages(messages),
     ],
-    stream: client.stream,
-    temperature: resolved.temperature,
-    max_tokens: resolved.maxTokens,
+    stream: compatibility.forceNonStream ? false : client.stream,
     ...extra,
   };
-  if (client.stream && compatibilityFallbackLevel === 0) {
+  if (!compatibility.omitTemperature) payload.temperature = resolved.temperature;
+  payload[compatibility.tokenLimitField] = effectiveMaxTokens;
+  if (client.stream && !compatibility.forceNonStream && !compatibility.omitStreamOptions) {
     payload.stream_options = { include_usage: true };
   }
 
+  emitRequestDiagnostics(client, {
+    model,
+    messages,
+    apiFormat: "chat",
+    stream: compatibility.forceNonStream ? false : client.stream,
+    maxTokens: effectiveMaxTokens,
+    endpoint: "chat/completions",
+    compatibility: {
+      omitTemperature: compatibility.omitTemperature,
+      tokenLimitField: compatibility.tokenLimitField,
+      omitStreamOptions: compatibility.omitStreamOptions,
+      forceNonStream: compatibility.forceNonStream,
+      maxTokensCappedFrom,
+    },
+  });
   const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal,
   }, client.proxyUrl);
   if (!response.ok) {
     const detail = await readErrorResponse(response);
-    const nextFallbackLevel = compatibilityFallbackLevel + 1;
-    if (shouldRetryWithConservativeChatPayload(detail, messages, resolved, compatibilityFallbackLevel)) {
-      return chatCompletionViaCustomOpenAICompatible(
-        client,
-        model,
-        hasSystemMessages(messages) ? foldSystemMessagesIntoFirstUser(messages) : messages,
-        conservativeChatResolved(resolved, nextFallbackLevel),
-        onStreamProgress,
-        onTextDelta,
-        signal,
-        nextFallbackLevel,
-      );
+    if (response.status === 400 && !compatibility.omitTemperature && isUnsupportedParameterErrorText(detail, "temperature")) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        omitTemperature: true,
+      });
     }
-    if (compatibilityFallbackLevel === 0 && hasSystemMessages(messages) && isSystemRoleUnsupportedErrorText(detail)) {
+    if (response.status === 400 && compatibility.tokenLimitField === "max_tokens" && shouldUseMaxCompletionTokens(detail)) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        tokenLimitField: "max_completion_tokens",
+      });
+    }
+    if (response.status === 400 && !compatibility.omitStreamOptions && isUnsupportedParameterErrorText(detail, "stream_options")) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        omitStreamOptions: true,
+      });
+    }
+    if (response.status === 403 && client.stream && !compatibility.forceNonStream) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        forceNonStream: true,
+        maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+      });
+    }
+    if ((response.status === 400 || response.status === 403) && effectiveMaxTokens > CUSTOM_COMPAT_SAFE_MAX_TOKENS && isTokenLimitRejectedErrorText(detail)) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        forceNonStream: true,
+        maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+      });
+    }
+    if (compatibility.allowSystemRoleFallback && hasSystemMessages(messages) && isSystemRoleUnsupportedErrorText(detail)) {
       return chatCompletionViaCustomOpenAICompatible(
         client,
         model,
@@ -1255,15 +1282,14 @@ async function chatCompletionViaCustomOpenAICompatible(
         resolved,
         onStreamProgress,
         onTextDelta,
-        signal,
-        nextFallbackLevel,
+        { ...compatibility, allowSystemRoleFallback: false },
       );
     }
     throw wrapLLMError(new Error(detail), errorCtx);
   }
 
-  if (!client.stream) {
-    const json = await response.json() as unknown;
+  if (compatibility.forceNonStream || !client.stream) {
+    const json = await response.json() as any;
     const content = extractChatContent(json);
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
@@ -1271,15 +1297,16 @@ async function chatCompletionViaCustomOpenAICompatible(
     return {
       content,
       usage: {
-        promptTokens: readJsonNumber(json, ["usage", "prompt_tokens"]) ?? 0,
-        completionTokens: readJsonNumber(json, ["usage", "completion_tokens"]) ?? 0,
-        totalTokens: readJsonNumber(json, ["usage", "total_tokens"]) ?? 0,
+        promptTokens: json?.usage?.prompt_tokens ?? 0,
+        completionTokens: json?.usage?.completion_tokens ?? 0,
+        totalTokens: json?.usage?.total_tokens ?? 0,
       },
     };
   }
 
   const reader = response.body?.getReader();
   if (!reader) throw wrapLLMError(new Error("Streaming body unavailable"), errorCtx);
+  const responseTrace = formatResponseTrace(response.headers);
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
@@ -1289,16 +1316,23 @@ async function chatCompletionViaCustomOpenAICompatible(
 
   try {
     while (true) {
-      throwIfAborted(signal);
       const { value, done } = await reader.read();
-      throwIfAborted(signal);
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSseEvents(buffer);
       buffer = parsed.rest;
       for (const event of parsed.events) {
         if (!event.data || event.data === "[DONE]") continue;
-        const json = JSON.parse(event.data) as unknown;
+        const json = JSON.parse(event.data);
+        const streamError = extractStreamError(json);
+        if (streamError?.includes("403") && !compatibility.forceNonStream) {
+          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+            ...compatibility,
+            forceNonStream: true,
+            maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+          });
+        }
+        if (streamError) throw wrapLLMError(new Error(`${streamError}${responseTrace ? `\n${responseTrace}` : ""}`), errorCtx);
         const delta = extractChatDeltaContent(json);
         if (delta) {
           content += delta;
@@ -1311,11 +1345,11 @@ async function chatCompletionViaCustomOpenAICompatible(
             monitor.onChunk(reasoningDelta);
           }
         }
-        if (isJsonRecord(readJsonPath(json, ["usage"]))) {
+        if (json?.usage) {
           usage = {
-            promptTokens: readJsonNumber(json, ["usage", "prompt_tokens"]) ?? usage.promptTokens,
-            completionTokens: readJsonNumber(json, ["usage", "completion_tokens"]) ?? usage.completionTokens,
-            totalTokens: readJsonNumber(json, ["usage", "total_tokens"]) ?? usage.totalTokens,
+            promptTokens: json.usage.prompt_tokens ?? usage.promptTokens,
+            completionTokens: json.usage.completion_tokens ?? usage.completionTokens,
+            totalTokens: json.usage.total_tokens ?? usage.totalTokens,
           };
         }
       }
@@ -1343,102 +1377,42 @@ export async function chatCompletion(
     readonly webSearch?: boolean;
     readonly onStreamProgress?: OnStreamProgress;
     readonly onTextDelta?: (text: string) => void;
-    readonly signal?: AbortSignal;
-    readonly tokenOptimization?: TokenOptimizationOptions;
-    readonly targetWordCount?: number;
-    readonly taskType?: 'book-create' | 'chapter-write' | 'audit' | 'default';
+    // Diagnostics / connectivity checks want a fast pass-or-fail — set false to
+    // skip the transient 502/503/429 retry+backoff (e.g. the doctor probe).
+    readonly retry?: boolean;
   },
 ): Promise<LLMResponse> {
   // C1 (v2.0.0)：删除 maxTokensCap 机制。per-call 显式传的 maxTokens 永远不被裁剪。
-  let effectiveMaxTokens = options?.maxTokens ?? client.defaults.maxTokens;
-  if (options?.targetWordCount && options.targetWordCount > 10000) {
-    const estimatedTokens = Math.ceil(options.targetWordCount * 2);
-    effectiveMaxTokens = Math.max(effectiveMaxTokens, Math.min(estimatedTokens * 1.2, 128000));
-  }
   const resolved = {
     temperature: clampTemperatureForModel(
       client.service,
       model,
       options?.temperature ?? client.defaults.temperature,
     ),
-    maxTokens: effectiveMaxTokens,
+    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
     extra: client.defaults.extra,
   };
   const onStreamProgress = options?.onStreamProgress;
   const onTextDelta = options?.onTextDelta;
-  const timeoutMs = resolveLLMCallTimeoutMs(options?.taskType);
-  const callAbort = createChildAbortSignal(options?.signal, timeoutMs, `LLM 调用 ${model}`);
-  const signal = callAbort.signal;
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
-  const tokenOptimization = resolveTokenOptimization(options?.tokenOptimization);
-  const optimizationContext = tokenOptimization?.enabled === false
-    ? null
-    : resolveTokenOptimizationContext(
-        tokenOptimization,
-        client,
-        model,
-        JSON.stringify({
-          temperature: resolved.temperature,
-          maxTokens: resolved.maxTokens,
-          webSearch: options?.webSearch === true,
-          extra: resolved.extra,
-        }),
-      );
-  if (optimizationContext) {
-    applyOfficialOptimizationConfig(optimizationContext.projectRoot);
-  }
-  const optimized = optimizationContext
-    ? await optimizeMessagesForTokenPipelineAsync(messages, {
-        model,
-        compress: tokenOptimization?.compress ?? true,
-      })
-    : { messages: [...messages], events: [], originalChars: 0, optimizedChars: 0, estimatedTokensSaved: 0 };
-  const cacheEnabled = tokenOptimization?.cache !== false;
-  const cacheReadEnabled = cacheEnabled && tokenOptimization?.cacheRead !== false;
-  const cacheWriteEnabled = cacheEnabled && tokenOptimization?.cacheWrite !== false;
-  if (optimizationContext && cacheReadEnabled) {
-    const cached = await getSemanticCache(optimizationContext, optimized.messages);
-    if (cached) {
-      onTextDelta?.(cached.content);
-      return cached;
-    }
-  } else if (optimizationContext && cacheEnabled && !cacheReadEnabled) {
-    recordTokenOptimizationEvent({
-      kind: "cache-check",
-      label: "语义缓存检查：创作请求只写不读",
-    });
-    recordTokenOptimizationEvent({
-      kind: "cache-skip",
-      label: "语义缓存读取跳过：创作请求不复用旧生成结果",
-    });
-  } else if (optimizationContext) {
-    recordTokenOptimizationEvent({ kind: "cache-skip", label: "语义缓存跳过：当前请求关闭缓存" });
-  }
 
   try {
     return await withTransientLLMRetry(
       async () => {
-        throwIfAborted(signal);
-        recordTokenOptimizationEvent({ kind: "llm-call", label: "LLM 调用：缓存未命中后请求模型" });
-        let response: LLMResponse;
+        assertWithinContextWindow({
+          piModel: resolvePiModel(client, model),
+          model,
+          estimatedInputTokens: estimateLLMMessagesTokens(messages),
+          reservedOutputTokens: resolved.maxTokens,
+        });
         if (shouldUseNativeCustomTransport(client)) {
-          response = await awaitAbortable(
-            chatCompletionViaCustomOpenAICompatible(client, model, optimized.messages, resolved, onStreamProgress, onTextDelta, signal),
-            signal,
-          );
-        } else {
-          response = await awaitAbortable(
-            chatCompletionViaPiAi(client, model, optimized.messages, resolved, onStreamProgress, onTextDelta, signal),
-            signal,
-          );
+          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
         }
-        if (optimizationContext && cacheWriteEnabled) {
-          await putSemanticCache(optimizationContext, optimized.messages, response).catch(() => undefined);
-        }
-        return response;
+        return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
       },
-      // Retrying after UI text deltas have been emitted can duplicate visible text.
-      { enabled: !onTextDelta },
+      // Retrying after UI text deltas have been emitted can duplicate visible
+      // text; callers can also opt out (e.g. fast-fail diagnostics).
+      { enabled: (options?.retry ?? true) && !onTextDelta },
     );
   } catch (error) {
     // Stream interrupted but partial content is usable — return truncated response
@@ -1448,49 +1422,6 @@ export async function chatCompletion(
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       };
     }
-    throw wrapLLMError(error, errorCtx);
-  } finally {
-    callAbort.dispose();
-  }
-}
-
-// === Tool-calling Chat (used by agent loop) ===
-
-export async function chatWithTools(
-  client: LLMClient,
-  model: string,
-  messages: ReadonlyArray<AgentMessage>,
-  tools: ReadonlyArray<ToolDefinition>,
-  options?: {
-    readonly temperature?: number;
-    readonly maxTokens?: number;
-    readonly tokenOptimization?: TokenOptimizationOptions;
-  },
-): Promise<ChatWithToolsResult> {
-  const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
-  try {
-    const resolved = {
-      temperature: clampTemperatureForModel(
-        client.service,
-        model,
-        options?.temperature ?? client.defaults.temperature,
-      ),
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-    };
-    const tokenOptimization = resolveTokenOptimization(options?.tokenOptimization);
-    const optimizedMessages = tokenOptimization?.enabled === false
-      ? messages
-      : optimizeAgentMessagesForTokenPipeline(messages, tokenOptimization);
-    if (tokenOptimization?.enabled !== false) {
-      recordTokenOptimizationEvent({ kind: "cache-check", label: "语义缓存检查：工具请求" });
-      recordTokenOptimizationEvent({ kind: "cache-skip", label: "工具调用请求不跳过 LLM，避免跳过工具执行" });
-      recordTokenOptimizationEvent({ kind: "llm-call", label: "LLM 工具调用请求" });
-    }
-    if (shouldUseNativeCustomTransport(client) && client.provider === "openai") {
-      return await chatWithToolsViaNativeOpenAICompatible(client, model, optimizedMessages, tools, resolved);
-    }
-    return await chatWithToolsViaPiAi(client, model, optimizedMessages, tools, resolved);
-  } catch (error) {
     throw wrapLLMError(error, errorCtx);
   }
 }
@@ -1505,15 +1436,8 @@ export async function chatWithTools(
  */
 function resolvePiModel(client: LLMClient, model: string): PiModel<PiApi> {
   const base = client._piModel!;
-  if (base.id === model || base.name === model) return base;
-  const modelCard = lookupModel(client.service ?? "custom", model);
-  return {
-    ...base,
-    id: modelCard?.deploymentName ?? model,
-    name: model,
-    contextWindow: modelCard?.contextWindowTokens ?? base.contextWindow,
-    maxTokens: modelCard?.maxOutput ?? base.maxTokens,
-  };
+  if (base.id === model) return base;
+  return { ...base, id: model, name: model };
 }
 
 /** Convert inkos LLMMessage[] to pi-ai Context. */
@@ -1524,7 +1448,7 @@ function toPiContext(messages: ReadonlyArray<LLMMessage>): PiContext {
     .filter((m) => m.role !== "system")
     .map((m) => {
       if (m.role === "user") {
-        return { role: "user" as const, content: m.content, timestamp: STABLE_PI_CONTEXT_TIMESTAMP };
+        return { role: "user" as const, content: m.content, timestamp: Date.now() };
       }
       // assistant
       return {
@@ -1535,218 +1459,10 @@ function toPiContext(messages: ReadonlyArray<LLMMessage>): PiContext {
         model: "",
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         stopReason: "stop" as const,
-        timestamp: STABLE_PI_CONTEXT_TIMESTAMP,
+        timestamp: Date.now(),
       };
     });
   return { systemPrompt, messages: piMessages };
-}
-
-/** Convert inkos AgentMessage[] to pi-ai Context (with tool calls/results). */
-function agentMessagesToPiContext(messages: ReadonlyArray<AgentMessage>): PiContext {
-  const systemParts = messages.filter((m) => m.role === "system").map((m) => (m as { content: string }).content);
-  const systemPrompt = systemParts.length > 0 ? systemParts.join("\n\n") : undefined;
-  const piMessages: PiContext["messages"] = [];
-  for (const msg of messages) {
-    if (msg.role === "system") continue;
-    if (msg.role === "user") {
-      piMessages.push({ role: "user", content: msg.content, timestamp: STABLE_PI_CONTEXT_TIMESTAMP });
-      continue;
-    }
-    if (msg.role === "assistant") {
-      const content: (PiTextContent | PiToolCall)[] = [];
-      if (msg.content) content.push({ type: "text", text: msg.content });
-      if (msg.toolCalls) {
-        for (const tc of msg.toolCalls) {
-          content.push({
-            type: "toolCall",
-            id: tc.id,
-            name: tc.name,
-            arguments: JSON.parse(tc.arguments),
-          });
-        }
-      }
-      if (content.length === 0) content.push({ type: "text", text: "" });
-      piMessages.push({
-        role: "assistant",
-        content,
-        api: "openai-completions" as PiApi,
-        provider: "openai",
-        model: "",
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        stopReason: "stop",
-        timestamp: STABLE_PI_CONTEXT_TIMESTAMP,
-      });
-      continue;
-    }
-    if (msg.role === "tool") {
-      piMessages.push({
-        role: "toolResult",
-        toolCallId: msg.toolCallId,
-        toolName: "",
-        content: [{ type: "text", text: msg.content }],
-        isError: false,
-        timestamp: STABLE_PI_CONTEXT_TIMESTAMP,
-      });
-    }
-  }
-  return { systemPrompt, messages: piMessages };
-}
-
-/** Convert inkos ToolDefinition[] to pi-ai Tool[]. */
-function toPiTools(tools: ReadonlyArray<ToolDefinition>): PiTool[] {
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters as PiTool["parameters"],
-  }));
-}
-
-function agentMessagesToOpenAIChatMessages(messages: ReadonlyArray<AgentMessage>): Array<Record<string, unknown>> {
-  return messages.map((message) => {
-    if (message.role === "assistant") {
-      return {
-        role: "assistant",
-        content: message.content ?? null,
-        ...(message.toolCalls && message.toolCalls.length > 0
-          ? {
-              tool_calls: message.toolCalls.map((toolCall) => ({
-                id: toolCall.id,
-                type: "function",
-                function: {
-                  name: toolCall.name,
-                  arguments: toolCall.arguments,
-                },
-              })),
-            }
-          : {}),
-      };
-    }
-    if (message.role === "tool") {
-      return {
-        role: "tool",
-        tool_call_id: message.toolCallId,
-        content: message.content,
-      };
-    }
-    return { role: message.role, content: message.content };
-  });
-}
-
-function toOpenAITools(tools: ReadonlyArray<ToolDefinition>): Array<Record<string, unknown>> {
-  return tools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }));
-}
-
-function extractOpenAIToolCalls(json: unknown): ToolCall[] {
-  const choices = readJsonPath(json, ["choices"]);
-  if (!Array.isArray(choices)) return [];
-  const message = readJsonPath(choices[0], ["message"]);
-  if (!isJsonRecord(message)) return [];
-  const rawToolCalls = readJsonPath(message, ["tool_calls"]);
-  if (!Array.isArray(rawToolCalls)) return [];
-  return rawToolCalls.flatMap((item): ToolCall[] => {
-    if (!isJsonRecord(item)) return [];
-    const id = readJsonString(item, ["id"]);
-    const name = readJsonString(item, ["function", "name"]);
-    const args = readJsonString(item, ["function", "arguments"]) ?? "{}";
-    if (!id || !name) return [];
-    return [{ id, name, arguments: args }];
-  });
-}
-
-async function chatWithToolsViaNativeOpenAICompatible(
-  client: LLMClient,
-  model: string,
-  messages: ReadonlyArray<AgentMessage>,
-  tools: ReadonlyArray<ToolDefinition>,
-  resolved: { readonly temperature: number; readonly maxTokens: number },
-): Promise<ChatWithToolsResult> {
-  const baseUrl = client._piModel?.baseUrl ?? "";
-  const errorCtx = { baseUrl, model, service: client.service };
-  const payload: Record<string, unknown> = {
-    model: resolvePiModel(client, model).id,
-    messages: agentMessagesToOpenAIChatMessages(messages),
-    tools: toOpenAITools(tools),
-    tool_choice: "auto",
-    stream: client.stream,
-    temperature: resolved.temperature,
-    max_tokens: resolved.maxTokens,
-  };
-  if (client.stream) {
-    payload.stream_options = { include_usage: true };
-  }
-
-  const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: buildCustomHeaders(client),
-    body: JSON.stringify(payload),
-  }, client.proxyUrl);
-  if (!response.ok) {
-    throw wrapLLMError(new Error(await readErrorResponse(response)), errorCtx);
-  }
-
-  if (!client.stream) {
-    const json = await response.json() as unknown;
-    return {
-      content: extractChatContent(json) || "",
-      toolCalls: extractOpenAIToolCalls(json),
-    };
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) throw wrapLLMError(new Error("Streaming body unavailable"), errorCtx);
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  const toolCallParts = new Map<number, { id: string; name: string; arguments: string }>();
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = parseSseEvents(buffer);
-    buffer = parsed.rest;
-    for (const event of parsed.events) {
-      if (!event.data || event.data === "[DONE]") continue;
-      const json = JSON.parse(event.data) as unknown;
-      const delta = extractChatDeltaContent(json);
-      if (delta) content += delta;
-      const choices = readJsonPath(json, ["choices"]);
-      if (!Array.isArray(choices)) continue;
-      const rawToolCalls = readJsonPath(choices[0], ["delta", "tool_calls"]);
-      if (!Array.isArray(rawToolCalls)) continue;
-      for (const raw of rawToolCalls) {
-        if (!isJsonRecord(raw)) continue;
-        const index = readJsonNumber(raw, ["index"]) ?? 0;
-        const current = toolCallParts.get(index) ?? { id: "", name: "", arguments: "" };
-        const id = readJsonString(raw, ["id"]);
-        const name = readJsonString(raw, ["function", "name"]);
-        const args = readJsonString(raw, ["function", "arguments"]);
-        toolCallParts.set(index, {
-          id: id ?? current.id,
-          name: name ?? current.name,
-          arguments: current.arguments + (args ?? ""),
-        });
-      }
-    }
-  }
-
-  return {
-    content,
-    toolCalls: [...toolCallParts.values()]
-      .filter((toolCall) => toolCall.id && toolCall.name)
-      .map((toolCall) => ({
-        id: toolCall.id,
-        name: toolCall.name,
-        arguments: toolCall.arguments || "{}",
-      })),
-  };
 }
 
 async function chatCompletionViaPiAi(
@@ -1756,7 +1472,6 @@ async function chatCompletionViaPiAi(
   resolved: { readonly temperature: number; readonly maxTokens: number; readonly extra: Record<string, unknown> },
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
-  signal?: AbortSignal,
 ): Promise<LLMResponse> {
   const piModel = resolvePiModel(client, model);
   const context = toPiContext(messages);
@@ -1767,10 +1482,17 @@ async function chatCompletionViaPiAi(
     headers: mergeUserAgent(piModel.headers),
   };
 
+  emitRequestDiagnostics(client, {
+    model,
+    messages,
+    apiFormat: client.apiFormat,
+    stream: client.stream,
+    maxTokens: resolved.maxTokens,
+    endpoint: "pi-ai",
+  });
+
   if (!client.stream) {
-    throwIfAborted(signal);
     const response = await piCompleteSimple(piModel, context, streamOpts);
-    throwIfAborted(signal);
     if (response.stopReason === "error" && response.errorMessage) {
       throw new Error(response.errorMessage);
     }
@@ -1801,7 +1523,6 @@ async function chatCompletionViaPiAi(
 
   try {
     for await (const event of eventStream) {
-      throwIfAborted(signal);
       if (event.type === "text_delta") {
         chunks.push(event.delta);
         monitor.onChunk(event.delta);
@@ -1847,63 +1568,4 @@ async function chatCompletionViaPiAi(
       totalTokens: inputTokens + outputTokens,
     },
   };
-}
-
-async function chatWithToolsViaPiAi(
-  client: LLMClient,
-  model: string,
-  messages: ReadonlyArray<AgentMessage>,
-  tools: ReadonlyArray<ToolDefinition>,
-  resolved: { readonly temperature: number; readonly maxTokens: number },
-): Promise<ChatWithToolsResult> {
-  const piModel = resolvePiModel(client, model);
-  const context = agentMessagesToPiContext(messages);
-  context.tools = toPiTools(tools);
-  const streamOpts = {
-    temperature: resolved.temperature,
-    maxTokens: resolved.maxTokens,
-    apiKey: client._apiKey,
-    headers: mergeUserAgent(piModel.headers),
-  };
-
-  if (!client.stream) {
-    const response = await piComplete(piModel, context, streamOpts);
-    if (response.stopReason === "error" && response.errorMessage) {
-      throw new Error(response.errorMessage);
-    }
-    const content = response.content
-      .filter((block): block is { type: "text"; text: string } => block.type === "text")
-      .map((block) => block.text)
-      .join("");
-    const toolCalls = response.content
-      .filter((block): block is PiToolCall => block.type === "toolCall")
-      .map((block) => ({
-        id: block.id,
-        name: block.name,
-        arguments: JSON.stringify(block.arguments),
-      }));
-    return { content, toolCalls };
-  }
-
-  const eventStream = piStream(piModel, context, streamOpts);
-  let content = "";
-  const toolCalls: ToolCall[] = [];
-
-  for await (const event of eventStream) {
-    if (event.type === "text_delta") {
-      content += event.delta;
-    }
-    if (event.type === "toolcall_end") {
-      toolCalls.push({
-        id: event.toolCall.id,
-        name: event.toolCall.name,
-        arguments: JSON.stringify(event.toolCall.arguments),
-      });
-    }
-    if (event.type === "error" && event.error.errorMessage) {
-      throw new Error(event.error.errorMessage);
-    }
-  }
-
-  return { content, toolCalls };
 }

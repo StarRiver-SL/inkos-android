@@ -6,7 +6,6 @@ import type { AuditIssue } from "./continuity.js";
 import type { ChapterIntent, ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
 import { countChapterLength } from "../utils/length-metrics.js";
-import { compressWithCcr } from "../utils/headroom-cache.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
 import { filterSummaries } from "../utils/context-filter.js";
 import {
@@ -219,7 +218,9 @@ export class ReviserAgent extends BaseAgent {
       ? this.buildAutoSystemPrompt({ langPrefix, gp, protagonistBlock, numericalRule, lengthGuardrail, resolvedLanguage, lengthSpec: options?.lengthSpec, autoOutputMode })
       : this.buildLegacySystemPrompt({ langPrefix, gp, protagonistBlock, numericalRule, lengthGuardrail, mode, resolvedLanguage });
 
-    const ledgerBlock = `\n## 资源账本（数值/物品/线索/情报/权限/承诺等剧情资源）\n${ledger}`;
+    const ledgerBlock = gp.numericalSystem
+      ? `\n## 资源账本\n${ledger}`
+      : "";
     const governedMemoryBlocks = options?.contextPackage
       ? buildGovernedMemoryEvidenceBlocks(options.contextPackage, resolvedLanguage)
       : undefined;
@@ -262,22 +263,15 @@ export class ReviserAgent extends BaseAgent {
       ? `\n## 文风指南\n${styleGuide}`
       : "";
 
-    const supportContext = compressWithCcr({
-      projectRoot: this.ctx.projectRoot,
-      label: `reviser-chapter-${chapterNumber}-support-context`,
-      mode: "setting",
-      content: `## 当前状态卡
-${currentState}
-${ledgerBlock}
-${sanitizeNarrativeEvidenceBlock(hookDebtBlock, resolvedLanguage) ?? ""}${sanitizeNarrativeEvidenceBlock(hooksBlock, resolvedLanguage) ?? ""}${sanitizeNarrativeEvidenceBlock(volumeSummariesBlock, resolvedLanguage) ?? ""}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${sanitizeNarrativeEvidenceBlock(summariesBlock, resolvedLanguage) ?? ""}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}`,
-    });
-
     const userPrompt = `请修正第${chapterNumber}章。
 
 ## 审稿问题
 ${issueList}
 
-${supportContext}
+## 当前状态卡
+${currentState}
+${ledgerBlock}
+${sanitizeNarrativeEvidenceBlock(hookDebtBlock, resolvedLanguage) ?? ""}${sanitizeNarrativeEvidenceBlock(hooksBlock, resolvedLanguage) ?? ""}${sanitizeNarrativeEvidenceBlock(volumeSummariesBlock, resolvedLanguage) ?? ""}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${sanitizeNarrativeEvidenceBlock(summariesBlock, resolvedLanguage) ?? ""}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
 
 ## 待修正章节
 ${chapterContent}`;
@@ -287,7 +281,7 @@ ${chapterContent}`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      { temperature: 0.3, maxTokens: 16_384 },
+      { temperature: 0.3 },
     );
 
     const output = this.parseOutput(
@@ -335,7 +329,9 @@ ${chapterContent}`;
       wordCount: revisedContent.length,
       fixedIssues: applied ? fixedIssues : [],
       updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",
-      updatedLedger: extract("UPDATED_LEDGER") || "(账本未更新)",
+      updatedLedger: gp.numericalSystem
+        ? (extract("UPDATED_LEDGER") || "(账本未更新)")
+        : "",
       updatedHooks: extract("UPDATED_HOOKS") || "(伏笔池未更新)",
     });
 
@@ -409,9 +405,9 @@ ${chapterContent}`;
     const { langPrefix, gp, protagonistBlock, numericalRule, resolvedLanguage, lengthSpec, autoOutputMode } = params;
     // lengthGuardrail intentionally not used in auto mode — length constraint is embedded in REVISED_CONTENT description
     const en = resolvedLanguage === "en";
-    const ledgerSection = en
-      ? "\n=== UPDATED_LEDGER ===\n(Full updated resource ledger; for non-numerical genres track items, clues, information, access, promises, debts, relationship assets, and opportunity windows)"
-      : "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本；无数值系统时记录物品、线索、情报、权限、承诺/欠债、人脉、身份筹码、机会窗口等剧情资源)";
+    const ledgerSection = gp.numericalSystem
+      ? (en ? "\n=== UPDATED_LEDGER ===\n(Full updated resource ledger)" : "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本)")
+      : "";
     const rewriteLengthConstraint = lengthSpec
       ? (en
           ? `\n  HARD CONSTRAINT: The revised chapter must stay within ${lengthSpec.softMin}-${lengthSpec.softMax} characters (target: ${lengthSpec.target}, ±25%). This is non-negotiable — do not exceed this range.`
@@ -553,8 +549,7 @@ REPLACEMENT_TEXT:
 
 === UPDATED_STATE ===
 (更新后的完整状态卡)
-=== UPDATED_LEDGER ===
-(更新后的完整资源账本；无数值系统时记录物品、线索、情报、权限、承诺/欠债、人脉、身份筹码、机会窗口等剧情资源)
+${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本)" : ""}
 === UPDATED_HOOKS ===
 (更新后的完整伏笔池)`
       : `=== FIXED_ISSUES ===
@@ -565,8 +560,7 @@ REPLACEMENT_TEXT:
 
 === UPDATED_STATE ===
 (更新后的完整状态卡)
-=== UPDATED_LEDGER ===
-(更新后的完整资源账本；无数值系统时记录物品、线索、情报、权限、承诺/欠债、人脉、身份筹码、机会窗口等剧情资源)
+${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本)" : ""}
 === UPDATED_HOOKS ===
 (更新后的完整伏笔池)`;
 
@@ -669,6 +663,18 @@ const STRUCTURAL_PATTERNS: ReadonlyArray<RegExp> = [
 function resolveAutoOutputMode(issues: ReadonlyArray<AuditIssue>): AutoOutputMode {
   if (issues.length === 0) {
     return "allow-full";
+  }
+  const scopedBlocking = issues.filter((issue) => issue.severity !== "info" && issue.repairScope);
+  if (scopedBlocking.length > 0) {
+    if (scopedBlocking.some((issue) => issue.repairScope === "structural")) {
+      return "rewrite-only";
+    }
+    if (
+      scopedBlocking.length === issues.filter((issue) => issue.severity !== "info").length
+      && scopedBlocking.every((issue) => issue.repairScope === "local")
+    ) {
+      return "patch-only";
+    }
   }
 
   const isStructural = (issue: AuditIssue): boolean => {

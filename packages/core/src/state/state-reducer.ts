@@ -82,25 +82,29 @@ function applyHookOps(hooksState: HooksState, delta: RuntimeStateDelta): HooksSt
   const hooksById = new Map(hooksState.hooks.map((hook) => [hook.hookId, { ...hook }]));
 
   for (const hook of delta.hookOps.upsert) {
-    if (!hooksById.has(hook.hookId)) {
-      const admission = evaluateHookAdmission({
-        candidate: {
-          type: hook.type,
-          expectedPayoff: hook.expectedPayoff,
-          notes: hook.notes,
-        },
-        activeHooks: [...hooksById.values()].filter((candidate) => candidate.status !== "resolved"),
-      });
+    const sameHook = hooksById.get(hook.hookId);
+    if (sameHook) {
+      hooksById.set(sameHook.hookId, mergeHookRecord(sameHook, hook));
+      continue;
+    }
 
-      if (!admission.admit && admission.reason === "duplicate_family") {
-        const matchedHookId = admission.matchedHookId;
-        const existing = matchedHookId ? hooksById.get(matchedHookId) : undefined;
-        if (!existing) {
-          throw new Error(`duplicate active hook family: ${hook.hookId} overlaps ${admission.matchedHookId}`);
-        }
-        hooksById.set(existing.hookId, mergeDuplicateHookFamily(existing, hook));
-        continue;
+    const admission = evaluateHookAdmission({
+      candidate: {
+        type: hook.type,
+        expectedPayoff: hook.expectedPayoff,
+        notes: hook.notes,
+      },
+      activeHooks: [...hooksById.values()].filter((candidate) => candidate.status !== "resolved"),
+    });
+
+    if (!admission.admit && admission.reason === "duplicate_family") {
+      const matchedHookId = admission.matchedHookId;
+      const existing = matchedHookId ? hooksById.get(matchedHookId) : undefined;
+      if (!existing) {
+        throw new Error(`duplicate active hook family: ${hook.hookId} overlaps ${admission.matchedHookId}`);
       }
+      hooksById.set(existing.hookId, mergeDuplicateHookFamily(existing, hook));
+      continue;
     }
 
     hooksById.set(hook.hookId, { ...hook });
@@ -141,6 +145,10 @@ function applyHookOps(hooksState: HooksState, delta: RuntimeStateDelta): HooksSt
 }
 
 function mergeDuplicateHookFamily(existing: HookRecord, incoming: HookRecord): HookRecord {
+  return mergeHookRecord(existing, incoming);
+}
+
+function mergeHookRecord(existing: HookRecord, incoming: HookRecord): HookRecord {
   const expectedPayoff = preferRicherText(existing.expectedPayoff, incoming.expectedPayoff);
   const notes = preferRicherText(existing.notes, incoming.notes);
   const advanced = Math.max(existing.lastAdvancedChapter, incoming.lastAdvancedChapter);
@@ -150,11 +158,7 @@ function mergeDuplicateHookFamily(existing: HookRecord, incoming: HookRecord): H
     ...existing,
     startChapter: Math.min(existing.startChapter, incoming.startChapter),
     type: preferRicherText(existing.type, incoming.type),
-    status: progressed
-      ? "progressing"
-      : existing.status === "progressing" || incoming.status === "progressing"
-        ? "progressing"
-        : existing.status,
+    status: mergeHookStatus(existing.status, incoming.status, progressed),
     lastAdvancedChapter: advanced,
     expectedPayoff,
     payoffTiming: resolveHookPayoffTiming({
@@ -164,6 +168,16 @@ function mergeDuplicateHookFamily(existing: HookRecord, incoming: HookRecord): H
     }),
     notes,
   };
+}
+
+function mergeHookStatus(
+  existing: HookRecord["status"],
+  incoming: HookRecord["status"],
+  progressed: boolean,
+): HookRecord["status"] {
+  if (existing === "resolved" || incoming === "resolved") return "resolved";
+  if (progressed || existing === "progressing" || incoming === "progressing") return "progressing";
+  return existing;
 }
 
 function preferRicherText(primary: string, fallback: string): string {

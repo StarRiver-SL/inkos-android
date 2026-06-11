@@ -30,12 +30,6 @@ describe("listModelsForService (B8)", () => {
     expect(models.some((m) => m.id.includes("image"))).toBe(false);
   });
 
-  it("provider fallback 不返回 disabled/nonText 模型", async () => {
-    const models = await listModelsForService("kkaiapi");
-    expect(models.some((m) => m.id === "MiniMax-M2.7")).toBe(false);
-    expect(models.some((m) => m.id === "gpt-image-2")).toBe(false);
-  });
-
   it("custom service 走 live probe + bank 补元数据", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -78,18 +72,6 @@ describe("listModelsForService (B8)", () => {
     const models = await listModelsForService("anthropic", "sk-test");
     expect(models.length).toBeGreaterThan(0);
     expect(models.some((m) => m.id === "claude-sonnet-4-6")).toBe(true);
-  });
-
-  it("known provider 不展示 live /models 返回的未知模型，避免无权限模型 403", async () => {
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: "claude-sonnet-4-6" }, { id: "provider-private-model" }] }),
-    } as any) as typeof fetch;
-
-    const models = await listModelsForService("anthropic", "sk-test");
-
-    expect(models.some((m) => m.id === "claude-sonnet-4-6")).toBe(true);
-    expect(models.some((m) => m.id === "provider-private-model")).toBe(false);
   });
 
   it("bailian 不用 OpenAI 兼容 /models 污染 Anthropic 通道模型列表", async () => {

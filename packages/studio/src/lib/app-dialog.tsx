@@ -190,10 +190,11 @@ export function appPrompt(input: string | PromptInput, defaultValue = ""): Promi
 
 function requireDialogApi(): AppDialogApi {
   if (!activeDialogApi) {
+    console.warn("AppDialogProvider is not mounted; resolving dialog request without native browser UI.");
     return {
-      alert: async (input) => { window.alert(input.message); },
-      confirm: async (input) => window.confirm(input.message),
-      prompt: async (input) => window.prompt(input.message, input.defaultValue ?? ""),
+      alert: async () => {},
+      confirm: async () => false,
+      prompt: async () => null,
     };
   }
   return activeDialogApi;

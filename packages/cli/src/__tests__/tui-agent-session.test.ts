@@ -156,11 +156,13 @@ describe("tui agent session bridge", () => {
     expect(persisted.activeBookId).toBe("night-harbor");
   });
 
-  it("routes explicit create-book instructions directly to shared book creation", async () => {
-    const initBookSpy = vi.spyOn(
-      (await import("@actalk/inkos-core")).PipelineRunner.prototype as any,
-      "initBook",
-    );
+  it("routes create-book text through the unified agent session instead of parsing it locally", async () => {
+    runAgentSessionMock.mockResolvedValue({
+      responseText: "我理解你想创建《雾灯小巷》，请确认后我再建书。",
+      messages: [
+        { role: "assistant", content: "我理解你想创建《雾灯小巷》，请确认后我再建书。" },
+      ],
+    });
     const { processTuiAgentInput } = await import("../tui/agent-input.js");
     const session = createProjectSession(projectRoot);
 
@@ -170,27 +172,28 @@ describe("tui agent session bridge", () => {
       session,
     });
 
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
-    expect(initBookSpy).toHaveBeenCalledWith(
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "雾灯小巷",
-        title: "雾灯小巷",
-        genre: "urban",
-        platform: "tomato",
-        targetChapters: 10,
-        chapterWordCount: 1200,
+        sessionKind: "book-create",
+        actionSource: "free-text",
+        requestedIntent: undefined,
       }),
-      expect.objectContaining({
-        externalContext: expect.stringContaining("雾灯小巷"),
-      }),
+      expect.stringContaining("雾灯小巷"),
+      [],
     );
-    expect(result.session.activeBookId).toBe("雾灯小巷");
-    expect(result.responseText).toContain("已创建");
+    expect(result.session.activeBookId).toBeUndefined();
+    expect(result.responseText).toContain("请确认");
     const persisted = await loadProjectSession(projectRoot);
-    expect(persisted.activeBookId).toBe("雾灯小巷");
+    expect(persisted.activeBookId).toBeUndefined();
   });
 
-  it("routes write-next instructions directly to the writer when a book is active", async () => {
+  it("passes explicit slash write-next as a requested intent to the unified agent session", async () => {
+    runAgentSessionMock.mockResolvedValue({
+      responseText: "已为 night-harbor 完成下一章。",
+      messages: [
+        { role: "assistant", content: "已为 night-harbor 完成下一章。" },
+      ],
+    });
     const { processTuiAgentInput } = await import("../tui/agent-input.js");
     const session = {
       ...createProjectSession(projectRoot),
@@ -199,15 +202,22 @@ describe("tui agent session bridge", () => {
 
     const result = await processTuiAgentInput({
       projectRoot,
-      input: "写第1章",
+      input: "/write",
       session,
     });
 
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
-    expect(result.responseText).toContain("第 1 章");
-    expect(result.responseText).toContain("雨夜");
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bookId: "night-harbor",
+        sessionKind: "book",
+        actionSource: "slash",
+        requestedIntent: "write_next",
+      }),
+      "/write",
+      [],
+    );
+    expect(result.responseText).toContain("完成下一章");
     const persisted = await loadProjectSession(projectRoot);
     expect(persisted.activeBookId).toBe("night-harbor");
-    expect(persisted.activeChapterNumber).toBe(1);
   });
 });

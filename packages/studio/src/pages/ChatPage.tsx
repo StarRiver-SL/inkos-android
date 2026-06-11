@@ -1,9 +1,12 @@
-import { useRef, useEffect, useMemo, useState, useCallback } from "react";
+import { useRef, useEffect, useMemo, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
 import { fetchJson } from "../hooks/use-api";
+import { useCompositionInput } from "../hooks/use-composition-input";
+import { appAlert, appConfirm } from "../lib/app-dialog";
 import { chatSelectors, useChatStore } from "../store/chat";
+import type { ChatSessionKind } from "../store/chat";
 import { useServiceStore } from "../store/service";
 import {
   DropdownMenu,
@@ -18,17 +21,23 @@ import {
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
-import { ToolExecutionSteps } from "../components/chat/ToolExecutionSteps";
-import { mobileTextInputHandlers, preserveTextSelectionAfterUpdate } from "../lib/mobile-input";
-import { subscribeServiceConfigChanged } from "../lib/service-config-events";
+import { ToolExecutionSteps, type ProposedActionDetails } from "../components/chat/ToolExecutionSteps";
+import { PlayHud } from "../components/chat/PlayHud";
+import { PlayChoicePanel } from "../components/chat/PlayChoicePanel";
+import { latestPlayChoiceSet } from "../components/chat/play-choices";
 import {
   BotMessageSquare,
   ArrowUp,
   Square,
   ChevronDown,
   Check,
+  Gamepad2,
+  GitBranch,
+  Palette,
+  MoreHorizontal,
   Trash2,
-  X,
+  ShieldAlert,
+  Wrench,
 } from "lucide-react";
 import { Shimmer } from "../components/ai-elements/shimmer";
 import {
@@ -37,15 +46,16 @@ import {
 } from "../components/ai-elements/message";
 import {
   type ChatPageModelPreference,
-  ensureConfiguredModelGroup,
+  buildModelGroups,
   filterModelGroups,
   getBookCreateSessionId,
   getProjectChatSessionId,
   pickProjectChatSessionId,
   pickModelSelection,
-  resolveComposerTextSync,
   setBookCreateSessionId,
   setProjectChatSessionId,
+  isChatScrollNearBottom,
+  shouldShowPlayChoicePanel,
 } from "./chat-page-state";
 
 // -- Types --
@@ -54,6 +64,8 @@ interface Nav {
   toDashboard: () => void;
   toBook: (id: string) => void;
   toServices: () => void;
+  toImport: (tab?: "chapters" | "canon" | "fanfic" | "spinoff" | "imitation") => void;
+  toStyle: () => void;
 }
 
 export interface ChatPageProps {
@@ -70,6 +82,22 @@ interface ServiceConfigPayload {
   readonly defaultModel?: string | null;
 }
 
+interface PlayImageSettings {
+  readonly actors: boolean;
+  readonly moments: boolean;
+  readonly inventory: boolean;
+}
+
+interface PlayRunImagePayload {
+  readonly imageSettings?: PlayImageSettings;
+}
+
+interface CoverConfigResponse {
+  readonly service?: string | null;
+  readonly configured?: boolean;
+  readonly providers?: ReadonlyArray<{ readonly service: string; readonly connected?: boolean }>;
+}
+
 interface TokenSavingsTelemetryPayload {
   readonly telemetry?: {
     readonly cacheSkippedCalls: number;
@@ -80,67 +108,137 @@ interface TokenSavingsTelemetryPayload {
   };
 }
 
+interface BookChapterHealthPayload {
+  readonly nextChapter: number;
+  readonly chapters: ReadonlyArray<{
+    readonly number: number;
+    readonly status: string;
+  }>;
+}
+
 // -- Component --
 
 export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-create", nav, theme, t, sse: _sse }: ChatPageProps) {
   // -- Store selectors --
   const messages = useChatStore(chatSelectors.activeMessages);
+  const activeSession = useChatStore(chatSelectors.activeSession);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const input = useChatStore((s) => s.input);
   const loading = useChatStore(chatSelectors.isActiveSessionStreaming);
   const selectedModel = useChatStore((s) => s.selectedModel);
   const selectedService = useChatStore((s) => s.selectedService);
   // -- Store actions --
   const setInput = useChatStore((s) => s.setInput);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const deleteMessage = useChatStore((s) => s.deleteMessage);
   const cancelMessage = useChatStore((s) => s.cancelMessage);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
   const loadSessionList = useChatStore((s) => s.loadSessionList);
   const createSession = useChatStore((s) => s.createSession);
-  const createDraftSession = useChatStore((s) => s.createDraftSession);
+  const markProposalResolved = useChatStore((s) => s.markProposalResolved);
   const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
   const activateSession = useChatStore((s) => s.activateSession);
-  const deleteMessage = useChatStore((s) => s.deleteMessage);
+  const setSessionPlayMode = useChatStore((s) => s.setSessionPlayMode);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const composerEditableRef = useRef<HTMLDivElement>(null);
-  const composerTextSnapshotRef = useRef(useChatStore.getState().input);
-  const composerFocusedRef = useRef(false);
-  const composerPollFrameRef = useRef<number | null>(null);
-  const composerSelectionRef = useRef<{
-    readonly start: number;
-    readonly end: number;
-    readonly direction: "forward" | "backward" | "none";
-    readonly valueLength: number;
-    readonly value: string;
-  } | null>(null);
-  const composerInputAnchorRef = useRef<{
-    readonly start: number;
-    readonly end: number;
-    readonly direction: "forward" | "backward" | "none";
-    readonly valueLength: number;
-    readonly value: string;
-  } | null>(null);
-  const composerCompositionRef = useRef<{
-    readonly start: number;
-    readonly end: number;
-    readonly value: string;
-    readonly insertedText?: string;
-  } | null>(null);
+  const autoScrollPinnedRef = useRef(true);
   const [followingLatest, setFollowingLatest] = useState(true);
-  const [composerHasText, setComposerHasText] = useState(() => composerTextSnapshotRef.current.trim().length > 0);
-  const [tokenSavingsLabel, setTokenSavingsLabel] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<{
-    readonly sessionId: string;
-    readonly messageIndex: number;
-    readonly messageKey: string;
-    readonly role: "user" | "assistant";
-    readonly preview: string;
-  } | null>(null);
-  const [deletingMessage, setDeletingMessage] = useState(false);
+  const [degradedChapter, setDegradedChapter] = useState<number | null>(null);
+  const [repairingChapter, setRepairingChapter] = useState(false);
+  const compositionInput = useCompositionInput({
+    value: input,
+    onValueChange: setInput,
+  });
 
   const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
   const hasBook = Boolean(activeBookId);
+  const currentSessionKind: ChatSessionKind = activeSession?.sessionKind
+    ?? (mode === "book-create" ? "book-create" : activeBookId ? "book" : "chat");
+  const playMode = activeSession?.playMode;
+  const playModeInfo = currentSessionKind === "play" && playMode
+    ? playMode === "guided"
+      ? {
+          label: isZh ? "分支互动" : "Branching",
+          detail: isZh ? "点选项推进，也可以补充自由输入" : "Advance with choices, with optional free input",
+          Icon: GitBranch,
+        }
+      : {
+          label: isZh ? "开放世界" : "Open World",
+          detail: isZh ? "自由输入行动，世界按状态持续推进" : "Type free actions and let the world react",
+          Icon: Gamepad2,
+        }
+    : null;
+
+  const refreshChapterHealth = async () => {
+    if (!activeBookId) {
+      setDegradedChapter(null);
+      return;
+    }
+    try {
+      const payload = await fetchJson<BookChapterHealthPayload>(`/books/${activeBookId}`);
+      const latestChapter = payload.nextChapter - 1;
+      const latest = payload.chapters.find((chapter) => chapter.number === latestChapter);
+      setDegradedChapter(latest?.status === "state-degraded" ? latest.number : null);
+    } catch {
+      // The writing page remains usable if chapter metadata cannot be refreshed.
+    }
+  };
+
+  useEffect(() => {
+    void refreshChapterHealth();
+  }, [activeBookId]);
+  // A play session must pick its playstyle (点着玩 / 自由玩) before chatting.
+  const needsPlayModeChoice = currentSessionKind === "play" && !playMode;
+  // Even in 点着玩 the world is shaped by free typing first; the choice panel
+  // only replaces the input once play has actually started (a play tool
+  // produced choices).
+  const playChoiceSet = useMemo(
+    () => (currentSessionKind === "play" && playMode === "guided"
+      ? latestPlayChoiceSet(messages, isZh
+        ? ["观察眼前刚发生的变化", "主动与眼前的人或事物互动", "暂时按兵不动"]
+        : ["Observe the immediate change", "Interact with what is in front of you", "Hold back and wait"])
+      : null),
+    [currentSessionKind, isZh, playMode, messages],
+  );
+  const [consumedPlayChoiceKey, setConsumedPlayChoiceKey] = useState<string | null>(null);
+  const playChoices = playChoiceSet?.choices ?? [];
+  const showChoicePanel = shouldShowPlayChoicePanel({
+    playMode,
+    choiceSetKey: playChoiceSet?.key ?? null,
+    consumedChoiceKey: consumedPlayChoiceKey,
+    choiceCount: playChoices.length,
+  });
+  const deleteConfirmOpenRef = useRef(false);
+
+  const handleDeleteMessage = async (messageIndex: number, role: "user" | "assistant") => {
+    if (!activeSessionId) return;
+    if (deleteConfirmOpenRef.current) return;
+    deleteConfirmOpenRef.current = true;
+    const label = role === "user" ? "用户消息" : "AI 回复";
+    try {
+      const confirmed = await appConfirm({
+        title: "删除消息",
+        message: `确认删除这条${label}？\n\n删除后会同步写入会话记录，重新进入这个会话也不会恢复。`,
+        tone: "danger",
+        confirmLabel: "删除",
+        cancelLabel: "取消",
+      });
+      if (!confirmed) return;
+      await deleteMessage(activeSessionId, messageIndex);
+    } finally {
+      deleteConfirmOpenRef.current = false;
+    }
+  };
+  // World panel (holdings / state / relations) defaults collapsed; the scene
+  // image and choices live in the chat center now, opened on demand.
+  const [worldPanelOpen, setWorldPanelOpen] = useState(false);
+  const [playImageError, setPlayImageError] = useState<string | null>(null);
+  const [playImageMenuOpen, setPlayImageMenuOpen] = useState(false);
+  const [playImageSettings, setPlayImageSettings] = useState<PlayImageSettings>({ actors: false, moments: false, inventory: false });
+  const [playImageCoverReady, setPlayImageCoverReady] = useState(false);
+  const [tokenSavingsLabel, setTokenSavingsLabel] = useState<string | null>(null);
+  const worldPanelInsetClass = currentSessionKind === "play" && worldPanelOpen ? "lg:pr-[380px]" : "";
 
   // Derived: is the assistant currently streaming/thinking/executing tools?
   const isStreaming = useMemo(() => {
@@ -171,6 +269,10 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const [serviceConfigLoaded, setServiceConfigLoaded] = useState(false);
 
   useEffect(() => { void fetchServices(); }, [fetchServices]);
+  useEffect(() => {
+    void fetchBankModels();
+    void fetchCustomModels();
+  }, [fetchBankModels, fetchCustomModels]);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
@@ -211,25 +313,6 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     };
   }, []);
   useEffect(() => {
-    void fetchBankModels();
-    void fetchCustomModels();
-  }, [fetchBankModels, fetchCustomModels]);
-  const refreshServiceConfig = useCallback(async () => {
-    setServiceConfigLoaded(false);
-    try {
-      const payload = await fetchJson<ServiceConfigPayload>("/services/config");
-      setConfiguredModelSelection({
-        service: payload.service ?? null,
-        model: payload.defaultModel ?? null,
-      });
-    } catch {
-      setConfiguredModelSelection(null);
-    } finally {
-      setServiceConfigLoaded(true);
-    }
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
 
     void fetchJson<ServiceConfigPayload>("/services/config")
@@ -251,43 +334,28 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       cancelled = true;
     };
   }, []);
-  useEffect(() => {
-    return subscribeServiceConfigChanged(() => {
-      void (async () => {
-        await useServiceStore.getState().refreshServices();
-        await Promise.all([
-          useServiceStore.getState().fetchBankModels(),
-          useServiceStore.getState().fetchCustomModels(),
-          refreshServiceConfig(),
-        ]);
-      })();
-    });
-  }, [refreshServiceConfig]);
 
   const groupedModels = useMemo(() => {
-    const baseGroups = services
-      .filter((s) => s.connected && (modelsByService[s.service]?.length ?? 0) > 0)
-      .map((s) => ({ service: s.service, label: s.label, models: modelsByService[s.service]! }));
-    return ensureConfiguredModelGroup(baseGroups, services, configuredModelSelection);
-  }, [configuredModelSelection, services, modelsByService]);
+    return buildModelGroups(
+      services,
+      modelsByService,
+      configuredModelSelection,
+      { service: selectedService, model: selectedModel },
+    );
+  }, [configuredModelSelection, modelsByService, selectedModel, selectedService, services]);
 
   const modelPickerStatus = useMemo(() => {
-    if (groupedModels.some((group) => group.models.length > 0)) return "ready" as const;
-    if (servicesLoading || services.length === 0) return "loading" as const;
+    if (services.length === 0 && servicesLoading) return "loading" as const;
     const connected = services.filter((s) => s.connected);
     if (connected.length === 0) return "no-models" as const;
-    if (bankModelsLoading) return "loading" as const;
-    if (connected.some((s) => (modelsByService[s.service]?.length ?? 0) > 0)) return "ready" as const;
-    const hasConnectedBank = connected.some((s) => !s.service.startsWith("custom"));
-    const hasConnectedCustom = connected.some((s) => s.service.startsWith("custom"));
-    if (!hasConnectedBank && hasConnectedCustom && customModelsLoading) return "loading" as const;
+    if (groupedModels.length > 0) return "ready" as const;
+    if (bankModelsLoading || customModelsLoading) return "loading" as const;
     return "no-models" as const;
-  }, [groupedModels, services, servicesLoading, bankModelsLoading, customModelsLoading, modelsByService]);
+  }, [services, servicesLoading, groupedModels, bankModelsLoading, customModelsLoading]);
 
   const selectedModelLabel = useMemo(() => {
     if (!selectedModel) return "选择模型";
     const group = groupedModels.find((item) => item.service === selectedService);
-    if (!group) return "选择模型";
     const model = group?.models.find((item) => item.id === selectedModel);
     const modelLabel = model?.name ?? selectedModel;
     return group ? `${group.label} · ${modelLabel}` : modelLabel;
@@ -301,101 +369,143 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       selectedModel,
       selectedService,
       configuredModelSelection,
-      { modelsLoading: modelPickerStatus === "loading" },
     );
     if (nextSelection) {
       setSelectedModel(nextSelection.model, nextSelection.service);
-      return;
     }
-    const selectedStillAvailable = selectedModel && selectedService
-      ? groupedModels.some((group) =>
-          group.service === selectedService
-          && group.models.some((model) => model.id === selectedModel),
-        )
-      : true;
-    if (!selectedStillAvailable && modelPickerStatus !== "loading") {
-      setSelectedModel(null, null);
-    }
-  }, [configuredModelSelection, groupedModels, modelPickerStatus, selectedModel, selectedService, serviceConfigLoaded, setSelectedModel]);
+  }, [configuredModelSelection, groupedModels, selectedModel, selectedService, serviceConfigLoaded, setSelectedModel]);
 
-  const resizeComposer = useCallback(() => {
-    const el = textareaRef.current ?? composerEditableRef.current;
+  // Auto-resize textarea
+  useEffect(() => {
+    const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, []);
+  }, [compositionInput.value]);
 
+  // Keep the textarea uncontrolled so Android IMEs own the selection/caret.
+  // Only write into the DOM when an external action restores or clears a draft.
   useEffect(() => {
-    const textarea = textareaRef.current;
-    const editable = composerEditableRef.current;
-    const elementValue = textarea?.value ?? editable?.innerText.replace(/\n$/, "") ?? null;
-    const storeInput = useChatStore.getState().input;
-    const result = resolveComposerTextSync({
-      storeInput,
-      composerText: composerTextSnapshotRef.current,
-      elementValue,
-      elementFocused: false,
-    });
-    composerTextSnapshotRef.current = result.text;
-    setComposerHasText(result.text.trim().length > 0);
-    if (result.syncStoreText !== null && storeInput !== result.syncStoreText) {
-      setInput(result.syncStoreText);
-    }
-    if (textarea && textarea.value !== result.text) {
-      textarea.value = result.text;
-    }
-    if (editable && editable.innerText.replace(/\n$/, "") !== result.text) {
-      editable.textContent = result.text;
-    }
-    resizeComposer();
-  }, [activeSessionId, resizeComposer, setInput]);
+    const el = textareaRef.current;
+    if (
+      !el
+      || el.value === input
+      || compositionInput.isComposing
+      || document.activeElement === el
+    ) return;
+    el.value = input;
+    compositionInput.setValue(input);
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [input, compositionInput.isComposing, compositionInput.setValue]);
 
-  const isNearScrollBottom = (el: HTMLDivElement) => {
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
-  };
-
-  const scrollToLatest = (behavior: ScrollBehavior = "auto") => {
-    const el = scrollRef.current;
+  // Some Android WebViews/IMEs mutate textarea.value without promptly
+  // dispatching React's synthetic input/composition events. Bridge the native
+  // events and, while focused, compare the real DOM value as a final fallback.
+  useEffect(() => {
+    const el = textareaRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior });
-  };
+    let focused = document.activeElement === el;
+    let nativeComposing = false;
+    let timer: number | null = null;
+    let lastValue = el.value;
 
-  const handleMessageScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setFollowingLatest(isNearScrollBottom(el));
-  };
-
-  // Follow the latest message while the user remains near the bottom.
-  useEffect(() => {
-    if (!followingLatest) return;
-    requestAnimationFrame(() => scrollToLatest("auto"));
-  }, [followingLatest, messages]);
-
-  useEffect(() => {
-    setFollowingLatest(true);
-    requestAnimationFrame(() => scrollToLatest("auto"));
-  }, [activeSessionId]);
-
-  useEffect(() => {
-    if (!activeSessionId) return;
-    const refreshActiveSession = () => {
-      if (document.visibilityState !== "visible") return;
-      void loadSessionDetail(activeSessionId);
+    const syncFromDom = () => {
+      if (nativeComposing) return;
+      const next = el.value;
+      if (next === lastValue) return;
+      lastValue = next;
+      compositionInput.setValue(next);
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     };
-    document.addEventListener("visibilitychange", refreshActiveSession);
-    window.addEventListener("focus", refreshActiveSession);
+    const syncAfterImeCommit = () => {
+      syncFromDom();
+      queueMicrotask(syncFromDom);
+      window.setTimeout(syncFromDom, 0);
+      window.setTimeout(syncFromDom, 32);
+    };
+    const poll = () => {
+      if (!focused) {
+        timer = null;
+        return;
+      }
+      syncFromDom();
+      timer = window.setTimeout(poll, 50);
+    };
+    const onFocus = () => {
+      focused = true;
+      lastValue = el.value;
+      if (timer === null) timer = window.setTimeout(poll, 50);
+    };
+    const onBlur = () => {
+      syncAfterImeCommit();
+      focused = false;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
+    const onCompositionStart = () => {
+      nativeComposing = true;
+    };
+    const onCompositionEnd = () => {
+      nativeComposing = false;
+      syncAfterImeCommit();
+    };
+
+    el.addEventListener("focus", onFocus);
+    el.addEventListener("blur", onBlur);
+    el.addEventListener("compositionstart", onCompositionStart);
+    el.addEventListener("beforeinput", syncAfterImeCommit);
+    el.addEventListener("input", syncAfterImeCommit);
+    el.addEventListener("compositionupdate", syncAfterImeCommit);
+    el.addEventListener("compositionend", onCompositionEnd);
+    el.addEventListener("textInput", syncAfterImeCommit);
+    if (focused) timer = window.setTimeout(poll, 50);
+
     return () => {
-      document.removeEventListener("visibilitychange", refreshActiveSession);
-      window.removeEventListener("focus", refreshActiveSession);
+      if (timer !== null) window.clearTimeout(timer);
+      el.removeEventListener("focus", onFocus);
+      el.removeEventListener("blur", onBlur);
+      el.removeEventListener("compositionstart", onCompositionStart);
+      el.removeEventListener("beforeinput", syncAfterImeCommit);
+      el.removeEventListener("input", syncAfterImeCommit);
+      el.removeEventListener("compositionupdate", syncAfterImeCommit);
+      el.removeEventListener("compositionend", onCompositionEnd);
+      el.removeEventListener("textInput", syncAfterImeCommit);
     };
-  }, [activeSessionId, loadSessionDetail]);
+  }, [activeSessionId, compositionInput.setValue]);
+
+  const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {
+    if (!scrollRef.current) return;
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
+  };
+
+  // Auto-scroll only while the reader is already near the bottom. Play sessions
+  // update tool/image state frequently, so unconditional scrolling makes it
+  // impossible to read older turns.
+  useEffect(() => {
+    if (!scrollRef.current || !autoScrollPinnedRef.current) return;
+    scrollToLatest("smooth");
+  }, [messages]);
+
+  useEffect(() => {
+    autoScrollPinnedRef.current = true;
+    setFollowingLatest(true);
+  }, [activeSessionId]);
 
   // Entering a book loads its latest session; book-create mode persists its orphan session in localStorage.
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
+      if (!activeBookId && mode === "project-chat") {
+        const state = useChatStore.getState();
+        const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
+        if (currentSession?.bookId === null && currentSession.isDraft) {
+          return;
+        }
+      }
+
       if (activeBookId) {
         await loadSessionList(activeBookId);
         if (cancelled) return;
@@ -413,7 +523,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
           return;
         }
 
-        createDraftSession(activeBookId);
+        await createSession(activeBookId, "book");
         return;
       }
 
@@ -445,7 +555,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         }
       }
 
-      const newSessionId = createDraftSession(null);
+      const newSessionId = await createSession(null, mode === "book-create" ? "book-create" : "chat");
       if (!cancelled) {
         if (mode === "project-chat") {
           setProjectChatSessionId(newSessionId);
@@ -458,505 +568,299 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     return () => {
       cancelled = true;
     };
-  }, [activeBookId, activateSession, createDraftSession, createSession, loadSessionDetail, loadSessionList, mode]);
+  }, [activeBookId, activateSession, createSession, loadSessionDetail, loadSessionList, mode]);
 
-  const updateComposerTextSnapshot = useCallback((text: string) => {
-    composerTextSnapshotRef.current = text;
-    setComposerHasText(text.trim().length > 0);
-    resizeComposer();
-  }, [resizeComposer]);
-
-  const commitComposerText = useCallback((text: string) => {
-    updateComposerTextSnapshot(text);
-    if (text !== useChatStore.getState().input) {
-      setInput(text);
-    }
-  }, [setInput, updateComposerTextSnapshot]);
-
-  const setComposerText = (text: string) => {
-    commitComposerText(text);
-    if (textareaRef.current && textareaRef.current.value !== text) {
-      preserveTextSelectionAfterUpdate(textareaRef.current);
-      textareaRef.current.value = text;
-    }
-    if (composerEditableRef.current && composerEditableRef.current.innerText.replace(/\n$/, "") !== text) {
-      composerEditableRef.current.textContent = text;
-    }
-    resizeComposer();
-  };
-
-  const onSend = async (text: string) => {
-    const nextText = text.trim();
-    if (!nextText || loading) return;
-    const sessionId = activeSessionId ?? createDraftSession(activeBookId ?? null);
-    if (!activeBookId) {
-      if (mode === "project-chat") {
-        setProjectChatSessionId(sessionId);
-      } else {
-        setBookCreateSessionId(sessionId);
-      }
-    }
-    setComposerText("");
-    setInput("");
-    await sendMessage(sessionId, nextText, activeBookId);
-    const restoredInput = useChatStore.getState().input;
-    if (restoredInput.trim().length > 0) {
-      setComposerText(restoredInput);
-    }
-  };
-
-  const getEditableComposerText = (el: HTMLDivElement) => el.innerText.replace(/\u00a0/g, " ").replace(/\n$/, "");
-  const getComposerText = () => {
-    if (composerEditableRef.current) return getEditableComposerText(composerEditableRef.current);
-    return textareaRef.current?.value ?? composerTextSnapshotRef.current;
-  };
-  const syncComposerTextFromElement = useCallback((el: HTMLTextAreaElement, options?: { readonly commitStore?: boolean }) => {
-    const nextText = el.value;
-    if (options?.commitStore) {
-      commitComposerText(nextText);
-      return;
-    }
-    updateComposerTextSnapshot(nextText);
-  }, [commitComposerText, updateComposerTextSnapshot]);
-  const syncComposerTextAfterDomUpdate = useCallback((el: HTMLTextAreaElement) => {
-    window.setTimeout(() => syncComposerTextFromElement(el), 0);
-    window.requestAnimationFrame(() => syncComposerTextFromElement(el));
-  }, [syncComposerTextFromElement]);
-  const syncComposerTextFromEditable = useCallback((el: HTMLDivElement, options?: { readonly commitStore?: boolean }) => {
-    const nextText = getEditableComposerText(el);
-    if (options?.commitStore) {
-      commitComposerText(nextText);
-      return;
-    }
-    updateComposerTextSnapshot(nextText);
-  }, [commitComposerText, updateComposerTextSnapshot]);
-  const syncComposerEditableAfterDomUpdate = useCallback((el: HTMLDivElement) => {
-    syncComposerTextFromEditable(el);
-    window.setTimeout(() => syncComposerTextFromEditable(el), 0);
-    window.requestAnimationFrame(() => syncComposerTextFromEditable(el));
-  }, [syncComposerTextFromEditable]);
-  const syncComposerText = useCallback(() => {
-    const editable = composerEditableRef.current;
-    if (editable) {
-      syncComposerTextFromEditable(editable, { commitStore: true });
-      return;
-    }
-    const textarea = textareaRef.current;
-    if (textarea) {
-      syncComposerTextFromElement(textarea, { commitStore: true });
-      return;
-    }
-    const nextText = getComposerText();
-    commitComposerText(nextText);
-  }, [commitComposerText, syncComposerTextFromEditable, syncComposerTextFromElement]);
-
-  const clearComposerSelectionAnchor = useCallback(() => {
-    composerSelectionRef.current = null;
-    composerInputAnchorRef.current = null;
-  }, []);
-
-  const rememberComposerSelection = useCallback((el: HTMLTextAreaElement, options?: { readonly allowEndOverwrite?: boolean; readonly updateInputAnchor?: boolean }) => {
-    if (document.activeElement !== el) return;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    if (start === null || end === null) return;
-    const previous = composerSelectionRef.current;
-    const isCollapsedAtEnd = start === el.value.length && end === el.value.length;
-    const previousWasInsideText = previous
-      && previous.valueLength === el.value.length
-      && (previous.start < el.value.length || previous.end < el.value.length);
-    if (isCollapsedAtEnd && previousWasInsideText) {
-      return;
-    }
-    const snapshot = {
-      start,
-      end,
-      direction: (el.selectionDirection ?? "none") as "forward" | "backward" | "none",
-      valueLength: el.value.length,
-      value: el.value,
-    };
-    composerSelectionRef.current = snapshot;
-    if (options?.updateInputAnchor) {
-      composerInputAnchorRef.current = snapshot;
-    }
-  }, []);
-
-  const restoreComposerSelectionBeforeInput = useCallback((el: HTMLTextAreaElement) => {
-    const selection = composerSelectionRef.current;
-    if (!selection || document.activeElement !== el) return;
-    if (selection.valueLength !== el.value.length) return;
-    const currentStart = el.selectionStart;
-    const currentEnd = el.selectionEnd;
-    if (currentStart === selection.start && currentEnd === selection.end) return;
-    const currentLooksForcedToEnd = currentStart === el.value.length && currentEnd === el.value.length;
-    const rememberedWasInsideText = selection.start < el.value.length || selection.end < el.value.length;
-    if (!currentLooksForcedToEnd || !rememberedWasInsideText) return;
-    try {
-      el.setSelectionRange(selection.start, selection.end, selection.direction);
-    } catch {
-      // Android WebView can transiently reject selection changes during IME updates.
-    }
-  }, []);
-
-  const manuallyApplyComposerBeforeInput = useCallback((el: HTMLTextAreaElement, event: InputEvent): boolean => {
-    const selection = composerInputAnchorRef.current ?? composerSelectionRef.current;
-    if (!selection || document.activeElement !== el) return false;
-    if (selection.valueLength !== el.value.length) return false;
-    if (!(selection.start < el.value.length || selection.end < el.value.length)) return false;
-    if (!(el.selectionStart === el.value.length && el.selectionEnd === el.value.length)) return false;
-    if (event.isComposing) return false;
-    const inputType = event.inputType;
-    if (inputType === "deleteContentBackward" || inputType === "deleteContentForward") {
-      event.preventDefault();
-      const sourceText = selection.value;
-      let deleteStart = selection.start;
-      let deleteEnd = selection.end;
-      if (deleteStart === deleteEnd && inputType === "deleteContentBackward" && deleteStart > 0) {
-        const previousChar = Array.from(sourceText.slice(0, deleteStart)).at(-1) ?? "";
-        deleteStart = Math.max(0, deleteStart - previousChar.length);
-      } else if (deleteStart === deleteEnd && inputType === "deleteContentForward" && deleteEnd < sourceText.length) {
-        const nextChar = Array.from(sourceText.slice(deleteEnd)).at(0) ?? "";
-        deleteEnd = Math.min(sourceText.length, deleteEnd + nextChar.length);
-      }
-      const nextText = `${sourceText.slice(0, deleteStart)}${sourceText.slice(deleteEnd)}`;
-      el.value = nextText;
-      try {
-        el.setSelectionRange(deleteStart, deleteStart, "none");
-      } catch {
-        // Ignore transient Android WebView selection errors.
-      }
-      updateComposerTextSnapshot(nextText);
-      composerSelectionRef.current = {
-        start: deleteStart,
-        end: deleteStart,
-        direction: "none",
-        valueLength: nextText.length,
-        value: nextText,
-      };
-      composerInputAnchorRef.current = composerSelectionRef.current;
-      return true;
-    }
-    if (inputType !== "insertText" && inputType !== "insertReplacementText") return false;
-    const insertedText = event.data ?? "";
-    if (!insertedText) return false;
-
-    event.preventDefault();
-    const before = selection.value.slice(0, selection.start);
-    const after = selection.value.slice(selection.end);
-    const nextText = `${before}${insertedText}${after}`;
-    const nextCursor = selection.start + insertedText.length;
-    el.value = nextText;
-    try {
-      el.setSelectionRange(nextCursor, nextCursor, "none");
-    } catch {
-      // Ignore transient Android WebView selection errors.
-    }
-    updateComposerTextSnapshot(nextText);
-    composerSelectionRef.current = {
-      start: nextCursor,
-      end: nextCursor,
-      direction: "none",
-      valueLength: nextText.length,
-      value: nextText,
-    };
-    composerInputAnchorRef.current = composerSelectionRef.current;
-    return true;
-  }, [updateComposerTextSnapshot]);
-
-  const repairAppendedComposerInput = useCallback((el: HTMLTextAreaElement): boolean => {
-    const selection = composerInputAnchorRef.current ?? composerSelectionRef.current;
-    if (!selection || document.activeElement !== el) return false;
-    const selectionWasInsideText = selection.start < selection.value.length || selection.end < selection.value.length;
-    if (!selectionWasInsideText) return false;
-    const currentValue = el.value;
-    if (currentValue === selection.value) return false;
-    if (!currentValue.startsWith(selection.value)) return false;
-    const appendedText = currentValue.slice(selection.value.length);
-    if (!appendedText) return false;
-
-    const repairedText = `${selection.value.slice(0, selection.start)}${appendedText}${selection.value.slice(selection.end)}`;
-    const nextCursor = selection.start + appendedText.length;
-    el.value = repairedText;
-    try {
-      el.setSelectionRange(nextCursor, nextCursor, "none");
-    } catch {
-      // Some Android IMEs briefly reject selection changes during commit.
-    }
-    updateComposerTextSnapshot(repairedText);
-    composerSelectionRef.current = {
-      start: nextCursor,
-      end: nextCursor,
-      direction: "none",
-      valueLength: repairedText.length,
-      value: repairedText,
-    };
-    composerInputAnchorRef.current = composerSelectionRef.current;
-    return true;
-  }, [updateComposerTextSnapshot]);
-
-  const startComposerComposition = useCallback((el: HTMLTextAreaElement) => {
-    const remembered = composerInputAnchorRef.current ?? composerSelectionRef.current;
-    const currentStart = el.selectionStart ?? el.value.length;
-    const currentEnd = el.selectionEnd ?? currentStart;
-
-    // 优先使用实际光标位置，如果光标被强制到末尾才使用记忆的位置
-    const currentLooksForcedToEnd = currentStart === el.value.length && currentEnd === el.value.length;
-    const hasRememberedPosition = remembered && remembered.valueLength === el.value.length;
-    const rememberedWasInsideText = hasRememberedPosition && (remembered.start < el.value.length || remembered.end < el.value.length);
-
-    composerCompositionRef.current = {
-      start: currentLooksForcedToEnd && rememberedWasInsideText ? remembered.start : currentStart,
-      end: currentLooksForcedToEnd && rememberedWasInsideText ? remembered.end : currentEnd,
-      value: el.value,
-    };
-  }, []);
-
-  const repairComposerCompositionCommit = useCallback((el: HTMLTextAreaElement, options?: { readonly finish?: boolean; readonly committedText?: string }) => {
-    const composition = composerCompositionRef.current;
-    if (!composition || document.activeElement !== el) return;
-    const committedValue = el.value;
-    if (committedValue === composition.value) return;
-
-    const insertedAtEnd = committedValue.startsWith(composition.value)
-      ? committedValue.slice(composition.value.length)
-      : options?.committedText ?? "";
-
-    // 总是尝试修复，即使 insertedAtEnd 为空
-    const expectedAtCursor = `${composition.value.slice(0, composition.start)}${insertedAtEnd}${composition.value.slice(composition.end)}`;
-
-    // 如果已经正确就不改
-    if (committedValue === expectedAtCursor) {
-      composerCompositionRef.current = options?.finish ? null : { ...composition, insertedText: insertedAtEnd };
-      syncComposerTextFromElement(el);
-      rememberComposerSelection(el);
-      return;
-    }
-
-    // 强制修正
-    el.value = expectedAtCursor;
-    const nextCursor = composition.start + insertedAtEnd.length;
-    try {
-      el.setSelectionRange(nextCursor, nextCursor, "none");
-    } catch {}
-    updateComposerTextSnapshot(expectedAtCursor);
-    composerSelectionRef.current = {
-      start: nextCursor,
-      end: nextCursor,
-      direction: "none",
-      valueLength: expectedAtCursor.length,
-      value: expectedAtCursor,
-    };
-    composerInputAnchorRef.current = composerSelectionRef.current;
-    composerCompositionRef.current = options?.finish ? null : { ...composition, insertedText: insertedAtEnd };
-  }, [rememberComposerSelection, syncComposerTextFromElement, updateComposerTextSnapshot]);
-
-  const startComposerPolling = useCallback(() => {
-    if (composerPollFrameRef.current !== null) return;
-    const poll = () => {
-      const el = textareaRef.current;
-      if (!el || !composerFocusedRef.current) {
-        composerPollFrameRef.current = null;
-        return;
-      }
-      repairAppendedComposerInput(el);
-      repairComposerCompositionCommit(el);
-      if (el.value !== composerTextSnapshotRef.current) {
-        syncComposerTextFromElement(el);
-      }
-      rememberComposerSelection(el);
-      composerPollFrameRef.current = window.requestAnimationFrame(poll);
-    };
-    composerPollFrameRef.current = window.requestAnimationFrame(poll);
-  }, [rememberComposerSelection, repairAppendedComposerInput, repairComposerCompositionCommit, syncComposerTextFromElement]);
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return undefined;
-
-    const repairThenSync = () => {
-      repairAppendedComposerInput(el);
-      repairComposerCompositionCommit(el);
-      syncComposerTextFromElement(el);
-    };
-    const scheduleSync = () => {
-      repairThenSync();
-      window.setTimeout(repairThenSync, 0);
-      window.requestAnimationFrame(repairThenSync);
-      startComposerPolling();
-    };
-    const handleBeforeInput = (event: InputEvent) => {
-      if (manuallyApplyComposerBeforeInput(el, event)) return;
-      restoreComposerSelectionBeforeInput(el);
-      scheduleSync();
-    };
-    const handleCompositionStart = () => {
-      startComposerComposition(el);
-    };
-    const handleCompositionEnd = (event: CompositionEvent) => {
-      const committedText = event.data ?? "";
-      // 强制使用当前记忆的光标位置
-      const remembered = composerInputAnchorRef.current ?? composerSelectionRef.current;
-      if (remembered && el.value.endsWith(committedText)) {
-        // 文本被追加到末尾，强制移到光标位置
-        const before = remembered.value.slice(0, remembered.start);
-        const after = remembered.value.slice(remembered.end);
-        const corrected = `${before}${committedText}${after}`;
-        el.value = corrected;
-        const newCursor = remembered.start + committedText.length;
-        try {
-          el.setSelectionRange(newCursor, newCursor, "none");
-        } catch {}
-        updateComposerTextSnapshot(corrected);
-        composerSelectionRef.current = {
-          start: newCursor,
-          end: newCursor,
-          direction: "none",
-          valueLength: corrected.length,
-          value: corrected,
-        };
-        composerInputAnchorRef.current = composerSelectionRef.current;
-      }
-      window.setTimeout(() => repairComposerCompositionCommit(el, { finish: true, committedText }), 0);
-      window.requestAnimationFrame(() => repairComposerCompositionCommit(el, { finish: true, committedText }));
-    };
-    const handleSelectionChange = () => {
-      rememberComposerSelection(el, { updateInputAnchor: true });
-    };
-    const handleDelayedSelectionChange = () => {
-      handleSelectionChange();
-      window.setTimeout(handleSelectionChange, 0);
-      window.setTimeout(handleSelectionChange, 32);
-      window.setTimeout(handleSelectionChange, 96);
-      window.requestAnimationFrame(handleSelectionChange);
-    };
-    const handlePointerStart = () => {
-      clearComposerSelectionAnchor();
-    };
-    const handleFocus = () => {
-      composerFocusedRef.current = true;
-      rememberComposerSelection(el, { updateInputAnchor: true });
-      scheduleSync();
-    };
-    const handleBlur = () => {
-      composerFocusedRef.current = false;
-      composerSelectionRef.current = null;
-      composerInputAnchorRef.current = null;
-      if (composerPollFrameRef.current !== null) {
-        window.cancelAnimationFrame(composerPollFrameRef.current);
-        composerPollFrameRef.current = null;
-      }
-      syncComposerTextFromElement(el, { commitStore: true });
-    };
-
-    el.addEventListener("beforeinput", handleBeforeInput);
-    el.addEventListener("input", scheduleSync);
-    el.addEventListener("change", scheduleSync);
-    el.addEventListener("compositionstart", handleCompositionStart);
-    el.addEventListener("compositionupdate", scheduleSync);
-    el.addEventListener("compositionend", handleCompositionEnd);
-    el.addEventListener("keyup", scheduleSync);
-    el.addEventListener("select", handleSelectionChange);
-    el.addEventListener("selectionchange", handleSelectionChange);
-    el.addEventListener("touchstart", handlePointerStart);
-    el.addEventListener("pointerdown", handlePointerStart);
-    el.addEventListener("click", handleDelayedSelectionChange);
-    el.addEventListener("touchend", handleDelayedSelectionChange);
-    el.addEventListener("pointerup", handleDelayedSelectionChange);
-    el.addEventListener("paste", scheduleSync);
-    el.addEventListener("cut", scheduleSync);
-    el.addEventListener("drop", scheduleSync);
-    el.addEventListener("focus", handleFocus);
-    el.addEventListener("blur", handleBlur);
-
-    return () => {
-      el.removeEventListener("beforeinput", handleBeforeInput);
-      el.removeEventListener("input", scheduleSync);
-      el.removeEventListener("change", scheduleSync);
-      el.removeEventListener("compositionstart", handleCompositionStart);
-      el.removeEventListener("compositionupdate", scheduleSync);
-      el.removeEventListener("compositionend", handleCompositionEnd);
-      el.removeEventListener("keyup", scheduleSync);
-      el.removeEventListener("select", handleSelectionChange);
-      el.removeEventListener("selectionchange", handleSelectionChange);
-      el.removeEventListener("touchstart", handlePointerStart);
-      el.removeEventListener("pointerdown", handlePointerStart);
-      el.removeEventListener("click", handleDelayedSelectionChange);
-      el.removeEventListener("touchend", handleDelayedSelectionChange);
-      el.removeEventListener("pointerup", handleDelayedSelectionChange);
-      el.removeEventListener("paste", scheduleSync);
-      el.removeEventListener("cut", scheduleSync);
-      el.removeEventListener("drop", scheduleSync);
-      el.removeEventListener("focus", handleFocus);
-      el.removeEventListener("blur", handleBlur);
-      if (composerPollFrameRef.current !== null) {
-        window.cancelAnimationFrame(composerPollFrameRef.current);
-        composerPollFrameRef.current = null;
-      }
-    };
-  }, [
-    rememberComposerSelection,
-    clearComposerSelectionAnchor,
-    manuallyApplyComposerBeforeInput,
-    repairAppendedComposerInput,
-    repairComposerCompositionCommit,
-    restoreComposerSelectionBeforeInput,
-    startComposerPolling,
-    startComposerComposition,
-    syncComposerTextAfterDomUpdate,
-    syncComposerTextFromElement,
-  ]);
-
-  const handleQuickAction = (command: string) => {
-    const sessionId = activeSessionId ?? createDraftSession(activeBookId ?? null);
-    void sendMessage(sessionId, command, activeBookId);
-  };
-
-  const requestDeleteMessage = (messageIndex: number) => {
+  const onSend = (text: string) => {
     if (!activeSessionId) return;
-    const message = messages[messageIndex];
-    if (!message) return;
-    textareaRef.current?.blur();
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-    setPendingDelete({
-      sessionId: activeSessionId,
-      messageIndex,
-      messageKey: `${message.role}\u001f${message.timestamp}\u001f${message.content.trim().slice(0, 240)}`,
-      role: message.role === "user" ? "user" : "assistant",
-      preview: message.content.replace(/^\u2717\s*/, "").trim().slice(0, 80),
+    autoScrollPinnedRef.current = true;
+    setFollowingLatest(true);
+    void sendMessage(activeSessionId, text, {
+      activeBookId,
+      sessionKind: currentSessionKind,
+      playMode,
+      actionSource: "free-text",
+    }).finally(() => {
+      window.setTimeout(() => void refreshChapterHealth(), 250);
     });
   };
 
-  const confirmDeleteMessage = async () => {
-    const target = pendingDelete;
-    if (!target || deletingMessage) return;
-    setDeletingMessage(true);
+  const handleRepairDegradedChapter = async () => {
+    if (!activeBookId || degradedChapter === null || repairingChapter) return;
+    const confirmed = await appConfirm({
+      title: `恢复第 ${degradedChapter} 章状态`,
+      message: "将根据该章正文重新整理 truth/state，并解除最新章节的降级状态。正文内容不会被重写。是否继续？",
+      confirmLabel: "同意恢复",
+      cancelLabel: "暂不恢复",
+    });
+    if (!confirmed) return;
+    setRepairingChapter(true);
     try {
-      const latestSession = useChatStore.getState().sessions[target.sessionId];
-      const latestIndex = latestSession?.messages.findIndex((message) =>
-        `${message.role}\u001f${message.timestamp}\u001f${message.content.trim().slice(0, 240)}` === target.messageKey,
-      ) ?? -1;
-      await deleteMessage(target.sessionId, latestIndex >= 0 ? latestIndex : target.messageIndex);
-      setPendingDelete(null);
+      await sendMessage(
+        activeSessionId!,
+        `恢复第 ${degradedChapter} 章的降级状态，并重新整理该章 truth/state。`,
+        {
+          activeBookId,
+          sessionKind: "book",
+          actionSource: "quick-action",
+          requestedIntent: "repair_state",
+        },
+      );
+      await refreshChapterHealth();
     } finally {
-      setDeletingMessage(false);
+      setRepairingChapter(false);
     }
   };
 
-  const emptyGuidance = isZh
-    ? "\u544A\u8BC9\u6211\u4F60\u60F3\u5199\u4EC0\u4E48\u2014\u2014\u9898\u6750\u3001\u4E16\u754C\u89C2\u3001\u4E3B\u89D2\u3001\u6838\u5FC3\u51B2\u7A81"
-    : "Tell me what you want to write \u2014 genre, world, protagonist, core conflict";
+  const submitComposer = () => {
+    const text = textareaRef.current?.value ?? compositionInput.value;
+    if (!text.trim() || loading || !activeSessionId) return;
+    if (textareaRef.current) {
+      textareaRef.current.value = "";
+      textareaRef.current.style.height = "auto";
+    }
+    compositionInput.setValue("");
+    onSend(text);
+  };
+
+  const handleQuickAction = (command: string, requestedIntent?: "write_next") => {
+    if (!activeSessionId) return;
+    autoScrollPinnedRef.current = true;
+    setFollowingLatest(true);
+    void sendMessage(activeSessionId, command, {
+      activeBookId,
+      sessionKind: currentSessionKind,
+      actionSource: "quick-action",
+      requestedIntent,
+    });
+  };
+
+  const handleProposedAction = async (details: ProposedActionDetails) => {
+    // Lock the proposal card so the production action can't be re-fired.
+    markProposalResolved(details.execId, "confirmed");
+    const targetPlayMode = details.targetSessionKind === "play"
+      ? details.actionPayload?.playStart?.mode ?? activeSession?.playMode ?? (details.action === "play_start" ? "open" : undefined)
+      : undefined;
+    if (details.targetRoute) {
+      if (details.targetRoute === "import:fanfic") nav.toImport("fanfic");
+      else if (details.targetRoute === "import:chapters") nav.toImport("chapters");
+      else if (details.targetRoute === "import:canon") nav.toImport("canon");
+      else if (details.targetRoute === "import:spinoff") nav.toImport("spinoff");
+      else if (details.targetRoute === "import:imitation") nav.toImport("imitation");
+      else if (details.targetRoute === "style") nav.toStyle();
+      return;
+    }
+    if (details.sameSession && activeSessionId) {
+      autoScrollPinnedRef.current = true;
+      await sendMessage(activeSessionId, details.instruction ?? "", {
+        activeBookId,
+        sessionKind: details.targetSessionKind,
+        playMode: targetPlayMode,
+        actionSource: "button",
+        requestedIntent: details.action,
+        actionPayload: details.actionPayload,
+      });
+      return;
+    }
+    const targetSessionId = await createSession(null, details.targetSessionKind, targetPlayMode);
+    autoScrollPinnedRef.current = true;
+    await sendMessage(targetSessionId, details.instruction ?? "", {
+      sessionKind: details.targetSessionKind,
+      playMode: targetPlayMode,
+      actionSource: "button",
+      requestedIntent: details.action,
+      actionPayload: details.actionPayload,
+    });
+  };
+
+  const handleRejectProposedAction = async (details: ProposedActionDetails) => {
+    markProposalResolved(details.execId, "rejected");
+    if (!activeSessionId) return;
+    autoScrollPinnedRef.current = true;
+    await sendMessage(activeSessionId, `取消这次操作：${details.title ?? details.instruction}`, {
+      activeBookId,
+      sessionKind: currentSessionKind,
+      actionSource: "button",
+    });
+  };
+
+  useEffect(() => { setPlayImageError(null); }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!activeSessionId || currentSessionKind !== "play") return;
+    let cancelled = false;
+    void fetchJson<PlayRunImagePayload>(`/play/runs/${encodeURIComponent(activeSessionId)}/main`)
+      .then((payload) => {
+        if (!cancelled && payload.imageSettings) setPlayImageSettings(payload.imageSettings);
+      })
+      .catch(() => {
+        // No persisted play world yet.
+      });
+    void fetchJson<CoverConfigResponse>("/cover/config")
+      .then((cfg) => {
+        if (cancelled) return;
+        const selected = cfg.service ?? null;
+        setPlayImageCoverReady(
+          cfg.configured ?? (!!selected && (cfg.providers ?? []).some((p) => p.service === selected && p.connected)),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setPlayImageCoverReady(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeSessionId, currentSessionKind]);
+
+  const togglePlayImageSetting = async (key: keyof PlayImageSettings) => {
+    if (!activeSessionId || currentSessionKind !== "play" || !playImageCoverReady) return;
+    const next = { ...playImageSettings, [key]: !playImageSettings[key] };
+    setPlayImageSettings(next);
+    setPlayImageError(null);
+    try {
+      await fetchJson(`/play/runs/${encodeURIComponent(activeSessionId)}/main/image-settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+    } catch (error) {
+      setPlayImageSettings(playImageSettings);
+      setPlayImageError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const emptyGuidance = (() => {
+    if (currentSessionKind === "short") {
+      return isZh
+        ? "说一个短篇方向、标题灵感、人物压力或核心冲突，我会走 InkOS Short 生成正文、简介和封面。"
+        : "Describe a short-fiction direction, title hook, pressure, or core conflict to run InkOS Short.";
+    }
+    if (currentSessionKind === "play") {
+      return isZh
+        ? "说一个可玩的世界、角色处境或开场动作，我会启动互动世界；之后你可以自由行动或点建议动作。"
+        : "Describe a playable world, character situation, or opening action to start an interactive world.";
+    }
+    return isZh
+      ? "\u544A\u8BC9\u6211\u4F60\u60F3\u5199\u4EC0\u4E48\u2014\u2014\u9898\u6750\u3001\u4E16\u754C\u89C2\u3001\u4E3B\u89D2\u3001\u6838\u5FC3\u51B2\u7A81"
+      : "Tell me what you want to write \u2014 genre, world, protagonist, core conflict";
+  })();
+
+  const handlePlayModeChange = (nextMode: "guided" | "open") => {
+    if (!activeSessionId || loading || playMode === nextMode) return;
+    setConsumedPlayChoiceKey(null);
+    setSessionPlayMode(activeSessionId, nextMode);
+  };
 
   return (
-    <div className="flex flex-col h-full flex-1 min-w-0">
+    <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+      {playModeInfo && (
+        <div className={`shrink-0 border-b border-border/45 bg-background/80 px-2.5 py-2 backdrop-blur transition-[padding] duration-200 sm:px-4 ${worldPanelInsetClass}`}>
+          <div className="mx-auto flex max-w-5xl items-center gap-2 rounded-xl border border-border/45 bg-card/65 px-2.5 py-2 text-sm shadow-sm">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              {(() => {
+                const Icon = playModeInfo.Icon;
+                return <Icon size={16} />;
+              })()}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="font-medium leading-5 text-foreground">{playModeInfo.label}</div>
+              <div className="hidden truncate text-xs leading-5 text-muted-foreground sm:block">{playModeInfo.detail}</div>
+            </div>
+            <div className="grid shrink-0 grid-cols-2 rounded-lg border border-border/50 bg-secondary/45 p-0.5">
+              <button
+                type="button"
+                disabled={loading}
+                aria-pressed={playMode === "guided"}
+                onClick={() => handlePlayModeChange("guided")}
+                className={`flex min-h-9 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                  playMode === "guided"
+                    ? "bg-background text-primary shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <GitBranch size={14} />
+                {isZh ? "分支" : "Guided"}
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                aria-pressed={playMode === "open"}
+                onClick={() => handlePlayModeChange("open")}
+                className={`flex min-h-9 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                  playMode === "open"
+                    ? "bg-background text-primary shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Gamepad2 size={14} />
+                {isZh ? "开放" : "Open"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {activeBookId && degradedChapter !== null && (
+        <div className={`shrink-0 border-b border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-2 sm:px-4 ${worldPanelInsetClass}`}>
+          <div className="mx-auto flex max-w-5xl items-center gap-3 rounded-xl border border-amber-500/25 bg-card/80 px-3 py-2.5 shadow-sm">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/12 text-amber-600">
+              <ShieldAlert size={17} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-foreground">最新第 {degradedChapter} 章处于降级状态</div>
+              <div className="mt-0.5 text-xs leading-5 text-muted-foreground">可在当前页面恢复章节状态，不会改写正文。</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleRepairDegradedChapter()}
+              disabled={repairingChapter || loading || !activeSessionId}
+              className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg bg-amber-500 px-3 text-xs font-semibold text-white shadow-sm disabled:opacity-50"
+            >
+              <Wrench size={14} />
+              {repairingChapter ? "恢复中" : "恢复状态"}
+            </button>
+          </div>
+        </div>
+      )}
       {/* Message scroll area */}
       <div
         ref={scrollRef}
-        onScroll={handleMessageScroll}
-        className="chat-message-scroll flex-1 overflow-y-auto [scrollbar-gutter:stable] px-2.5 py-3 sm:px-4 sm:py-6"
+        onScroll={(event) => {
+          const target = event.currentTarget;
+          const isNearBottom = isChatScrollNearBottom({
+            scrollTop: target.scrollTop,
+            clientHeight: target.clientHeight,
+            scrollHeight: target.scrollHeight,
+          });
+          autoScrollPinnedRef.current = isNearBottom;
+          setFollowingLatest(isNearBottom);
+        }}
+        className={`chat-message-scroll flex-1 overflow-y-auto [scrollbar-gutter:stable] px-2.5 py-3 transition-[padding] duration-200 sm:px-4 sm:py-6 ${worldPanelInsetClass}`}
       >
-        {messages.length === 0 && !loading ? (
+        {needsPlayModeChoice ? (
+          <div className="h-full flex flex-col items-center justify-center text-center select-none gap-4">
+            <div className="w-14 h-14 rounded-2xl border border-dashed border-border/80 flex items-center justify-center bg-card/45 opacity-70">
+              <Gamepad2 size={24} className="text-muted-foreground" />
+            </div>
+            <p className="text-sm text-muted-foreground/70 max-w-md leading-7">
+              {isZh ? "选个玩法，进去再聊你想玩的世界。" : "Pick a playstyle, then describe the world you want in chat."}
+            </p>
+            <div className="grid w-full max-w-sm grid-cols-1 gap-3 px-4 sm:grid-cols-2 sm:px-0">
+              <button
+                type="button"
+                onClick={() => handlePlayModeChange("guided")}
+                className="paper-sheet rounded-2xl px-4 py-3 text-left transition-all hover:border-primary/40 hover:bg-primary/5"
+              >
+                <div className="text-sm font-medium text-foreground">{isZh ? "点着玩" : "Choices"}</div>
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">{isZh ? "GM 给选项，点着推进" : "Pick from offered actions"}</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => handlePlayModeChange("open")}
+                className="paper-sheet rounded-2xl px-4 py-3 text-left transition-all hover:border-primary/40 hover:bg-primary/5"
+              >
+                <div className="text-sm font-medium text-foreground">{isZh ? "自由玩" : "Free"}</div>
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">{isZh ? "自己打字，想干嘛干嘛" : "Type anything you want"}</div>
+              </button>
+            </div>
+          </div>
+        ) : messages.length === 0 && !loading ? (
           <div className="h-full flex flex-col items-center justify-center text-center select-none">
             <div className="w-14 h-14 rounded-2xl border border-dashed border-border/80 flex items-center justify-center mb-4 bg-card/45 opacity-70">
               <BotMessageSquare size={24} className="text-muted-foreground" />
@@ -976,7 +880,8 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     content={msg.content}
                     timestamp={msg.timestamp}
                     theme={theme}
-                    onDelete={activeSessionId ? () => requestDeleteMessage(i) : undefined}
+                    isStreaming={loading}
+                    onDelete={() => void handleDeleteMessage(i, "user")}
                   />
                 ) : msg.parts && msg.parts.length > 0 ? (
                   /* Assistant message — parts-based rendering (chronological) */
@@ -1018,7 +923,14 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                           );
                         }
                         if (item.kind === "tools") {
-                          return <ToolExecutionSteps key={`x-${item.startIdx}`} executions={item.parts.map(p => p.execution)} />;
+                          return (
+                            <ToolExecutionSteps
+                              key={`x-${item.startIdx}`}
+                              executions={item.parts.map(p => p.execution)}
+                              onProposedAction={handleProposedAction}
+                              onRejectProposedAction={handleRejectProposedAction}
+                            />
+                          );
                         }
                         if (item.kind === "text" && item.part.content) {
                           return (
@@ -1030,23 +942,37 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                               theme={theme}
                               tokenUsage={msg.tokenUsage}
                               isStreaming={loading && i === messages.length - 1}
-                              onDelete={activeSessionId ? () => requestDeleteMessage(i) : undefined}
+                              onDelete={item.pi === msg.parts!.findIndex((part) => part.type === "text")
+                                ? () => void handleDeleteMessage(i, "assistant")
+                                : undefined}
                             />
                           );
                         }
                         return null;
                       });
                       const hasTextContent = items.some((item) => item.kind === "text" && item.part.content.trim().length > 0);
-                      if (!hasTextContent && activeSessionId) {
+                      if (!hasTextContent && activeSessionId && !loading) {
                         rendered.push(
                           <div key="delete-tool-only-message" className="mt-2 flex justify-start">
-                            <button
-                              type="button"
-                              onClick={() => requestDeleteMessage(i)}
-                              className="inline-flex min-h-9 shrink-0 touch-manipulation items-center gap-1.5 rounded-full border border-border/35 bg-background/30 px-3 text-xs font-medium text-muted-foreground/85 transition-colors hover:border-destructive/35 hover:bg-destructive/10 hover:text-destructive"
-                            >
-                              删除
-                            </button>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger
+                                className="inline-flex h-10 w-10 shrink-0 touch-manipulation items-center justify-center rounded-full border border-border/35 bg-background/30 text-muted-foreground/80 transition-colors hover:border-border/60 hover:bg-muted/60 hover:text-foreground"
+                                aria-label="AI 工具消息操作"
+                                title="消息操作"
+                              >
+                                <MoreHorizontal size={16} />
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent side="right" align="start" className="w-36 rounded-2xl border-border/60 bg-popover/95 p-1.5 shadow-xl shadow-primary/10 backdrop-blur">
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onClick={() => window.setTimeout(() => void handleDeleteMessage(i, "assistant"), 0)}
+                                  className="min-h-10 rounded-xl px-3"
+                                >
+                                  <Trash2 size={14} />
+                                  <span>删除消息</span>
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
                           </div>,
                         );
                       }
@@ -1061,31 +987,38 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     timestamp={msg.timestamp}
                     theme={theme}
                     tokenUsage={msg.tokenUsage}
-                    isStreaming={loading && i === messages.length - 1 && msg.role === "assistant"}
-                    onDelete={activeSessionId ? () => requestDeleteMessage(i) : undefined}
+                    isStreaming={loading && i === messages.length - 1}
+                    onDelete={msg.role === "assistant" || msg.role === "user"
+                      ? () => void handleDeleteMessage(i, msg.role)
+                      : undefined}
                   />
                 )}
               </div>
             ))}
 
-            {/* Loading indicator — only when loading and no streaming activity */}
-            {loading && !isStreaming && (
+            {/* Play turns always keep a visible generation state. Partial text above
+                continues streaming while this status confirms the world is still working. */}
+            {loading && (currentSessionKind === "play" || !isStreaming) && (
               <Message from="assistant">
                 <MessageContent>
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     <div className="flex gap-1">
-                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: "300ms" }} />
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary/60" style={{ animationDelay: "0ms" }} />
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary/60" style={{ animationDelay: "150ms" }} />
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary/60" style={{ animationDelay: "300ms" }} />
                     </div>
                     <Shimmer className="text-sm" duration={1.5}>
-                      {isZh ? "AI 正在思考，即将开始写作..." : "AI is thinking, writing begins shortly..."}
+                      {currentSessionKind === "play"
+                        ? playMode === "guided"
+                          ? (isZh ? "世界正在生成回应与下一步选项..." : "The world is generating a response and choices...")
+                          : (isZh ? "世界正在根据你的行动继续演化..." : "The world is evolving from your action...")
+                        : (isZh ? "AI 正在思考，即将开始写作..." : "AI is thinking, writing begins shortly...")}
                     </Shimmer>
-                    {activeTokenLabel && (
+                    {activeTokenLabel ? (
                       <span className="rounded-full border border-border/45 bg-background/45 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                         {activeTokenLabel}
                       </span>
-                    )}
+                    ) : null}
                   </div>
                 </MessageContent>
               </Message>
@@ -1097,6 +1030,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
           <button
             type="button"
             onClick={() => {
+              autoScrollPinnedRef.current = true;
               setFollowingLatest(true);
               requestAnimationFrame(() => scrollToLatest("auto"));
             }}
@@ -1109,80 +1043,87 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       </div>
 
       {/* Quick actions (only when a book is active) */}
-      {hasBook && (
-        <div className="shrink-0 mx-auto w-full max-w-5xl px-2.5 sm:px-4">
-          <QuickActions
-            onAction={handleQuickAction}
-            disabled={loading}
-            isZh={isZh}
-          />
+      {hasBook && !showChoicePanel && (
+        <div className={`shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
+          <div className="mx-auto w-full max-w-5xl px-2.5 sm:px-4">
+            <QuickActions
+              onAction={handleQuickAction}
+              disabled={loading || !activeSessionId}
+              isZh={isZh}
+            />
+          </div>
         </div>
       )}
 
-      {/* Input area */}
-      <div className="relative z-30 shrink-0 border-t border-border/45 px-2.5 py-2 claude-topbar mobile-safe-bottom sm:px-4 sm:py-4">
+      {/* Play choices are shortcuts, not a replacement for free actions. Scene
+          images render inside their corresponding chat result card so the
+          visual history scrolls with the conversation. */}
+      {currentSessionKind === "play" && !needsPlayModeChoice && showChoicePanel && (
+        <div className={`shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
+          <PlayChoicePanel
+            choices={playChoices}
+            disabled={loading || !activeSessionId}
+            isZh={isZh}
+            onChoose={(action) => {
+              if (!activeSessionId || !playChoiceSet) return;
+              setConsumedPlayChoiceKey(playChoiceSet.key);
+              autoScrollPinnedRef.current = true;
+              void sendMessage(activeSessionId, action, { activeBookId, sessionKind: "play", playMode, actionSource: "button" });
+            }}
+          />
+        </div>
+      )}
+      {needsPlayModeChoice ? null : (
+      <div className={`relative z-30 shrink-0 border-t border-border/45 px-2.5 py-2 claude-topbar mobile-safe-bottom transition-[padding] duration-200 sm:px-4 sm:py-4 ${worldPanelInsetClass}`}>
         <div className="mx-auto max-w-5xl">
-            <form
-              className="claude-composer rounded-[1.15rem] transition-all sm:rounded-2xl"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (loading) {
-                  if (activeSessionId) void cancelMessage(activeSessionId);
-                  return;
-                }
-                syncComposerText();
-                void onSend(getComposerText());
-              }}
-            >
-              <div className="flex items-end gap-2 px-3 py-2.5">
-                <div
-                  ref={composerEditableRef}
-                  contentEditable={!loading ? "plaintext-only" : "false"}
-                  suppressContentEditableWarning
-                  role="textbox"
-                  aria-multiline="true"
-                  aria-label={isZh ? "输入消息" : "Message InkOS"}
-                  data-placeholder={isZh ? "输入消息..." : "Message InkOS..."}
-                  onInput={(e) => {
-                    syncComposerEditableAfterDomUpdate(e.currentTarget);
+          <div className="flex items-start gap-2">
+            <div className="claude-composer flex-1 rounded-[1.15rem] transition-all sm:rounded-2xl">
+              <div
+                className="flex items-end gap-2 px-3 py-2.5"
+                onClick={(event) => {
+                  if (
+                    event.target instanceof HTMLButtonElement
+                    || event.target instanceof HTMLTextAreaElement
+                  ) return;
+                  textareaRef.current?.focus();
+                }}
+              >
+                <textarea
+                  key={activeSessionId ?? "no-session"}
+                  ref={textareaRef}
+                  defaultValue={compositionInput.value}
+                  onChange={compositionInput.handleChange}
+                  onInput={compositionInput.handleInput}
+                  onCompositionStart={compositionInput.handleCompositionStart}
+                  onCompositionEnd={compositionInput.handleCompositionEnd}
+                  onKeyDown={(e) => {
+                    const nativeEvent = e.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+                    if (e.key === "Enter" && !e.shiftKey && !compositionInput.isComposing && !nativeEvent.isComposing && nativeEvent.keyCode !== 229) {
+                      e.preventDefault();
+                      submitComposer();
+                    }
                   }}
-                  onCompositionUpdate={(e) => {
-                    syncComposerEditableAfterDomUpdate(e.currentTarget);
-                  }}
-                  onCompositionEnd={(e) => {
-                    syncComposerEditableAfterDomUpdate(e.currentTarget);
-                  }}
-                  onKeyUp={(e) => {
-                    syncComposerEditableAfterDomUpdate(e.currentTarget);
-                  }}
-                  onPaste={(e) => {
-                    syncComposerEditableAfterDomUpdate(e.currentTarget);
-                  }}
-                  onBlur={(e) => {
-                    commitComposerText(getEditableComposerText(e.currentTarget));
-                  }}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); syncComposerText(); void onSend(getComposerText()); } }}
-                  className={`max-h-[40dvh] min-h-11 flex-1 overflow-y-auto whitespace-pre-wrap break-words border-none! bg-transparent text-base leading-6 shadow-none outline-none! ring-0! empty:before:pointer-events-none empty:before:text-muted-foreground/60 empty:before:content-[attr(data-placeholder)] focus:border-none! focus:outline-none! focus:ring-0! sm:max-h-[200px] sm:min-h-0 sm:text-sm ${
-                    loading ? "pointer-events-none opacity-50" : ""
-                  }`}
+                  placeholder={currentSessionKind === "play"
+                    ? playMode === "guided"
+                      ? (isZh ? "输入行动，或点上方选项推进..." : "Type an action, or choose above...")
+                      : (isZh ? "自由输入你要做的行动..." : "Type any action you want...")
+                    : isZh ? "输入消息..." : "Message InkOS..."}
+                  disabled={!activeSessionId}
+                  rows={1}
+                  className="max-h-[40dvh] min-h-11 flex-1 resize-none overflow-y-auto whitespace-pre-wrap break-words border-none! bg-transparent px-0 py-2 text-base leading-6 shadow-none outline-none! ring-0! placeholder:text-muted-foreground/60 focus:border-none! focus:outline-none! focus:ring-0! disabled:opacity-50 sm:max-h-[200px] sm:min-h-0 sm:text-sm"
                 />
                 <button
-                  type={loading ? "button" : "submit"}
-                  disabled={!loading && !composerHasText}
-                  aria-disabled={!loading && !composerHasText}
-                  onClick={(event) => {
+                  type="button"
+                  onClick={() => {
                     if (loading) {
-                      event.preventDefault();
-                      event.stopPropagation();
+                      if (activeSessionId) void cancelMessage(activeSessionId);
+                      return;
                     }
-                    if (loading && activeSessionId) {
-                      void cancelMessage(activeSessionId);
-                    }
+                    submitComposer();
                   }}
-                  className={`relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm shadow-primary/20 transition-all hover:scale-105 active:scale-95 disabled:scale-100 disabled:opacity-35 sm:h-8 sm:w-8 sm:rounded-xl ${
-                    !composerHasText && !loading ? "opacity-35" : ""
-                  }`}
+                  disabled={(!compositionInput.value.trim() && !loading) || !activeSessionId}
                   aria-label={loading ? (isZh ? "停止生成" : "Stop generation") : (isZh ? "发送消息" : "Send message")}
+                  className="relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm shadow-primary/20 transition-all hover:scale-105 active:scale-95 disabled:scale-100 disabled:opacity-35 sm:h-8 sm:w-8 sm:rounded-xl"
                 >
                   {loading ? <Square size={14} fill="currentColor" strokeWidth={2.5} className="sm:size-3" /> : <ArrowUp size={16} strokeWidth={2.5} className="sm:size-3.5" />}
                 </button>
@@ -1214,73 +1155,91 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     配置模型 →
                   </button>
                 )}
-                {tokenSavingsLabel && (
-                  <span className="ml-auto rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-                    {tokenSavingsLabel}
-                  </span>
-                )}
+                <div className="ml-auto flex items-center gap-2">
+                  {tokenSavingsLabel && (
+                    <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                      {tokenSavingsLabel}
+                    </span>
+                  )}
+                  {currentSessionKind === "play" && (
+                    <button
+                      type="button"
+                      onClick={() => setWorldPanelOpen((v) => !v)}
+                      className={`flex items-center justify-center h-8 w-8 shrink-0 rounded-full transition-all shadow-sm ${worldPanelOpen ? "bg-primary text-primary-foreground scale-105" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                      title={isZh ? "查看世界：持有 / 状态 / 关系" : "View world: holdings / state / relations"}
+                    >
+                      <Gamepad2 size={15} />
+                    </button>
+                  )}
+                </div>
               </div>
-            </form>
+            </div>
+            {currentSessionKind === "play" ? (
+              <div className="relative mt-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setPlayImageMenuOpen((value) => !value)}
+                  disabled={loading || !activeSessionId}
+                  title={isZh ? "自动配图" : "Auto illustration"}
+                  className={`flex h-10 w-10 items-center justify-center rounded-xl border border-border/50 bg-secondary/40 shadow-sm transition-all hover:border-primary/50 hover:bg-primary/10 hover:text-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 ${playImageMenuOpen || playImageSettings.actors || playImageSettings.moments || playImageSettings.inventory ? "text-primary" : "text-muted-foreground"}`}
+                  aria-label={isZh ? "自动配图" : "Auto illustration"}
+                >
+                  <Palette size={17} />
+                </button>
+                {playImageMenuOpen ? (
+                  <div className="absolute bottom-12 right-0 z-30 w-44 rounded-xl border border-border/50 bg-card/95 p-2 shadow-xl backdrop-blur">
+                    <div className="mb-1.5 px-1 text-[12px] leading-5 font-semibold uppercase tracking-wider text-muted-foreground/60">
+                      {isZh ? "自动配图" : "Auto illustration"}
+                    </div>
+                    {(["actors", "moments", "inventory"] as const).map((key) => (
+                      <label
+                        key={key}
+                        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-[14px] leading-6 ${playImageCoverReady ? "cursor-pointer text-foreground hover:bg-secondary/50" : "cursor-not-allowed text-muted-foreground/40"}`}
+                        title={playImageCoverReady ? undefined : (isZh ? "先在「模型配置」里配好生图 API 才能开启" : "Configure an image API in Model Settings first")}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={!playImageCoverReady}
+                          checked={playImageCoverReady && playImageSettings[key]}
+                          onChange={() => void togglePlayImageSetting(key)}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        {key === "actors"
+                          ? (isZh ? "为角色配图" : "Characters")
+                          : key === "moments"
+                            ? (isZh ? "为时刻配图" : "Moments")
+                            : (isZh ? "为背包配图" : "Inventory")}
+                      </label>
+                    ))}
+                    {!playImageCoverReady ? (
+                      <p className="mt-1 px-1 text-[12px] leading-5 text-muted-foreground/50">
+                        {isZh ? "未检测到生图 API。" : "No image API configured."}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {playImageError ? (
+            <p className="mt-2 text-right text-[13px] leading-5 text-destructive/80">
+              {isZh ? `配图失败：${playImageError}` : `Image failed: ${playImageError}`}
+            </p>
+          ) : null}
         </div>
       </div>
-      {pendingDelete && (
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/70 px-4 py-[calc(env(safe-area-inset-top)+1rem)] backdrop-blur-xl"
-          role="dialog"
-          aria-modal="true"
-          aria-label="确认删除消息"
-          onClick={(event) => event.stopPropagation()}
-        >
-          <div
-            className="glass-panel w-full max-w-sm rounded-[1.75rem] border border-border/70 bg-card/95 p-5 shadow-2xl shadow-primary/10"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
-                <Trash2 size={16} />
-                删除消息
-              </div>
-              <button
-                type="button"
-                onClick={() => setPendingDelete(null)}
-                className="soft-pill flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
-                aria-label="关闭"
-              >
-                <X size={15} />
-              </button>
-            </div>
-            <h2 className="mt-3 text-xl font-semibold tracking-normal text-foreground">
-              确认删除这条{pendingDelete.role === "user" ? "用户消息" : "AI 回复"}？
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              删除后会同步写入会话记录，重新进入这个会话也不会恢复。
-            </p>
-            {pendingDelete.preview && (
-              <p className="mt-4 line-clamp-3 rounded-2xl border border-border/45 bg-background/45 px-4 py-3 text-sm leading-6 text-muted-foreground">
-                {pendingDelete.preview}
-              </p>
-            )}
-            <div className="mt-5 grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                disabled={deletingMessage}
-                onClick={() => setPendingDelete(null)}
-                className="soft-pill h-11 rounded-2xl px-4 text-sm font-semibold text-foreground"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                disabled={deletingMessage}
-                onClick={() => void confirmDeleteMessage()}
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-destructive px-4 text-sm font-semibold text-destructive-foreground shadow-lg shadow-destructive/20 transition-colors hover:bg-destructive/90"
-              >
-                <Trash2 size={15} />
-                {deletingMessage ? "删除中..." : "删除"}
-              </button>
-            </div>
-          </div>
-        </div>
+      )}
+
+      {currentSessionKind === "play" && activeSessionId && (
+        <PlayHud
+          sessionId={activeSessionId}
+          isStreaming={loading}
+          isZh={isZh}
+          open={worldPanelOpen}
+          onClose={() => setWorldPanelOpen(false)}
+          imageSettings={playImageSettings}
+          sessionTitle={activeSession?.title ?? null}
+        />
       )}
     </div>
   );
@@ -1308,17 +1267,17 @@ function ModelPickerContent({
         <input
           type="text"
           value={search}
-          {...mobileTextInputHandlers(setSearch)}
+          onChange={(e) => setSearch(e.target.value)}
           placeholder="搜索模型..."
-          className="h-10 w-full rounded-xl bg-secondary/35 px-3 text-base outline-none placeholder:text-muted-foreground/40 sm:text-sm"
+          className="w-full rounded-xl bg-secondary/30 px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/40"
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => e.stopPropagation()}
         />
       </div>
-      <div className="overflow-y-auto flex-1">
+      <div className="flex-1 overflow-y-auto py-1.5">
         {filtered.map((group) => (
-          <div key={group.service}>
-            <div className="px-2 py-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+          <div key={group.service} className="py-1">
+            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               {group.label}
             </div>
             {group.models.map((m) => {
@@ -1327,10 +1286,10 @@ function ModelPickerContent({
                 <DropdownMenuItem
                   key={`${group.service}:${m.id}`}
                   onClick={() => onSelect(m.id, group.service)}
-                  className={isSelected ? "bg-muted/50" : ""}
+                  className={`rounded-xl text-sm ${isSelected ? "bg-muted/50" : ""}`}
                 >
-                  <div className="flex min-h-10 flex-1 items-center justify-between gap-3">
-                    <span className="truncate text-sm">{m.name ?? m.id}</span>
+                  <div className="flex flex-1 items-center justify-between">
+                    <span className="text-sm">{m.name ?? m.id}</span>
                     {isSelected && <Check size={14} className="text-primary shrink-0" />}
                   </div>
                 </DropdownMenuItem>
@@ -1345,7 +1304,7 @@ function ModelPickerContent({
         )}
       </div>
       <div className="border-t border-border/30">
-        <DropdownMenuItem onClick={onManage} className="min-h-10 text-primary">
+        <DropdownMenuItem onClick={onManage} className="text-primary">
           管理服务商
         </DropdownMenuItem>
       </div>

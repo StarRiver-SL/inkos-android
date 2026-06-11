@@ -100,6 +100,98 @@ describe("buildPartsFromEvents", () => {
     }
   });
 
+  it("renders session context compression as a visible running card when no tool is active", () => {
+    const parts = buildPartsFromEvents([
+      {
+        type: "context:compression",
+        category: "session_context",
+        phase: "start",
+        sources: ["story/current_state.md"],
+      },
+      {
+        type: "context:compression",
+        category: "session_context",
+        phase: "end",
+        sources: ["story/current_state.md"],
+      },
+    ]);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe("tool");
+    if (parts[0].type === "tool") {
+      expect(parts[0].execution.tool).toBe("context_compression");
+      expect(parts[0].execution.label).toBe("整理会话记忆");
+      expect(parts[0].execution.status).toBe("completed");
+      expect(parts[0].execution.stages?.[0]).toMatchObject({
+        label: "整理会话记忆",
+        status: "completed",
+      });
+    }
+  });
+
+  it("renders story context compression as a visible stage inside the running writer tool", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "t1", tool: "sub_agent", agent: "writer", stages: ["准备章节输入", "撰写章节草稿"] },
+      {
+        type: "context:compression",
+        category: "story_context",
+        phase: "start",
+        protectedTokens: 1200,
+        compressibleTokens: 9000,
+        budgetTokens: 6000,
+      },
+      {
+        type: "context:compression",
+        category: "story_context",
+        phase: "end",
+        protectedTokens: 1200,
+        compressibleTokens: 9000,
+        budgetTokens: 6000,
+      },
+    ]);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe("tool");
+    if (parts[0].type === "tool") {
+      const compressionStage = parts[0].execution.stages?.find((stage) => stage.label === "压缩故事上下文");
+      expect(compressionStage).toMatchObject({
+        label: "压缩故事上下文",
+        status: "completed",
+      });
+    }
+  });
+
+  it("shows context compression token budget and source trace while running", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "t1", tool: "sub_agent", agent: "writer", stages: ["准备章节输入"] },
+      {
+        type: "context:compression",
+        category: "story_context",
+        phase: "start",
+        protectedTokens: 1200,
+        compressibleTokens: 9000,
+        budgetTokens: 6000,
+        sources: [
+          "story/chapter_summaries.md#recent_titles",
+          "story/pending_hooks.md#active",
+          "story/outline/volume_map.md#volume_2",
+          "story/roles/主要角色/林月.md",
+        ],
+      },
+    ]);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe("tool");
+    if (parts[0].type === "tool") {
+      const compressionStage = parts[0].execution.stages?.find((stage) => stage.label === "压缩故事上下文");
+      expect(compressionStage?.progress?.status).toContain("保护 1200");
+      expect(compressionStage?.progress?.status).toContain("可压缩 9000");
+      expect(compressionStage?.progress?.status).toContain("预算 6000");
+      expect(compressionStage?.progress?.status).toContain("来源 4: story/chapter_summaries.md#recent_titles");
+      expect(compressionStage?.progress?.status).toContain("+1");
+    }
+  });
+
   it("handles multi-turn thinking (append, not overwrite)", () => {
     const parts = buildPartsFromEvents([
       { type: "thinking:start" },
@@ -149,6 +241,79 @@ describe("buildPartsFromEvents", () => {
     if (parts[0].type === "tool") {
       expect(parts[0].execution.details).toEqual(details);
     }
+  });
+
+  it("labels play tools as first-class pipeline actions", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "p1", tool: "play_start" },
+      { type: "tool:end", id: "p1", result: "started" },
+      { type: "tool:start", id: "p2", tool: "play_step" },
+      { type: "tool:end", id: "p2", result: "advanced" },
+      { type: "tool:start", id: "p3", tool: "play_edit" },
+      { type: "tool:end", id: "p3", result: "updated" },
+      { type: "tool:start", id: "p4", tool: "play_revise" },
+      { type: "tool:end", id: "p4", result: "revised" },
+    ]);
+
+    expect(parts).toHaveLength(4);
+    expect(parts[0].type === "tool" ? parts[0].execution.label : "").toBe("启动互动世界");
+    expect(parts[1].type === "tool" ? parts[1].execution.label : "").toBe("推进互动世界");
+    expect(parts[2].type === "tool" ? parts[2].execution.label : "").toBe("编辑互动世界");
+    expect(parts[3].type === "tool" ? parts[3].execution.label : "").toBe("重做互动回合");
+  });
+
+  it("does not render model narration after a completed play tool as authoritative text", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "p1", tool: "play_step" },
+      {
+        type: "tool:end",
+        id: "p1",
+        result: "advanced",
+        details: {
+          kind: "play_turn_advanced",
+          sceneText: "工具生成的权威场景。",
+          suggestedActions: ["检查票根"],
+        },
+      },
+      { type: "draft:delta", text: "模型又复述了一遍场景。" },
+    ]);
+
+    expect(parts).toHaveLength(2);
+    expect(parts[0].type).toBe("tool");
+    expect(parts[1].type).toBe("thinking");
+    expect(parts.some((part) => part.type === "text")).toBe(false);
+  });
+
+  it("does not render model narration after a revised play turn as authoritative text", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "p1", tool: "play_revise" },
+      {
+        type: "tool:end",
+        id: "p1",
+        result: "revised",
+        details: {
+          kind: "play_turn_revised",
+          sceneText: "工具生成的新版本场景。",
+          suggestedActions: ["检查录音笔"],
+        },
+      },
+      { type: "draft:delta", text: "模型又复述了一遍新版本。" },
+    ]);
+
+    expect(parts).toHaveLength(2);
+    expect(parts[0].type).toBe("tool");
+    expect(parts[1].type).toBe("thinking");
+    expect(parts.some((part) => part.type === "text")).toBe(false);
+  });
+
+  it("labels proposed action confirmations", () => {
+    const parts = buildPartsFromEvents([
+      { type: "tool:start", id: "a1", tool: "propose_action" },
+      { type: "tool:end", id: "a1", result: "confirm", details: { kind: "proposed_action" } },
+    ]);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type === "tool" ? parts[0].execution.label : "").toBe("确认动作");
   });
 
   it("localizes known tool errors", () => {

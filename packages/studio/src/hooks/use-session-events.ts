@@ -1,9 +1,22 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { SSEMessage } from "./use-sse";
 import type { HashRoute } from "./use-hash-route";
 import { useChatStore } from "../store/chat";
 import { bookKey, mergeSessionIds, updateSession } from "../store/chat/slices/message/runtime";
 import { clearBookCreateSessionId, getBookCreateSessionId } from "../pages/chat-page-state";
+
+export function takeUnprocessedSessionMessages(
+  messages: ReadonlyArray<SSEMessage>,
+  seen: WeakSet<SSEMessage>,
+): ReadonlyArray<SSEMessage> {
+  const pending: SSEMessage[] = [];
+  for (const message of messages) {
+    if (seen.has(message)) continue;
+    seen.add(message);
+    pending.push(message);
+  }
+  return pending;
+}
 
 /**
  * 监听全局 SSE 事件中与 session 有关的两类消息：
@@ -15,48 +28,52 @@ export function useSessionEvents(
   route: HashRoute,
   setRoute: (route: HashRoute) => void,
 ): void {
+  const seenMessages = useRef<WeakSet<SSEMessage>>(new WeakSet());
+
   useEffect(() => {
-    const recent = sse.messages.at(-1);
-    if (!recent) return;
+    const pendingMessages = takeUnprocessedSessionMessages(sse.messages, seenMessages.current);
+    if (pendingMessages.length === 0) return;
 
-    if (recent.event === "session:title") {
-      const data = recent.data as { sessionId?: string; title?: string } | null;
-      if (!data?.sessionId || !data.title) return;
-      const { sessionId, title } = data;
-      useChatStore.setState((state) => {
-        const session = state.sessions[sessionId];
-        if (!session) return {};
-        return {
-          sessions: updateSession(state.sessions, sessionId, () => ({ title })),
-        };
-      });
-      return;
-    }
+    for (const recent of pendingMessages) {
+      if (recent.event === "session:title") {
+        const data = recent.data as { sessionId?: string; title?: string } | null;
+        if (!data?.sessionId || !data.title) continue;
+        const { sessionId, title } = data;
+        useChatStore.setState((state) => {
+          const session = state.sessions[sessionId];
+          if (!session) return {};
+          return {
+            sessions: updateSession(state.sessions, sessionId, () => ({ title })),
+          };
+        });
+        continue;
+      }
 
-    if (recent.event === "book:created") {
-      const data = recent.data as { sessionId?: string; bookId?: string } | null;
-      if (!data?.sessionId || !data.bookId) return;
-      const { sessionId, bookId } = data;
+      if (recent.event === "book:created") {
+        const data = recent.data as { sessionId?: string; bookId?: string } | null;
+        if (!data?.sessionId || !data.bookId) continue;
+        const { sessionId, bookId } = data;
 
-      useChatStore.setState((state) => {
-        const session = state.sessions[sessionId];
-        if (!session) return {};
-        const previousKey = bookKey(session.bookId);
-        const nextKey = bookKey(bookId);
-        return {
-          sessions: updateSession(state.sessions, sessionId, () => ({ bookId })),
-          sessionIdsByBook: {
-            ...state.sessionIdsByBook,
-            [previousKey]: (state.sessionIdsByBook[previousKey] ?? []).filter((id) => id !== sessionId),
-            [nextKey]: mergeSessionIds(state.sessionIdsByBook[nextKey], [sessionId]),
-          },
-        };
-      });
+        useChatStore.setState((state) => {
+          const session = state.sessions[sessionId];
+          if (!session) return {};
+          const previousKey = bookKey(session.bookId);
+          const nextKey = bookKey(bookId);
+          return {
+            sessions: updateSession(state.sessions, sessionId, () => ({ bookId })),
+            sessionIdsByBook: {
+              ...state.sessionIdsByBook,
+              [previousKey]: (state.sessionIdsByBook[previousKey] ?? []).filter((id) => id !== sessionId),
+              [nextKey]: mergeSessionIds(state.sessionIdsByBook[nextKey], [sessionId]),
+            },
+          };
+        });
 
-      if (getBookCreateSessionId() === sessionId) {
-        clearBookCreateSessionId();
-        if (route.page === "book-create") {
-          setRoute({ page: "book", bookId });
+        if (getBookCreateSessionId() === sessionId) {
+          clearBookCreateSessionId();
+          if (route.page === "book-create") {
+            setRoute({ page: "book", bookId });
+          }
         }
       }
     }

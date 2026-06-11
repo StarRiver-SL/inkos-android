@@ -310,6 +310,130 @@ describe("applyRuntimeStateDelta", () => {
     ]);
   });
 
+  it("does not downgrade an existing progressed hook when the next delta restates it as open", () => {
+    const result = applyRuntimeStateDelta({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 2,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: {
+          chapter: 2,
+          facts: [],
+        },
+        hooks: {
+          hooks: [
+            {
+              hookId: "pressure-record",
+              startChapter: 1,
+              type: "evidence",
+              status: "progressing",
+              lastAdvancedChapter: 2,
+              expectedPayoff: "公开一号泵房压力异常的签字漏洞。",
+              notes: "第2章已让主角拿到压力曲线。",
+            },
+          ],
+        },
+        chapterSummaries: {
+          rows: [],
+        },
+      },
+      delta: RuntimeStateDeltaSchema.parse({
+        chapter: 3,
+        hookOps: {
+          upsert: [
+            {
+              hookId: "pressure-record",
+              startChapter: 1,
+              type: "evidence",
+              status: "open",
+              lastAdvancedChapter: 2,
+              expectedPayoff: "公开一号泵房压力异常的签字漏洞。",
+              notes: "第3章再次提到压力曲线，但没有新推进。",
+            },
+          ],
+          mention: [],
+          resolve: [],
+          defer: [],
+        },
+        notes: [],
+      }),
+    });
+
+    expect(result.hooks.hooks).toEqual([
+      expect.objectContaining({
+        hookId: "pressure-record",
+        status: "progressing",
+        lastAdvancedChapter: 2,
+      }),
+    ]);
+  });
+
+  it("does not resurrect a resolved hook when the next delta restates it as open", () => {
+    const result = applyRuntimeStateDelta({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 8,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: {
+          chapter: 8,
+          facts: [],
+        },
+        hooks: {
+          hooks: [
+            {
+              hookId: "sealed-toolbox",
+              startChapter: 1,
+              type: "evidence",
+              status: "resolved",
+              lastAdvancedChapter: 8,
+              expectedPayoff: "揭开红色封条是谁重新贴上的。",
+              notes: "第8章已兑现封条来源。",
+            },
+          ],
+        },
+        chapterSummaries: {
+          rows: [],
+        },
+      },
+      delta: RuntimeStateDeltaSchema.parse({
+        chapter: 9,
+        hookOps: {
+          upsert: [
+            {
+              hookId: "sealed-toolbox",
+              startChapter: 1,
+              type: "evidence",
+              status: "open",
+              lastAdvancedChapter: 8,
+              expectedPayoff: "揭开红色封条是谁重新贴上的。",
+              notes: "第9章回看封条，不应重开已兑现钩子。",
+            },
+          ],
+          mention: [],
+          resolve: [],
+          defer: [],
+        },
+        notes: [],
+      }),
+    });
+
+    expect(result.hooks.hooks).toEqual([
+      expect.objectContaining({
+        hookId: "sealed-toolbox",
+        status: "resolved",
+        lastAdvancedChapter: 8,
+      }),
+    ]);
+  });
+
   it("merges duplicate restated hook families into the matched active hook", () => {
     const result = applyRuntimeStateDelta({
       snapshot: {

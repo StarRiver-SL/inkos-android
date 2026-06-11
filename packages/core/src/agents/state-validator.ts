@@ -5,16 +5,9 @@ export interface ValidationWarning {
   readonly description: string;
 }
 
-export interface ValidationTokenUsage {
-  readonly promptTokens: number;
-  readonly completionTokens: number;
-  readonly totalTokens: number;
-}
-
 export interface ValidationResult {
   readonly warnings: ReadonlyArray<ValidationWarning>;
   readonly passed: boolean;
-  readonly tokenUsage?: ValidationTokenUsage;
 }
 
 export interface StateValidationAuthorityContext {
@@ -28,7 +21,7 @@ export interface StateValidationAuthorityContext {
  * Catches contradictions, missing state changes, and temporal inconsistencies.
  *
  * Uses a minimal verdict protocol instead of requiring structured JSON:
- *   Line 1: PASS or FAIL
+ *   A standalone verdict line: PASS or FAIL
  *   Remaining lines: free-form warnings (one per line, optional category prefix)
  */
 export class StateValidatorAgent extends BaseAgent {
@@ -70,7 +63,7 @@ Given the chapter text and the CHANGES made to truth files (state card + hooks p
 6. Cross-truth key-setting conflict — numbered rules, named laws, ranks, identities, locations, or relationship labels in the new truth files contradict the chapter text or the authority context
 
 Output format (simple, NOT JSON):
-- First line: exactly PASS or FAIL (nothing else on this line)
+- Include one standalone verdict line: exactly PASS or FAIL (nothing else on that line)
 - Following lines: one warning per line, optionally prefixed with [category]
 - If no issues at all, just output: PASS
 
@@ -104,7 +97,7 @@ ${stateDiff || "(no changes)"}
 ${hooksDiff || "(no changes)"}
 
 ## Chapter Text (for reference)
-${chapterContent.slice(0, 6000)}`;
+${chapterContent}`;
 
     try {
       const response = await this.chat(
@@ -115,10 +108,7 @@ ${chapterContent.slice(0, 6000)}`;
         { temperature: 0.1 },
       );
 
-      return {
-        ...this.parseResult(response.content),
-        tokenUsage: response.usage,
-      };
+      return this.parseResult(response.content);
     } catch (error) {
       this.log?.warn(`State validation failed: ${error}`);
       throw error;
@@ -145,9 +135,9 @@ ${chapterContent.slice(0, 6000)}`;
   private buildAuthorityContextBlock(authorityContext?: StateValidationAuthorityContext): string {
     if (!authorityContext) return "## Authority / Cross-Truth Context\n(no authority context provided)";
 
-    const storyFrame = this.truncateHead(authorityContext.storyFrame ?? "", 3500);
-    const bookRules = this.truncateHead(authorityContext.bookRules ?? "", 2000);
-    const chapterSummaries = this.truncateTail(authorityContext.chapterSummaries ?? "", 3500);
+    const storyFrame = (authorityContext.storyFrame ?? "").trim();
+    const bookRules = (authorityContext.bookRules ?? "").trim();
+    const chapterSummaries = (authorityContext.chapterSummaries ?? "").trim();
 
     return [
       "## Authority / Cross-Truth Context",
@@ -162,18 +152,6 @@ ${chapterContent.slice(0, 6000)}`;
       "### recent chapter_summaries excerpt",
       chapterSummaries || "(empty)",
     ].join("\n");
-  }
-
-  private truncateHead(text: string, maxChars: number): string {
-    const trimmed = text.trim();
-    if (trimmed.length <= maxChars) return trimmed;
-    return `${trimmed.slice(0, maxChars).trimEnd()}\n\n[...truncated...]`;
-  }
-
-  private truncateTail(text: string, maxChars: number): string {
-    const trimmed = text.trim();
-    if (trimmed.length <= maxChars) return trimmed;
-    return `[...truncated...]\n\n${trimmed.slice(-maxChars).trimStart()}`;
   }
 
   private parseResult(content: string): ValidationResult {
@@ -192,15 +170,18 @@ ${chapterContent.slice(0, 6000)}`;
       throw new Error("LLM returned empty response");
     }
 
-    const verdictLine = lines[0]!;
-    if (!/^(PASS|FAIL)$/i.test(verdictLine)) {
+    const verdictIndex = findVerdictLineIndex(lines);
+    if (verdictIndex < 0) {
       throw new Error("State validator returned invalid response");
     }
+    const verdictLine = lines[verdictIndex]!;
     const passed = /^PASS$/i.test(verdictLine);
 
     const warnings: ValidationWarning[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i]!;
+    const warningLines = passed
+      ? lines.slice(verdictIndex + 1)
+      : [...lines.slice(0, verdictIndex), ...lines.slice(verdictIndex + 1)];
+    for (const line of warningLines) {
       if (/^(PASS|FAIL)$/i.test(line)) continue;
 
       const categoryMatch = line.match(/^\[([^\]]+)\]\s*(.+)$/);
@@ -256,6 +237,15 @@ ${chapterContent.slice(0, 6000)}`;
       return null;
     }
   }
+}
+
+function findVerdictLineIndex(lines: readonly string[]): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^(PASS|FAIL)$/i.test(lines[index]!)) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function extractBalancedJsonObject(text: string): string | null {

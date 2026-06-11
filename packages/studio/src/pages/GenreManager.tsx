@@ -238,6 +238,8 @@ export function GenreManager({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFu
   const [formMode, setFormMode] = useState<"hidden" | "create" | "edit">("hidden");
   const [form, setForm] = useState<GenreFormData>(EMPTY_FORM);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+  const formSectionRef = useRef<HTMLDivElement>(null);
 
   // Keep the built-in list visible on mobile even if a runtime config uses a
   // different language code or the language switch has not finished syncing.
@@ -260,21 +262,36 @@ export function GenreManager({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFu
     setFormMode("create");
   };
 
-  const openEditForm = () => {
-    if (!detail) return;
-    setForm({
-      id: detail.profile.id,
-      name: detail.profile.name,
-      language: detail.profile.language as "zh" | "en",
-      chapterTypes: detail.profile.chapterTypes.join(", "),
-      fatigueWords: detail.profile.fatigueWords.join(", "),
-      numericalSystem: detail.profile.numericalSystem,
-      powerScaling: detail.profile.powerScaling,
-      eraResearch: detail.profile.eraResearch ?? false,
-      pacingRule: detail.profile.pacingRule,
-      body: detail.body,
-    });
-    setFormMode("edit");
+  const openEditForm = async () => {
+    if (!validSelected || loadingEdit) return;
+    setLoadingEdit(true);
+    try {
+      const currentDetail = detail ?? await fetchJson<GenreDetail>(`/genres/${validSelected}`);
+      setForm({
+        id: currentDetail.profile.id,
+        name: currentDetail.profile.name,
+        language: currentDetail.profile.language as "zh" | "en",
+        chapterTypes: currentDetail.profile.chapterTypes.join(", "),
+        fatigueWords: currentDetail.profile.fatigueWords.join(", "),
+        numericalSystem: currentDetail.profile.numericalSystem,
+        powerScaling: currentDetail.profile.powerScaling,
+        eraResearch: currentDetail.profile.eraResearch ?? false,
+        pacingRule: currentDetail.profile.pacingRule,
+        body: currentDetail.body,
+      });
+      setFormMode("edit");
+      window.setTimeout(() => {
+        formSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 0);
+    } catch (e) {
+      await appAlert({
+        title: "读取题材失败",
+        message: e instanceof Error ? e.message : "无法读取题材详情",
+        tone: "danger",
+      });
+    } finally {
+      setLoadingEdit(false);
+    }
   };
 
   const closeForm = () => {
@@ -365,7 +382,7 @@ export function GenreManager({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFu
       </div>
 
       {formMode !== "hidden" && (
-        <div className={`min-w-0 rounded-lg border p-4 sm:p-6 ${c.cardStatic}`}>
+        <div ref={formSectionRef} className={`min-w-0 scroll-mt-20 rounded-lg border p-4 sm:p-6 ${c.cardStatic}`}>
           <h2 className="text-lg font-medium mb-4">
             {formMode === "create" ? t("genre.createNew") : `${t("common.edit")}: ${form.id}`}
           </h2>
@@ -416,11 +433,12 @@ export function GenreManager({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFu
                 </div>
                 <div className="flex min-w-0 flex-wrap gap-2">
                   <button
-                    onClick={openEditForm}
-                    className={`inline-flex min-h-10 touch-manipulation items-center gap-1.5 rounded-md px-3 py-2 text-sm ${c.btnSecondary}`}
+                    onClick={() => void openEditForm()}
+                    disabled={loadingEdit}
+                    className={`inline-flex min-h-10 touch-manipulation items-center gap-1.5 rounded-md px-3 py-2 text-sm disabled:opacity-50 ${c.btnSecondary}`}
                   >
                     <Pencil size={14} />
-                    {t("common.edit")}
+                    {loadingEdit ? t("common.loading") : t("common.edit")}
                   </button>
                   {selectedGenre?.source === "project" && (
                     <button

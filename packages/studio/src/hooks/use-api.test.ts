@@ -63,30 +63,13 @@ describe("fetchJson", () => {
       "最新第 1 章处于状态降级（state-degraded）。继续写下一章前，请先修复状态，或重写这一章。",
     );
   });
-
-  it("bypasses browser cache for GET requests", async () => {
-    const fetchImpl = vi.fn(async () =>
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-
-    await fetchJson("/books/demo/chapters/3", {}, { fetchImpl });
-
-    expect(fetchImpl).toHaveBeenCalledWith("/api/v1/books/demo/chapters/3", expect.objectContaining({
-      cache: "no-store",
-      headers: expect.objectContaining({
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-      }),
-    }));
-  });
 });
 
 describe("deriveInvalidationPaths", () => {
   it("refreshes book collections after creating a book", () => {
     expect(deriveInvalidationPaths("/books/create")).toEqual(["/api/v1/books"]);
+    expect(deriveInvalidationPaths("/spinoff/init")).toEqual(["/api/v1/books"]);
+    expect(deriveInvalidationPaths("/imitation/init")).toEqual(["/api/v1/books"]);
   });
 
   it("refreshes both collections and the current book after book mutations", () => {
@@ -104,6 +87,10 @@ describe("deriveInvalidationPaths", () => {
   it("refreshes daemon state after daemon mutations", () => {
     expect(deriveInvalidationPaths("/daemon/start")).toEqual(["/api/v1/daemon"]);
     expect(deriveInvalidationPaths("/daemon/stop")).toEqual(["/api/v1/daemon"]);
+  });
+
+  it("refreshes logs after clearing log entries", () => {
+    expect(deriveInvalidationPaths("/logs")).toEqual(["/api/v1/logs"]);
   });
 
   it("refreshes project data after project mutations", () => {

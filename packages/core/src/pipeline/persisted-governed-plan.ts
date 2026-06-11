@@ -1,6 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import YAML from "js-yaml";
 import type { PlanChapterOutput } from "../agents/planner.js";
 import {
   ChapterIntentSchema,
@@ -9,9 +8,10 @@ import {
 import { parseMemo, PlannerParseError } from "../utils/chapter-memo-parser.js";
 
 /**
- * Phase 4: persisted governed plans are stored as a single markdown file
- * containing YAML frontmatter (memo + intent extensions + plannerInputs)
- * followed by the memo body (7 required sections).
+ * Persisted governed plans are stored as a human-readable markdown file.
+ * The model-facing memo protocol is also Markdown; we do not require LLMs to
+ * emit YAML frontmatter. If an old YAML-frontmatter cache is encountered, this
+ * loader returns null and the runner re-plans.
  *
  * File path: `story/runtime/chapter-NNNN.plan.md`
  *
@@ -41,23 +41,7 @@ export async function savePersistedPlan(
   plan: PlanChapterOutput,
 ): Promise<void> {
   const { intent, memo, plannerInputs } = plan;
-  const frontmatter = {
-    chapter: memo.chapter,
-    goal: memo.goal,
-    isGoldenOpening: memo.isGoldenOpening,
-    threadRefs: memo.threadRefs,
-    intent: {
-      goal: intent.goal,
-      outlineNode: intent.outlineNode,
-      arcContext: intent.arcContext,
-      mustKeep: intent.mustKeep,
-      mustAvoid: intent.mustAvoid,
-      styleEmphasis: intent.styleEmphasis,
-    },
-    plannerInputs: [...plannerInputs],
-  };
-  const yaml = YAML.dump(frontmatter, { lineWidth: -1 });
-  const content = `---\n${yaml}---\n${memo.body}\n`;
+  const content = renderPersistedPlanMarkdown(intent, memo, plannerInputs);
   await writeFile(planPath(bookDir, memo.chapter), content, "utf-8");
 }
 
@@ -72,33 +56,16 @@ export async function loadPersistedPlan(
     return loadLegacyIntentPlan(bookDir, chapterNumber);
   }
 
-  const match = raw.trim().match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
-  if (!match) return null;
-
-  let fm: unknown;
-  try {
-    fm = YAML.load(match[1]!);
-  } catch {
-    return null;
-  }
-  if (!fm || typeof fm !== "object" || Array.isArray(fm)) return null;
-  const f = fm as Record<string, unknown>;
-
-  if (typeof f.chapter !== "number" || f.chapter !== chapterNumber) return null;
-  if (typeof f.isGoldenOpening !== "boolean") return null;
-  if (!f.intent || typeof f.intent !== "object") return null;
+  if (raw.trimStart().startsWith("---")) return null;
 
   // Reconstruct memo via the same strict parser planner uses. This guarantees
   // the 7 required section headings are still present — any drift triggers
   // re-planning (null return).
   let memo;
   try {
-    const reconstructed = `---\n${YAML.dump({
-      chapter: f.chapter,
-      goal: f.goal,
-      threadRefs: f.threadRefs,
-    })}---\n${match[2]!}`;
-    memo = parseMemo(reconstructed, chapterNumber, f.isGoldenOpening);
+    const memoBlock = extractMarkedBlock(raw, "MEMO");
+    if (!memoBlock) return null;
+    memo = parseMemo(memoBlock, chapterNumber, readBooleanField(raw, "Golden Opening") ?? false);
   } catch (error) {
     if (error instanceof PlannerParseError) return null;
     throw error;
@@ -108,15 +75,18 @@ export async function loadPersistedPlan(
   try {
     intent = ChapterIntentSchema.parse({
       chapter: chapterNumber,
-      ...(f.intent as Record<string, unknown>),
+      goal: readField(raw, "Intent Goal") ?? memo.goal,
+      outlineNode: readOptionalField(raw, "Outline Node"),
+      arcContext: readOptionalField(raw, "Arc Context"),
+      mustKeep: readListSection(raw, "Must Keep"),
+      mustAvoid: readListSection(raw, "Must Avoid"),
+      styleEmphasis: readListSection(raw, "Style Emphasis"),
     });
   } catch {
     return null;
   }
 
-  const plannerInputs = Array.isArray(f.plannerInputs)
-    ? f.plannerInputs.filter((value): value is string => typeof value === "string")
-    : [];
+  const plannerInputs = readListSection(raw, "Planner Inputs");
 
   // intentMarkdown is a display artifact — read the sibling .intent.md so we
   // surface the same content downstream consumers expect. If it's missing we
@@ -135,6 +105,95 @@ export async function loadPersistedPlan(
     plannerInputs,
     runtimePath: intentPath(bookDir, chapterNumber),
   };
+}
+
+function renderPersistedPlanMarkdown(
+  intent: ChapterIntent,
+  memo: PlanChapterOutput["memo"],
+  plannerInputs: ReadonlyArray<string>,
+): string {
+  return [
+    `# Chapter ${memo.chapter} Plan`,
+    "",
+    "## Metadata",
+    `Chapter: ${memo.chapter}`,
+    `Golden Opening: ${memo.isGoldenOpening ? "yes" : "no"}`,
+    "",
+    "<!-- INKOS_PLAN_MEMO_START -->",
+    renderMemoMarkdown(memo),
+    "<!-- INKOS_PLAN_MEMO_END -->",
+    "",
+    "## Intent",
+    `Intent Goal: ${intent.goal}`,
+    `Outline Node: ${intent.outlineNode ?? "(none)"}`,
+    `Arc Context: ${intent.arcContext ?? "(none)"}`,
+    "",
+    "### Must Keep",
+    renderList(intent.mustKeep),
+    "",
+    "### Must Avoid",
+    renderList(intent.mustAvoid),
+    "",
+    "### Style Emphasis",
+    renderList(intent.styleEmphasis),
+    "",
+    "## Planner Inputs",
+    renderList(plannerInputs),
+    "",
+  ].join("\n");
+}
+
+function renderMemoMarkdown(memo: PlanChapterOutput["memo"]): string {
+  return [
+    `# 第 ${memo.chapter} 章 memo`,
+    "",
+    "## 本章目标",
+    memo.goal,
+    "",
+    "## 关联线索",
+    renderList(memo.threadRefs),
+    "",
+    memo.body.trim(),
+  ].join("\n");
+}
+
+function renderList(items: ReadonlyArray<string>): string {
+  return items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- none";
+}
+
+function extractMarkedBlock(markdown: string, name: string): string | undefined {
+  const match = markdown.match(new RegExp(`<!--\\s*INKOS_PLAN_${name}_START\\s*-->\\s*([\\s\\S]*?)\\s*<!--\\s*INKOS_PLAN_${name}_END\\s*-->`, "m"));
+  return match?.[1]?.trim();
+}
+
+function readField(markdown: string, label: string): string | undefined {
+  const match = markdown.match(new RegExp(`^${escapeRegExp(label)}:\\s*(.*)$`, "m"));
+  const value = match?.[1]?.trim();
+  return value && value !== "(none)" ? value : undefined;
+}
+
+function readOptionalField(markdown: string, label: string): string | undefined {
+  const value = readField(markdown, label);
+  return value && isMeaningfulLegacyValue(value) ? value : undefined;
+}
+
+function readBooleanField(markdown: string, label: string): boolean | undefined {
+  const value = readField(markdown, label);
+  if (!value) return undefined;
+  if (/^(yes|true|是)$/i.test(value)) return true;
+  if (/^(no|false|否)$/i.test(value)) return false;
+  return undefined;
+}
+
+function readListSection(markdown: string, heading: string): string[] {
+  const section = markdown.match(new RegExp(`^#{2,3}\\s+${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n#{2,3}\\s+|(?![\\s\\S]))`, "m"))?.[1]?.trim();
+  if (!section) return [];
+  return section
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("-"))
+    .map((line) => line.replace(/^-\s*/, "").trim())
+    .filter((line) => line.length > 0 && line.toLowerCase() !== "none");
 }
 
 async function loadLegacyIntentPlan(

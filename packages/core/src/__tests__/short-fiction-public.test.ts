@@ -80,6 +80,7 @@ describe("public short-fiction chain", () => {
 
     expect(draft.chapters[1]?.title).toBe("她逼小三亲自递上了最后的刀");
     expect(draft.chapters[1]?.content).toContain("陈磊的慌张");
+    expect(draft.chapters[1]?.content).not.toContain("陆景琛踹开老宅院门");
     expect(draft.chapters[2]?.content).toContain("直播链接");
     expect(() => validateShortFictionDraftForFinal(draft, { expectedChapters: 3 })).not.toThrow();
   });
@@ -202,7 +203,7 @@ describe("public short-fiction chain", () => {
     const originalFetch = globalThis.fetch;
     process.env.INKOS_TEST_COVER_KEY = "sk-cover";
     try {
-      const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      const fetchMock = vi.fn(async (_url: unknown, _init?: { readonly body?: unknown }) => new Response(JSON.stringify({
         data: [{ b64_json: "ZmFrZQ==" }],
       }), { status: 200, headers: { "content-type": "application/json" } }));
       globalThis.fetch = fetchMock as never;
@@ -232,6 +233,11 @@ describe("public short-fiction chain", () => {
           body: expect.stringContaining("离婚协议他递了三年"),
         }),
       );
+      const body = String(fetchMock.mock.calls[0]?.[1]?.body ?? "");
+      expect(body).toContain("按用户给出的标题、简介、卖点和视觉要求生成封面图。");
+      expect(body).not.toContain("不添加文字");
+      expect(body).not.toContain("水印");
+      expect(body).not.toContain("固定模板");
     } finally {
       globalThis.fetch = originalFetch;
       delete process.env.INKOS_TEST_COVER_KEY;

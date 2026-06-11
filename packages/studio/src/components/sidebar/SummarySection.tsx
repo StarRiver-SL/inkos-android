@@ -1,24 +1,39 @@
-import { useEffect } from "react";
-import { LazyStreamdown } from "../ai-elements/lazy-streamdown";
+import { useEffect, useState } from "react";
+import { Streamdown } from "streamdown";
+import { cjk } from "@streamdown/cjk";
+import { code } from "@streamdown/code";
+import { math } from "@streamdown/math";
+import { mermaid } from "@streamdown/mermaid";
 import { useChatStore } from "../../store/chat";
-import type { BookSummary } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
+import { FrontmatterCards } from "./FrontmatterCards";
+import {
+  firstParagraph,
+  frontmatterToCards,
+  type TruthFrontmatter,
+} from "../../lib/truth-display";
+
+const streamdownPlugins = { cjk, code, math, mermaid };
 
 const SIDEBAR_MD_CLASS =
-  "text-xs text-muted-foreground leading-relaxed " +
+  "text-[15px] text-muted-foreground leading-7 " +
   "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 " +
-  "[&>p+p]:mt-1.5 [&_strong]:text-foreground [&_strong]:font-medium " +
+  "[&>p+p]:mt-2 [&_strong]:text-foreground [&_strong]:font-medium " +
   "[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_li]:my-0.5 " +
-  "[&_h1]:hidden [&_h2]:text-xs [&_h2]:font-medium [&_h2]:text-foreground [&_h2]:mt-1.5 [&_h2]:mb-0.5 " +
-  "[&_h3]:text-xs [&_h3]:font-medium [&_h3]:text-foreground [&_h3]:mt-1.5 [&_h3]:mb-0.5 " +
-  "[&_code]:text-[11px] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-secondary/60";
+  "[&_h1]:hidden [&_h2]:text-[15px] [&_h2]:font-medium [&_h2]:text-foreground [&_h2]:mt-2 [&_h2]:mb-1 " +
+  "[&_h3]:text-[15px] [&_h3]:font-medium [&_h3]:text-foreground [&_h3]:mt-2 [&_h3]:mb-1 " +
+  "[&_code]:text-[12px] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-secondary/60";
 
-const bookSummaryCache = new Map<string, BookSummary | null>();
+interface LegacySummary {
+  world: string;
+  protagonist: string;
+  cast: string;
+}
 
-function parseStoryBible(content: string): BookSummary {
-  const normalized = content.replace(/^---[\s\S]*?---\s*/m, "").trim();
-  const sections = normalized.split(/^##\s+/m);
+// Pre-Phase-5 books only have story_bible.md (prose with ## sections).
+function parseStoryBible(content: string): LegacySummary {
+  const sections = content.split(/^##\s+/m);
   let world = "";
   let protagonist = "";
   let cast = "";
@@ -33,15 +48,6 @@ function parseStoryBible(content: string): BookSummary {
     }
   }
 
-  if (!world) {
-    world = normalized
-      .split(/\n{2,}/)
-      .map((part) => part.trim())
-      .filter((part) => part && !/^#/.test(part))
-      .slice(0, 2)
-      .join("\n\n");
-  }
-
   return { world, protagonist, cast };
 }
 
@@ -50,66 +56,104 @@ interface SummarySectionProps {
 }
 
 export function SummarySection({ bookId }: SummarySectionProps) {
-  const summary = useChatStore((s) => s.bookSummary);
-  const setBookSummary = useChatStore((s) => s.setBookSummary);
+  // Phase 5 layout: structured frontmatter + prose, sourced from story_frame.md.
+  const [frontmatter, setFrontmatter] = useState<TruthFrontmatter | null>(null);
+  const [worldOverview, setWorldOverview] = useState("");
+  // Pre-Phase-5 fallback.
+  const [legacy, setLegacy] = useState<LegacySummary | null>(null);
+  const openArtifact = useChatStore((s) => s.openArtifact);
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
 
   useEffect(() => {
-    let ignore = false;
-    if (bookSummaryCache.has(bookId)) {
-      setBookSummary(bookSummaryCache.get(bookId) ?? null);
-    } else {
-      setBookSummary(null);
-    }
+    let cancelled = false;
+    setFrontmatter(null);
+    setWorldOverview("");
+    setLegacy(null);
 
-    fetchJson<{ content: string | null }>(`/books/${bookId}/truth/outline/story_frame.md`)
-      .then((data) => {
-        if (ignore) return;
-        const nextSummary = data.content ? parseStoryBible(data.content) : null;
-        bookSummaryCache.set(bookId, nextSummary);
-        setBookSummary(nextSummary);
+    fetchJson<{ content: string | null; frontmatter?: TruthFrontmatter; body?: string }>(
+      `/books/${bookId}/truth/outline/story_frame.md`,
+    )
+      .then(async (data) => {
+        if (cancelled) return;
+        if (data.content) {
+          setFrontmatter(data.frontmatter ?? null);
+          setWorldOverview(firstParagraph(data.body ?? data.content));
+          return;
+        }
+        // Old book — no outline/story_frame.md. Fall back to story_bible.md.
+        const bible = await fetchJson<{ content: string | null }>(
+          `/books/${bookId}/truth/story_bible.md`,
+        ).catch(() => ({ content: null }));
+        if (!cancelled && bible.content) setLegacy(parseStoryBible(bible.content));
       })
       .catch(() => {
-        fetchJson<{ content: string | null }>(`/books/${bookId}/truth/story_bible.md`)
-          .then((data) => {
-            if (ignore) return;
-            const nextSummary = data.content ? parseStoryBible(data.content) : null;
-            bookSummaryCache.set(bookId, nextSummary);
-            setBookSummary(nextSummary);
-          })
-          .catch(() => {});
+        if (!cancelled) setLegacy(null);
       });
 
     return () => {
-      ignore = true;
+      cancelled = true;
     };
-  }, [bookId, bookDataVersion, setBookSummary]);
+  }, [bookId, bookDataVersion]);
 
-  if (!summary) return null;
+  const cards = frontmatterToCards(frontmatter);
+
+  if (cards.length === 0 && !worldOverview && !legacy) return null;
+
+  if (legacy) {
+    return (
+      <>
+        {legacy.world && (
+          <SidebarCard title="世界观">
+            <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+              {legacy.world}
+            </Streamdown>
+          </SidebarCard>
+        )}
+        {(legacy.protagonist || legacy.cast) && (
+          <SidebarCard title="角色">
+            {legacy.protagonist && (
+              <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+                {legacy.protagonist}
+              </Streamdown>
+            )}
+            {legacy.cast && (
+              <div className={legacy.protagonist ? "mt-2" : undefined}>
+                <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+                  {legacy.cast}
+                </Streamdown>
+              </div>
+            )}
+          </SidebarCard>
+        )}
+      </>
+    );
+  }
+
+  // Worldview etc. is a section inside story_frame.md ("故事基石"); these
+  // summary cards are a glance, so offer a button to open the full file.
+  const openFull = (
+    <button
+      onClick={() => openArtifact("outline/story_frame.md")}
+      className="mt-2 text-[15px] leading-6 text-primary hover:underline font-['SimSun','Songti_SC','STSong',serif]"
+    >
+      查看完整设定 →
+    </button>
+  );
 
   return (
     <>
-      {summary.world && (
-        <SidebarCard title="世界观">
-          <LazyStreamdown className={SIDEBAR_MD_CLASS}>
-            {summary.world}
-          </LazyStreamdown>
+      {cards.length > 0 && (
+        <SidebarCard title="故事基石">
+          <FrontmatterCards cards={cards} />
+          {!worldOverview && openFull}
         </SidebarCard>
       )}
-      {(summary.protagonist || summary.cast) && (
-        <SidebarCard title="角色">
-          {summary.protagonist && (
-            <LazyStreamdown className={SIDEBAR_MD_CLASS}>
-              {summary.protagonist}
-            </LazyStreamdown>
-          )}
-          {summary.cast && (
-            <div className={summary.protagonist ? "mt-2" : undefined}>
-              <LazyStreamdown className={SIDEBAR_MD_CLASS}>
-                {summary.cast}
-              </LazyStreamdown>
-            </div>
-          )}
+      {worldOverview && (
+        <SidebarCard title="世界观">
+          <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+            {worldOverview}
+          </Streamdown>
+          {openFull}
         </SidebarCard>
       )}
     </>

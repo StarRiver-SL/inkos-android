@@ -59,3 +59,28 @@ describe("analyzeStyle", () => {
     expect(hasHeKan).toBe(true);
   });
 });
+
+describe("analyzeStyle (English)", () => {
+  const sampleEn = [
+    "He stepped onto the cracked stone. He looked down. He smiled.",
+    "",
+    "The eyes in the dark watched him like a cold winter wind. He was not afraid. He had faced worse. He had faced far more dangerous men. He gripped the hilt and walked toward them.",
+  ].join("\n");
+
+  it("measures sentence length in words, not characters", () => {
+    const profile = analyzeStyle(sampleEn, "ref", "en");
+    expect(profile.avgSentenceLength).toBeGreaterThan(0);
+    expect(profile.avgSentenceLength).toBeLessThan(40); // words; a char count would be far higher
+  });
+
+  it("computes word-level vocabulary diversity", () => {
+    const profile = analyzeStyle(sampleEn, "ref", "en");
+    expect(profile.vocabularyDiversity).toBeGreaterThan(0);
+    expect(profile.vocabularyDiversity).toBeLessThanOrEqual(1);
+  });
+
+  it("detects repeated English sentence openings by word", () => {
+    const profile = analyzeStyle(sampleEn, "ref", "en");
+    expect(profile.topPatterns.some((p) => p.toLowerCase().startsWith("he"))).toBe(true);
+  });
+});

@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand";
-import type { ChatStore, MessageActions, PipelineStage, TokenUsageSnapshot } from "../../types";
+import type { ChatStore, MessageActions, MessagePart, PipelineStage, TokenUsageSnapshot, ToolExecution } from "../../types";
 import { shouldRefreshSidebarForTool } from "../../message-policy";
 import {
   deriveFlat,
@@ -16,6 +16,20 @@ import {
 
 type SliceSet = Parameters<StateCreator<ChatStore, [], [], MessageActions>>[0];
 type SliceGet = Parameters<StateCreator<ChatStore, [], [], MessageActions>>[1];
+
+type ContextCompressionCategory = "session_context" | "story_context";
+type ContextCompressionPhase = "start" | "end" | "error";
+
+interface ContextCompressionEventPayload {
+  readonly sessionId?: string;
+  readonly category?: ContextCompressionCategory;
+  readonly phase?: ContextCompressionPhase;
+  readonly message?: string;
+  readonly protectedTokens?: number;
+  readonly compressibleTokens?: number;
+  readonly budgetTokens?: number;
+  readonly sources?: readonly string[];
+}
 
 interface AttachSessionStreamListenersInput {
   sessionId: string;
@@ -74,15 +88,14 @@ function accumulateStreamTokenUsage(
   const previousAccumulated = previous?.streamAccumulatedTokens ?? 0;
   const previousCall = previous?.streamCallTokens ?? 0;
   const previousStatus = previous?.streamLastStatus;
-
   let accumulated = previousAccumulated;
   let callTokens = Math.max(0, currentCallTokens);
 
   if (normalizedStatus === "done" || normalizedStatus === "completed") {
-    if (previousStatus === "done" || previousStatus === "completed") {
-      accumulated = Math.max(accumulated, previous?.totalTokens ?? 0);
-    } else {
+    if (previousStatus !== "done" && previousStatus !== "completed") {
       accumulated += Math.max(previousCall, callTokens);
+    } else {
+      accumulated = Math.max(accumulated, previous?.totalTokens ?? 0);
     }
     callTokens = 0;
   } else if (previousStatus !== "done" && previousStatus !== "completed" && callTokens < previousCall) {
@@ -170,7 +183,6 @@ function stageMatchScore(stageLabel: string, incomingLabel: string): number {
   if (!stage || !incoming) return 0;
   if (stage === incoming) return 100;
   if (stage.includes(incoming) || incoming.includes(stage)) return 80;
-
   const keywordGroups = [
     ["准备", "输入"],
     ["撰写", "草稿", "正文", "创作"],
@@ -178,12 +190,10 @@ function stageMatchScore(stageLabel: string, incomingLabel: string): number {
     ["真相", "truth"],
     ["校验", "审计", "检查"],
     ["同步", "记忆", "索引"],
-    ["快照", "索引"],
     ["导出", "文件"],
     ["封面", "图片"],
     ["市场", "雷达"],
   ];
-
   let score = 0;
   for (const keywords of keywordGroups) {
     const stageHits = keywords.filter((keyword) => stage.includes(keyword)).length;
@@ -197,7 +207,6 @@ function advanceStagesFromLog(stages: PipelineStage[] | undefined, message: stri
   if (!stages || stages.length === 0) return stages;
   const stageLabel = extractStageLabelFromLog(message);
   if (!stageLabel) return stages;
-
   let bestIndex = -1;
   let bestScore = 0;
   stages.forEach((stage, index) => {
@@ -208,7 +217,6 @@ function advanceStagesFromLog(stages: PipelineStage[] | undefined, message: stri
     }
   });
   if (bestIndex < 0 || bestScore <= 0) return stages;
-
   return stages.map((stage, index) => {
     if (index < bestIndex) return { ...stage, status: "completed" as const, progress: undefined };
     if (index === bestIndex) return { ...stage, status: "active" as const };
@@ -240,10 +248,7 @@ function settleStagesAfterError(stages: PipelineStage[] | undefined): PipelineSt
   }));
 }
 
-function createTextDeltaBatcher(apply: (text: string) => void): {
-  push: (text: string) => void;
-  flush: () => void;
-} {
+function createTextDeltaBatcher(apply: (text: string) => void): { push: (text: string) => void; flush: () => void } {
   const isSmallTouchDevice = typeof window !== "undefined"
     && (window.innerWidth <= 700 || navigator.maxTouchPoints > 0);
   const maxBufferedChars = isSmallTouchDevice ? 600 : 240;
@@ -266,9 +271,7 @@ function createTextDeltaBatcher(apply: (text: string) => void): {
         flush();
         return;
       }
-      if (!timer) {
-        timer = setTimeout(flush, flushDelayMs);
-      }
+      if (!timer) timer = setTimeout(flush, flushDelayMs);
     },
     flush,
   };
@@ -329,7 +332,7 @@ export function attachSessionStreamListeners({
             type: "tool" as const,
             execution: {
               ...part.execution,
-              streamingText: appendBoundedText(part.execution.streamingText, text, 4000),
+              streamingText: appendBoundedText(part.execution.streamingText, text, 50_000),
             },
           };
         });
@@ -411,6 +414,22 @@ export function attachSessionStreamListeners({
       const data = event.data ? JSON.parse(event.data) : null;
       if (!sessionMatchesEvent(sessionId, data) || !data?.text) return;
       writeBatch.push(String(data.text));
+    } catch {
+      // ignore
+    }
+  });
+
+  streamEs.addEventListener("llm:delta", (event: MessageEvent) => {
+    try {
+      const data = event.data ? JSON.parse(event.data) : null;
+      if (!sessionMatchesEvent(sessionId, data) || !data?.text) return;
+      const current = get().sessions[sessionId]?.messages.find((message) => message.timestamp === streamTs);
+      const runningTool = current?.parts ? findRunningToolPart([...(current.parts ?? [])]) : undefined;
+      if (runningTool) {
+        writeBatch.push(String(data.text));
+      } else {
+        draftBatch.push(String(data.text));
+      }
     } catch {
       // ignore
     }
@@ -506,6 +525,41 @@ export function attachSessionStreamListeners({
       if (shouldRefreshSidebarForTool(data.tool as string)) {
         get().bumpBookDataVersion();
       }
+    } catch {
+      // ignore
+    }
+  });
+
+  streamEs.addEventListener("tool:update", (event: MessageEvent) => {
+    try {
+      const data = event.data ? JSON.parse(event.data) : null;
+      if (!sessionMatchesEvent(sessionId, data) || !data?.tool) return;
+      flushTextBatches();
+      const updateText = summarizeResult(data.partialResult);
+      if (!updateText) return;
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, (runtime) => {
+          const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
+          const runningTool = findRunningToolPart([...(stream.parts ?? [])]);
+          const parts = (stream.parts ?? []).map((part) => {
+            if (part.type !== "tool") return part;
+            const matchesId = typeof data.id === "string" && part.execution.id === data.id;
+            const matchesRunningTool = !data.id && part.execution.id === runningTool?.execution.id;
+            if (!matchesId && !matchesRunningTool) return part;
+            return {
+              type: "tool" as const,
+              execution: {
+                ...part.execution,
+                status: "processing" as const,
+                logs: [...(part.execution.logs ?? []), updateText].slice(-40),
+                stages: advanceStagesFromLog(part.execution.stages, updateText),
+              },
+            };
+          });
+          const flat = deriveFlat(parts);
+          return { messages: replaceLast(messages, { ...stream, ...flat, parts }) };
+        }),
+      }));
     } catch {
       // ignore
     }
@@ -629,7 +683,114 @@ export function attachSessionStreamListeners({
     }
   });
 
+  streamEs.addEventListener("context:compression", (event: MessageEvent) => {
+    try {
+      const data = event.data ? JSON.parse(event.data) as ContextCompressionEventPayload : null;
+      if (!sessionMatchesEvent(sessionId, data) || !data?.category || !data.phase) return;
+      flushTextBatches();
+      const category = data.category;
+      const phase = data.phase;
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, (runtime) => {
+          const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
+          const parts = [...(stream.parts ?? [])];
+          applyContextCompressionToParts(parts, category, phase, data);
+          const flat = deriveFlat(parts);
+          return { messages: replaceLast(messages, { ...stream, ...flat, parts }) };
+        }),
+      }));
+    } catch {
+      // ignore
+    }
+  });
+
   streamEs.addEventListener("result", () => {
     flushTextBatches();
   });
+}
+
+function compressionLabel(category: ContextCompressionCategory): string {
+  return category === "session_context" ? "整理会话记忆" : "压缩故事上下文";
+}
+
+function compressionSourceSummary(sources: readonly string[] | undefined): string {
+  if (!sources || sources.length === 0) return "";
+  const preview = sources.slice(0, 3).join(", ");
+  const suffix = sources.length > 3 ? ` +${sources.length - 3}` : "";
+  return `来源 ${sources.length}: ${preview}${suffix}`;
+}
+
+function compressionProgress(data: ContextCompressionEventPayload): PipelineStage["progress"] | undefined {
+  if (data.phase !== "start") return undefined;
+  const parts = [
+    data.protectedTokens !== undefined ? `保护 ${data.protectedTokens}` : "",
+    data.compressibleTokens !== undefined ? `可压缩 ${data.compressibleTokens}` : "",
+    data.budgetTokens !== undefined ? `预算 ${data.budgetTokens}` : "",
+    compressionSourceSummary(data.sources),
+  ].filter(Boolean);
+  return {
+    status: parts.length > 0 ? parts.join(" · ") : "compressing",
+    elapsedMs: 0,
+    totalChars: 0,
+    chineseChars: 0,
+  };
+}
+
+function upsertCompressionStage(
+  stages: PipelineStage[] | undefined,
+  category: ContextCompressionCategory,
+  phase: ContextCompressionPhase,
+  data: ContextCompressionEventPayload,
+): PipelineStage[] {
+  const label = compressionLabel(category);
+  const found = stages?.some((stage) => stage.label === label) ?? false;
+  const base = found ? [...(stages ?? [])] : [...(stages ?? []), { label, status: "pending" as const }];
+  const status: PipelineStage["status"] = phase === "start" ? "active" : "completed";
+  return base.map((stage) =>
+    stage.label === label
+      ? { ...stage, status, progress: phase === "start" ? compressionProgress(data) : undefined }
+      : stage
+  );
+}
+
+function findRunningExecution(parts: MessagePart[]): ToolExecution | undefined {
+  const running = findRunningToolPart(parts);
+  return running?.execution;
+}
+
+function applyContextCompressionToParts(
+  parts: MessagePart[],
+  category: ContextCompressionCategory,
+  phase: ContextCompressionPhase,
+  data: ContextCompressionEventPayload,
+): void {
+  const running = category === "session_context" ? undefined : findRunningExecution(parts);
+  if (running) {
+    running.stages = upsertCompressionStage(running.stages, category, phase, data);
+    if (phase === "error") {
+      running.status = "error";
+      running.error = data.message ?? `${compressionLabel(category)}失败`;
+    }
+    return;
+  }
+
+  const id = `context-${category}`;
+  const existing = parts.find((part): part is { type: "tool"; execution: ToolExecution } =>
+    part.type === "tool" && part.execution.id === id
+  );
+  const status: ToolExecution["status"] = phase === "start" ? "running" : phase === "error" ? "error" : "completed";
+  const execution = existing?.execution ?? {
+    id,
+    tool: "context_compression",
+    label: compressionLabel(category),
+    status,
+    stages: [],
+    startedAt: Date.now(),
+  };
+  execution.status = status;
+  execution.label = compressionLabel(category);
+  execution.stages = upsertCompressionStage(execution.stages, category, phase, data);
+  if (phase !== "start") execution.completedAt = Date.now();
+  if (phase === "error") execution.error = data.message ?? `${compressionLabel(category)}失败`;
+  if (!existing) parts.push({ type: "tool", execution });
 }

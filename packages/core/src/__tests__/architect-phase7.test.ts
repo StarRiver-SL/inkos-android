@@ -120,6 +120,7 @@ describe("ArchitectAgent — Phase 7 extended hook frontmatter", () => {
     expect(system).toContain("回收卷");
     expect(system).toContain("核心");
     expect(system).toContain("半衰期");
+    expect(system).toContain("普通种子行不要写 open");
     // Core-hook budget guidance: 3-7 per book.
     expect(system).toContain("3-7 条");
     // The extended table header must appear in the prompt example.

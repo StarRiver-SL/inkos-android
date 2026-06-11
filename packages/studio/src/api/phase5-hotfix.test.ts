@@ -71,24 +71,15 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     PipelineRunner: MockPipelineRunner,
     Scheduler: MockScheduler,
     isNewLayoutBook,
+    // Real frontmatter parser — the truth GET uses it to split YAML frontmatter
+    // from prose body. It is a pure function, so reuse the real implementation.
+    tryParseBookRulesFrontmatter: actual.tryParseBookRulesFrontmatter,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
     isSafeBookId: actual.isSafeBookId,
-    ensureSemanticCacheStorage: vi.fn((projectRoot: string) => ({
-      sqliteAvailable: false,
-      path: join(projectRoot, ".inkos", "cache", "semantic-cache.db"),
-      fallbackPath: join(projectRoot, ".inkos", "cache", "semantic-cache.json"),
-    })),
     chatCompletion: chatCompletionMock,
     loadProjectConfig: loadProjectConfigMock,
-    listBookSessions: vi.fn(async () => []),
-    buildExportArtifact: vi.fn(async () => ({ content: "", filename: "export.txt" })),
-    clearIdleL1Caches: vi.fn(async () => 0),
-    installPresetSceneTemplates: vi.fn(async () => {}),
-    getHeadroomSavingsTelemetry: vi.fn(() => ({})),
-    diffHeadroomSavingsTelemetry: vi.fn(() => ({})),
-    GLOBAL_CONFIG_DIR: join(tmpdir(), "inkos-global-config"),
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
 });
@@ -140,7 +131,7 @@ describe("Phase 5 hotfix 1 — Studio truth file endpoints", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    await rm(root, { recursive: true, force: true });
   });
 
   it("serves outline/story_frame.md content (Phase 5 authoritative path)", async () => {
@@ -161,6 +152,64 @@ describe("Phase 5 hotfix 1 — Studio truth file endpoints", () => {
     expect(body.content).toContain("# Frame prose");
     expect(body.legacy).toBeUndefined();
   }, 10_000);
+
+  it("parses story_frame.md YAML frontmatter into structured fields + prose body", async () => {
+    await writeFile(
+      join(storyDir, "outline/story_frame.md"),
+      [
+        "---",
+        "version: \"1.0\"",
+        "protagonist:",
+        "  name: 陈烬",
+        "genreLock:",
+        "  primary: 都市悬疑",
+        "prohibitions:",
+        "  - 不写穿越",
+        "---",
+        "",
+        "# 世界观",
+        "潮湿的港口城市。",
+      ].join("\n"),
+      "utf-8",
+    );
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request(
+      "http://localhost/api/v1/books/hotfix-book/truth/outline/story_frame.md",
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      content: string;
+      body?: string;
+      frontmatter?: { protagonist?: { name?: string }; genreLock?: { primary?: string }; prohibitions?: string[] };
+    };
+    // Raw content stays intact (editor round-trips it unchanged).
+    expect(body.content).toContain("---");
+    expect(body.content).toContain("protagonist:");
+    // Structured fields surface for friendly cards.
+    expect(body.frontmatter?.protagonist?.name).toBe("陈烬");
+    expect(body.frontmatter?.genreLock?.primary).toBe("都市悬疑");
+    expect(body.frontmatter?.prohibitions).toEqual(["不写穿越"]);
+    // Body is the prose with the frontmatter stripped — no raw YAML keys.
+    expect(body.body).toContain("潮湿的港口城市");
+    expect(body.body).not.toContain("protagonist:");
+  });
+
+  it("returns no frontmatter for a file without a YAML block (plain prose stays plain)", async () => {
+    await writeFile(join(storyDir, "outline/volume_map.md"), "# 卷纲\n第一卷：开端。", "utf-8");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request(
+      "http://localhost/api/v1/books/hotfix-book/truth/outline/volume_map.md",
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json() as { content: string; frontmatter?: unknown; body?: string };
+    expect(body.content).toContain("第一卷");
+    expect(body.frontmatter).toBeUndefined();
+    expect(body.body).toBeUndefined();
+  });
 
   it("serves roles/主要角色/<name>.md content", async () => {
     await writeFile(

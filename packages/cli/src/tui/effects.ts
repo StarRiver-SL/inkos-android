@@ -288,7 +288,6 @@ export function intentToBadge(intent: string, locale: TuiLocale = resolveTuiLoca
         pause_book: " PAUSE ",
         list_books: " BOOKS ",
         select_book: " SELECT ",
-        switch_mode: " MODE ",
         rename_entity: " RENAME ",
         patch_chapter_text: " PATCH ",
         edit_truth: " TRUTH ",
@@ -303,7 +302,6 @@ export function intentToBadge(intent: string, locale: TuiLocale = resolveTuiLoca
         pause_book: " 暂停 ",
         list_books: " 作品 ",
         select_book: " 选择 ",
-        switch_mode: " 模式 ",
         rename_entity: " 改名 ",
         patch_chapter_text: " 修补 ",
         edit_truth: " 真相 ",
@@ -318,7 +316,6 @@ export function intentToBadge(intent: string, locale: TuiLocale = resolveTuiLoca
     pause_book: bgYellow,
     list_books: bgGray,
     select_book: bgGreen,
-    switch_mode: bgCyan,
     rename_entity: bgYellow,
     patch_chapter_text: bgBlue,
     edit_truth: bgGreen,
@@ -341,7 +338,6 @@ export function intentToTheme(intent: string): string {
     pause_book: "loading",
     list_books: "loading",
     select_book: "loading",
-    switch_mode: "loading",
     rename_entity: "composing",
     patch_chapter_text: "revising",
     edit_truth: "composing",
@@ -513,14 +509,14 @@ export function buildStyledHelpSections(locale: TuiLocale = resolveTuiLocale()):
 function buildHelpFooter(locale: TuiLocale): { readonly title: string; readonly examples: readonly string[] } {
   if (locale === "en") {
     return {
-      title: "Natural language also works:",
-      examples: ['"continue writing" "write next chapter" "pause" "rename Lin Jin to Zhang San"'],
+      title: "Use slash commands for actions:",
+      examples: ['"/write" "/rewrite 3" "/pause" "/rename Lin Jin => Zhang San"'],
     };
   }
 
   return {
-    title: "自然语言同样可用：",
-    examples: ['"继续写" "写下一章" "暂停" "把林烬改成张三"'],
+    title: "执行动作请使用 slash 命令：",
+    examples: ['"/write" "/rewrite 3" "/pause" "/rename 林烬 => 张三"'],
   };
 }
 

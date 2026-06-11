@@ -4,6 +4,7 @@ import type {
   ContextPackage,
   RuleStack,
 } from "../models/input-governance.js";
+import { estimateTextTokens } from "../llm/provider.js";
 import {
   ChapterTraceSchema,
   RuleStackSchema,
@@ -87,12 +88,57 @@ export function buildGovernedTrace(params: {
   readonly plan: PlanChapterOutput;
   readonly contextPackage: ContextPackage;
   readonly composerInputs: ReadonlyArray<string>;
+  readonly notes?: ReadonlyArray<string>;
 }): ChapterTrace {
+  const protectedEntries = params.contextPackage.selectedContext.filter((entry) =>
+    isProtectedContextSource(entry.source),
+  );
+  const compressibleEntries = params.contextPackage.selectedContext.filter((entry) =>
+    !isProtectedContextSource(entry.source),
+  );
+  const protectedTokens = sumContextTokens(protectedEntries);
+  const compressibleTokens = sumContextTokens(compressibleEntries);
+
   return ChapterTraceSchema.parse({
     chapter: params.chapterNumber,
     plannerInputs: params.plan.plannerInputs,
     composerInputs: params.composerInputs,
     selectedSources: params.contextPackage.selectedContext.map((entry) => entry.source),
-    notes: [],
+    contextTiers: {
+      protectedSources: protectedEntries.map((entry) => entry.source),
+      compressibleSources: compressibleEntries.map((entry) => entry.source),
+    },
+    tokenBudget: {
+      protectedTokens,
+      compressibleTokens,
+      totalSelectedTokens: protectedTokens + compressibleTokens,
+    },
+    notes: params.notes ?? [],
   });
+}
+
+export function isProtectedContextSource(source: string): boolean {
+  return source === "runtime/chapter_memo"
+    || source === "story/current_focus.md"
+    || source === "story/author_intent.md"
+    || source === "story/audit_drift.md"
+    || source === "story/outline/story_frame.md"
+    || source.startsWith("story/outline/story_frame.md#")
+    || source === "story/story_bible.md"
+    || source === "story/outline/volume_map.md"
+    || source.startsWith("story/outline/volume_map.md#")
+    || source === "story/volume_outline.md"
+    || source === "story/parent_canon.md"
+    || source === "story/fanfic_canon.md"
+    || source.startsWith("story/current_state.md")
+    || source.startsWith("story/pending_hooks.md#")
+    || source.startsWith("runtime/hook_debt#");
+}
+
+function sumContextTokens(entries: ReadonlyArray<ContextPackage["selectedContext"][number]>): number {
+  return entries.reduce((total, entry) => total + estimateContextSourceTokens(entry), 0);
+}
+
+function estimateContextSourceTokens(entry: ContextPackage["selectedContext"][number]): number {
+  return estimateTextTokens([entry.source, entry.reason, entry.excerpt].filter(Boolean).join("\n"));
 }

@@ -1,4 +1,4 @@
-import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress, TokenOptimizationOptions } from "../llm/provider.js";
+import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress } from "../llm/provider.js";
 import { chatCompletion } from "../llm/provider.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
@@ -11,7 +11,6 @@ export interface AgentContext {
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
   readonly onTextDelta?: (text: string) => void;
-  readonly signal?: AbortSignal;
 }
 
 export abstract class BaseAgent {
@@ -27,27 +26,12 @@ export abstract class BaseAgent {
 
   protected async chat(
     messages: ReadonlyArray<LLMMessage>,
-    options?: {
-      readonly temperature?: number;
-      readonly maxTokens?: number;
-      readonly tokenOptimization?: Omit<TokenOptimizationOptions, "projectRoot" | "bookId">;
-      readonly targetWordCount?: number;
-      readonly taskType?: 'book-create' | 'chapter-write' | 'audit' | 'default';
-    },
+    options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    const { tokenOptimization, ...chatOptions } = options ?? {};
-    return await chatCompletion(this.ctx.client, this.ctx.model, messages, {
-      ...chatOptions,
+    return chatCompletion(this.ctx.client, this.ctx.model, messages, {
+      ...options,
       onStreamProgress: this.ctx.onStreamProgress,
       onTextDelta: this.ctx.onTextDelta,
-      signal: this.ctx.signal,
-      tokenOptimization: {
-        ...tokenOptimization,
-        projectRoot: this.ctx.projectRoot,
-        bookId: this.ctx.bookId,
-      },
-      targetWordCount: options?.targetWordCount,
-      taskType: options?.taskType,
     });
   }
 
@@ -67,12 +51,6 @@ export abstract class BaseAgent {
         webSearch: true,
         onStreamProgress: this.ctx.onStreamProgress,
         onTextDelta: this.ctx.onTextDelta,
-        signal: this.ctx.signal,
-        tokenOptimization: {
-          projectRoot: this.ctx.projectRoot,
-          bookId: this.ctx.bookId,
-          cache: false,
-        },
       });
     }
 

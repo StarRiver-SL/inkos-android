@@ -87,10 +87,19 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Verify official baseline and release checks
+        run: |
+          git fetch https://github.com/Narcooo/inkos.git refs/tags/v1.5.0:refs/tags/v1.5.0 --force
+          pnpm audit:upstream
+          pnpm audit:semantic-patterns
+          pnpm typecheck
+          pnpm test
+
       - name: Build Android web and Node runtime assets
         working-directory: packages/studio
         run: |
           pnpm run android:sync
+          pnpm run android:runtime:audit
 
       - name: Build signed release APK
         working-directory: packages/studio/android

@@ -54,6 +54,13 @@ vi.mock("@mariozechner/pi-ai", async () => {
     return "";
   }
 
+  function allVisibleUserText(messages: any[]): string {
+    return messages
+      .filter((message) => message?.role === "user")
+      .map((message) => textFromContent(message.content))
+      .join("\n");
+  }
+
   function assistant(content: any[], timestamp = Date.now()) {
     return {
       role: "assistant",
@@ -72,6 +79,7 @@ vi.mock("@mariozechner/pi-ai", async () => {
     const stream = actual.createAssistantMessageEventStream();
     const last = context.messages.at(-1);
     const prompt = lastVisibleUserText(context.messages);
+    const allUserText = allVisibleUserText(context.messages);
     const timestamp = Date.now();
     const message = last?.role === "toolResult"
       ? assistant([{ type: "text", text: "ok" }], timestamp)
@@ -92,6 +100,29 @@ vi.mock("@mariozechner/pi-ai", async () => {
             { type: "thinking", thinking: "raw thought", thinkingSignature: "sig-1" },
             { type: "text", text: "ok" },
           ], timestamp)
+        : prompt === "propose short"
+        ? assistant([
+            {
+              type: "toolCall",
+              id: "proposal-1",
+              name: "propose_action",
+              arguments: {
+                action: "short_run",
+                title: "生成短篇",
+                summary: "确认后生成一篇短篇。",
+                instruction: "生成一篇短篇。",
+              },
+            },
+          ], timestamp)
+        : prompt === "revise play"
+        ? assistant([
+            {
+              type: "toolCall",
+              id: "play-revise-1",
+              name: "play_revise",
+              arguments: { action: "regenerate_last" },
+            },
+          ], timestamp)
         : prompt === "use tool"
           ? assistant([
               {
@@ -99,6 +130,22 @@ vi.mock("@mariozechner/pi-ai", async () => {
                 id: "tool-1",
                 name: "read",
                 arguments: { path: "book-a/story/story_bible.md" },
+              },
+            ], timestamp)
+        : prompt === "raw chapter"
+          ? assistant([
+              {
+                type: "text",
+                text: "# 第2章\n\n我把账页摊在桌上，冷库的灯一盏盏暗下去。".repeat(80),
+              },
+            ], timestamp)
+        : prompt === "write next" || allUserText.includes("write next")
+          ? assistant([
+              {
+                type: "toolCall",
+                id: "writer-1",
+                name: "sub_agent",
+                arguments: { agent: "writer", instruction: "write next" },
               },
             ], timestamp)
           : assistant([{ type: "text", text: "ok" }], timestamp);
@@ -146,6 +193,7 @@ import {
   readTranscriptEvents,
 } from "../interaction/session-transcript.js";
 import { restoreAgentMessagesFromTranscript } from "../interaction/session-transcript-restore.js";
+import { PlayStore } from "../play/play-store.js";
 
 describe("runAgentSession cache — bookId switch", () => {
   let projectRoot: string;
@@ -176,6 +224,15 @@ describe("runAgentSession cache — bookId switch", () => {
     evictAgentCache("s-error");
     evictAgentCache("s-project-root-cache");
     evictAgentCache("s-interleave-seq");
+    evictAgentCache("s-context-window");
+    evictAgentCache("book-create-session");
+    evictAgentCache("book-create-confirmed-session");
+    evictAgentCache("short-session");
+    evictAgentCache("short-confirmed-session");
+    evictAgentCache("cover-confirmed-session");
+    evictAgentCache("play-session");
+    evictAgentCache("play-active-session");
+    evictAgentCache("play-confirmed-session");
     await rm(projectRoot, { recursive: true, force: true });
     if (otherProjectRoot) await rm(otherProjectRoot, { recursive: true, force: true });
   });
@@ -250,6 +307,38 @@ describe("runAgentSession cache — bookId switch", () => {
     );
 
     expect(agentInstances).toHaveLength(1);
+  });
+
+  it("guards pi-agent stream context before calling streamSimple", async () => {
+    const model = {
+      provider: "x",
+      id: "tiny-window",
+      name: "tiny-window",
+      api: "anthropic-messages",
+      baseUrl: "",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 20,
+      maxTokens: 10,
+    } as any;
+    const pipeline = {} as any;
+
+    const result = await runAgentSession(
+      { sessionId: "s-context-window", bookId: "book-a", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+
+    expect(result.responseText).toBe("");
+    expect(result.errorMessage).toContain("InkOS context window guard");
+    expect(streamCalls).toHaveLength(0);
+    const events = await readTranscriptEvents(projectRoot, "s-context-window");
+    expect(events.some(
+      (event: any) =>
+        event.type === "request_failed" &&
+        typeof event.error === "string" &&
+        event.error.includes("InkOS context window guard"),
+    )).toBe(true);
   });
 
   it("reuses Agent when bookId unchanged on same sessionId", async () => {
@@ -460,7 +549,7 @@ describe("runAgentSession cache — bookId switch", () => {
     }
   });
 
-  it("registers creation, cover, and standalone short-fiction tools when no book is active", async () => {
+  it("exposes only confirmation proposals in general chat", async () => {
     const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
     const pipeline = {} as any;
 
@@ -469,7 +558,286 @@ describe("runAgentSession cache — bookId switch", () => {
       "hi",
     );
 
-    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual(["sub_agent", "short_fiction_run", "generate_cover"]);
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "propose_action",
+    ]);
+  });
+
+  it("gates book creation behind an in-session confirmation proposal", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      { sessionId: "book-create-session", bookId: null, sessionKind: "book-create", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "propose_action",
+    ]);
+  });
+
+  it("does not run a hidden repair prompt when book-create returns plain text", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    const result = await runAgentSession(
+      { sessionId: "book-create-repair-session", bookId: null, sessionKind: "book-create", language: "zh", pipeline, projectRoot, model },
+      "请建一本番茄长篇",
+    );
+
+    expect(result.responseText).toBe("ok");
+    expect(streamCalls).toHaveLength(1);
+    expect(result.messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "toolResult", toolName: "propose_action" }),
+      ]),
+    );
+  });
+
+  it("exposes architect delegation after book-create confirmation", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      {
+        sessionId: "book-create-confirmed-session",
+        bookId: null,
+        sessionKind: "book-create",
+        actionSource: "button",
+        requestedIntent: "create_book",
+        language: "zh",
+        pipeline,
+        projectRoot,
+        model,
+      },
+      "确认创建这本都市悬疑长篇",
+    );
+
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "sub_agent",
+    ]);
+  });
+
+  it("gates short and play production behind in-session confirmation proposals", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      { sessionId: "short-session", bookId: null, sessionKind: "short", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "propose_action",
+    ]);
+
+    await runAgentSession(
+      { sessionId: "play-session", bookId: null, sessionKind: "play", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+    expect(agentInstances[1].state.tools.map((tool: any) => tool.name)).toEqual([
+      "propose_action",
+    ]);
+  });
+
+  it("treats propose_action as a terminal UI proposal instead of asking the model to continue", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    const result = await runAgentSession(
+      { sessionId: "short-session", bookId: null, sessionKind: "short", language: "zh", pipeline, projectRoot, model },
+      "propose short",
+    );
+
+    expect(result.responseText).toBe("");
+    expect(streamCalls).toHaveLength(1);
+    expect(result.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "toolResult", toolName: "propose_action" }),
+      ]),
+    );
+  });
+
+  it("exposes only architect in confirmed no-book creation sessions", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {
+      initBook: vi.fn(async () => undefined),
+    } as any;
+
+    await runAgentSession(
+      {
+        sessionId: "book-create-architect-only-session",
+        bookId: null,
+        sessionKind: "book-create",
+        actionSource: "button",
+        requestedIntent: "create_book",
+        language: "zh",
+        pipeline,
+        projectRoot,
+        model,
+      },
+      "确认创建一本书，建书后再写第一章。",
+    );
+
+    const subAgent = agentInstances.at(-1).state.tools.find((tool: any) => tool.name === "sub_agent");
+    expect(subAgent).toBeTruthy();
+    expect(JSON.stringify(subAgent.parameters)).toContain('"const":"architect"');
+    expect(JSON.stringify(subAgent.parameters)).not.toContain('"writer"');
+    expect(JSON.stringify(subAgent.parameters)).not.toContain('"auditor"');
+    expect(JSON.stringify(subAgent.parameters)).not.toContain('"reviser"');
+    expect(JSON.stringify(subAgent.parameters)).not.toContain('"exporter"');
+  });
+
+  it("treats successful production tool results as terminal for the current turn", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {
+      writeNextChapter: vi.fn(async () => ({
+        chapterNumber: 1,
+        title: "第一章",
+        wordCount: 1200,
+        status: "audit-failed",
+      })),
+    } as any;
+
+    const result = await runAgentSession(
+      { sessionId: "book-terminal-session", bookId: "book-a", sessionKind: "book", language: "zh", pipeline, projectRoot, model },
+      "write next",
+    );
+
+    expect(pipeline.writeNextChapter).toHaveBeenCalledTimes(1);
+    expect(result.responseText).toBe("");
+    expect(streamCalls).toHaveLength(1);
+    expect(result.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "toolResult", toolName: "sub_agent" }),
+      ]),
+    );
+  });
+
+  it("treats play revise results as terminal instead of asking the model for extra prose", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {
+      createAgentContext: vi.fn(() => ({})),
+    } as any;
+    await new PlayStore(projectRoot).createWorld({
+      id: "play-revise-terminal-session",
+      title: "雨巷账本",
+      premise: "玩家在雨巷里查一笔旧账。",
+      mode: "open",
+    });
+
+    const result = await runAgentSession(
+      { sessionId: "play-revise-terminal-session", bookId: null, sessionKind: "play", language: "zh", pipeline, projectRoot, model },
+      "revise play",
+    );
+
+    expect(result.responseText).toBe("");
+    expect(streamCalls).toHaveLength(1);
+    expect(result.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "toolResult", toolName: "play_revise" }),
+      ]),
+    );
+  });
+
+  it("blocks raw chapter prose in book chat when no production tool ran", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    const result = await runAgentSession(
+      { sessionId: "book-raw-prose-session", bookId: "book-a", sessionKind: "book", language: "zh", pipeline, projectRoot, model },
+      "raw chapter",
+    );
+
+    expect(result.responseText).toContain("没有落盘");
+    expect(result.responseText).toContain("sub_agent(agent=\"writer\")");
+    expect(result.responseText).not.toContain("# 第2章");
+  });
+
+  it("exposes play_edit, play_revise, and play_step after the play world exists for this session", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+    await new PlayStore(projectRoot).createWorld({
+      id: "play-active-session",
+      title: "雨巷账本",
+      premise: "玩家在雨巷里查一笔旧账。",
+      mode: "guided",
+    });
+
+    await runAgentSession(
+      { sessionId: "play-active-session", bookId: null, sessionKind: "play", language: "zh", pipeline, projectRoot, model },
+      "我查看门缝下的账本",
+    );
+
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "play_edit",
+      "play_revise",
+      "play_step",
+    ]);
+  });
+
+  it("exposes short production tools only after matching confirmation", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      {
+        sessionId: "short-confirmed-session",
+        bookId: null,
+        sessionKind: "short",
+        actionSource: "button",
+        requestedIntent: "short_run",
+        language: "zh",
+        pipeline,
+        projectRoot,
+        model,
+      },
+      "确认生成婚姻反杀短篇",
+    );
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "short_fiction_run",
+    ]);
+
+    await runAgentSession(
+      {
+        sessionId: "cover-confirmed-session",
+        bookId: null,
+        sessionKind: "short",
+        actionSource: "button",
+        requestedIntent: "generate_cover",
+        language: "zh",
+        pipeline,
+        projectRoot,
+        model,
+      },
+      "确认生成封面",
+    );
+    expect(agentInstances[1].state.tools.map((tool: any) => tool.name)).toEqual([
+      "generate_cover",
+    ]);
+  });
+
+  it("exposes play_start only after play-start confirmation", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      {
+        sessionId: "play-confirmed-session",
+        bookId: null,
+        sessionKind: "play",
+        actionSource: "button",
+        requestedIntent: "play_start",
+        language: "zh",
+        pipeline,
+        projectRoot,
+        model,
+      },
+      "确认启动雨夜茶馆互动世界",
+    );
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "play_start",
+    ]);
   });
 
   it("does not expose generic write/edit tools to active-book chat agents", async () => {
@@ -483,18 +851,38 @@ describe("runAgentSession cache — bookId switch", () => {
 
     expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
       "sub_agent",
-      "short_fiction_run",
       "generate_cover",
       "read",
       "write_truth_file",
       "rename_entity",
       "patch_chapter_text",
+      "replace_chapter_text",
       "grep",
       "ls",
     ]);
   });
 
-  it("把真实 Agent 的 message_end 写入 JSONL，并在 cache 失效后恢复 raw AgentMessage", async () => {
+  it("exposes only deterministic edit tools in edit mode", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      { sessionId: "edit-session", bookId: "book-a", sessionKind: "edit", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+
+    expect(agentInstances[0].state.tools.map((tool: any) => tool.name)).toEqual([
+      "read",
+      "write_truth_file",
+      "rename_entity",
+      "patch_chapter_text",
+      "replace_chapter_text",
+      "grep",
+      "ls",
+    ]);
+  });
+
+  it("把真实 Agent 的 message_end 写入 JSONL，并在 cache 失效后只恢复可见对话", async () => {
     const model = { provider: "anthropic", id: "fake", api: "anthropic-messages" } as any;
     const pipeline = {} as any;
 
@@ -514,7 +902,8 @@ describe("runAgentSession cache — bookId switch", () => {
     );
 
     expect(agentInstances).toHaveLength(2);
-    expect(JSON.stringify(streamCalls.at(-1)?.context.messages)).toContain("raw thought");
+    expect(JSON.stringify(streamCalls.at(-1)?.context.messages)).toContain("ok");
+    expect(JSON.stringify(streamCalls.at(-1)?.context.messages)).not.toContain("raw thought");
     expect(streamCalls.at(-1)?.context.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "assistant" }),
@@ -522,7 +911,7 @@ describe("runAgentSession cache — bookId switch", () => {
     );
   });
 
-  it("恢复 transcript 中的 toolResult message", async () => {
+  it("恢复 transcript 时把历史 toolResult 折叠成状态摘要", async () => {
     const model = { provider: "anthropic", id: "fake", api: "anthropic-messages" } as any;
     const pipeline = {} as any;
 
@@ -539,9 +928,12 @@ describe("runAgentSession cache — bookId switch", () => {
     );
 
     expect(agentInstances).toHaveLength(2);
-    expect(streamCalls.at(-1)?.context.messages.some(
-      (message: any) => message.role === "toolResult" && message.toolCallId === "tool-1",
-    )).toBe(true);
+    const body = JSON.stringify(streamCalls.at(-1)?.context.messages ?? []);
+    expect(body).toContain("历史状态摘要");
+    expect(body).toContain("read");
+    expect(body).toContain("书A 的真相");
+    expect(body).not.toContain("\"toolCall\"");
+    expect(body).not.toContain("\"toolResult\"");
 
     const messageEvents = (await readTranscriptEvents(projectRoot, "s1"))
       .filter((event) => event.type === "message");
@@ -587,7 +979,31 @@ describe("runAgentSession cache — bookId switch", () => {
     expect(body).toContain("书A 的真相");
   });
 
-  it("Gemini OpenAI-compatible 上下文过滤恢复时补出的 toolResult bridge", async () => {
+  it("非 Google 的 openai-completions 端点也把 toolResult 折叠成 user 文本(避免上游 503)", async () => {
+    const model = {
+      provider: "openai",
+      id: "deepseek-v4-pro",
+      api: "openai-completions",
+      baseUrl: "https://api.kkaiapi.com/v1",
+      input: ["text"],
+    } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      { sessionId: "s1", bookId: "book-a", language: "zh", pipeline, projectRoot, model },
+      "use tool",
+    );
+
+    const lastContextMessages = streamCalls.at(-1)?.context.messages ?? [];
+    expect(lastContextMessages.some((message: any) => message.role === "toolResult")).toBe(false);
+    expect(lastContextMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: expect.stringContaining("[Tool results]") }),
+      ]),
+    );
+  });
+
+  it("Gemini OpenAI-compatible 从历史恢复时使用状态摘要而不是 toolResult bridge", async () => {
     const model = {
       provider: "google",
       id: "gemini-pro-latest",
@@ -604,6 +1020,7 @@ describe("runAgentSession cache — bookId switch", () => {
       requestId: "r1",
       seq: 1,
       timestamp: 1,
+      sessionKind: "book",
       input: "use tool",
     });
     await appendTranscriptEvent(projectRoot, {
@@ -677,8 +1094,10 @@ describe("runAgentSession cache — bookId switch", () => {
 
     const body = JSON.stringify(streamCalls.at(-1)?.context.messages ?? []);
     expect(body).not.toContain("I have processed the tool results.");
-    expect(body).toContain("[Tool results]");
+    expect(body).toContain("历史状态摘要");
     expect(body).toContain("资料");
+    expect(body).not.toContain("[Tool results]");
+    expect(body).not.toContain("\"toolResult\"");
   });
 
   it("切到 DeepSeek 时不 replay 其他模型的原生 toolCall/toolResult 历史", async () => {
@@ -690,6 +1109,7 @@ describe("runAgentSession cache — bookId switch", () => {
       requestId: "r1",
       seq: 1,
       timestamp: 1,
+      sessionKind: "book",
       input: "use tool",
     });
     await appendTranscriptEvent(projectRoot, {
@@ -760,7 +1180,7 @@ describe("runAgentSession cache — bookId switch", () => {
     const body = JSON.stringify(messages);
     expect(body).not.toContain("\"toolCall\"");
     expect(messages.some((message: any) => message.role === "toolResult")).toBe(false);
-    expect(body).toContain("[Tool results]");
+    expect(body).toContain("历史状态摘要");
     expect(body).toContain("资料");
   });
 

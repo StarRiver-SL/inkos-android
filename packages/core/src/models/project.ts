@@ -10,10 +10,19 @@ const LLMServiceEntrySchema = z.object({
   stream: z.boolean().optional(),
 });
 
-const LLMCoverConfigSchema = z.object({
-  service: z.enum(["kkaiapi", "openai", "google"]),
-  model: z.string().min(1),
-}).optional();
+const LLMCoverConfigSchema = z.union([
+  z.object({
+    service: z.enum(["kkaiapi", "openai", "google"]),
+    model: z.string().min(1),
+  }),
+  z.object({
+    service: z.string().regex(/^custom:/),
+    label: z.string().min(1).optional(),
+    baseUrl: z.string().url(),
+    api: z.enum(["responses", "images", "gemini"]).default("images"),
+    model: z.string().min(1),
+  }),
+]).optional();
 
 // C1 (v2.0.0 breaking): 删除 maxTokens / maxTokensCap 字段。
 // 每个模型的真实 maxOutput 来自 providers/<name>.ts 的 InkosModel.maxOutput；
@@ -91,9 +100,7 @@ export type FoundationConfig = z.infer<typeof FoundationConfigSchema>;
 
 export const WritingConfigSchema = z.object({
   reviewRetries: z.number().int().min(0).max(10).default(1),
-  draftMode: z.boolean().default(false),
-  skipAudit: z.boolean().default(false),
-  skipStateValidation: z.boolean().default(false),
+  reviewMode: z.enum(["auto", "manual"]).default("auto"),
 });
 
 export type WritingConfig = z.infer<typeof WritingConfigSchema>;
@@ -125,9 +132,6 @@ export const ProjectConfigSchema = z.object({
   }),
   writing: WritingConfigSchema.default({
     reviewRetries: 1,
-    draftMode: false,
-    skipAudit: false,
-    skipStateValidation: false,
   }),
   modelOverrides: z.record(z.string(), ModelOverrideValueSchema).optional(),
   inputGovernanceMode: InputGovernanceModeSchema.default("v2"),

@@ -15,6 +15,70 @@ describe("ContinuityAuditor", () => {
     vi.restoreAllMocks();
   });
 
+  it("returns a critical audit issue instead of throwing when audit output is not JSON", () => {
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: "/tmp/inkos-auditor-bad-json-test",
+    });
+
+    const result = (auditor as any).parseAuditResult("模型只返回了一段散文，没有 JSON。", "zh");
+
+    expect(result.passed).toBe(false);
+    expect(result.summary).toContain("审稿输出解析失败");
+    expect(result.issues).toEqual([
+      expect.objectContaining({
+        severity: "critical",
+        category: "系统错误",
+      }),
+    ]);
+  });
+
+  it("parses typed repair_scope from audit JSON", () => {
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: "/tmp/inkos-auditor-repair-scope-test",
+    });
+
+    const result = (auditor as any).parseAuditResult(JSON.stringify({
+      passed: false,
+      issues: [{
+        severity: "critical",
+        repair_scope: "structural",
+        category: "模型审稿判断",
+        description: "核心场面缺失",
+        suggestion: "重写场面",
+      }],
+      summary: "needs rewrite",
+    }), "zh");
+
+    expect(result.issues[0]).toMatchObject({
+      repairScope: "structural",
+      category: "模型审稿判断",
+    });
+  });
+
   it("prefers book language override when building audit prompts", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-auditor-lang-test-"));
     const bookDir = join(root, "book");

@@ -68,7 +68,7 @@ describe("ink dashboard", () => {
     expect(frame).not.toContain("Conversation");
     expect(frame).not.toContain("Status");
     expect(frame).not.toContain("Composer");
-  }, 10_000);
+  }, 20_000);
 
   it("places the initial caret before the placeholder text", async () => {
     const mod = await import("../tui/dashboard.js");

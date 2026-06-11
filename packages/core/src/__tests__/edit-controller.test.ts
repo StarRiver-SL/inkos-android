@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -61,6 +61,19 @@ describe("edit controller", () => {
 
     expect(result.transactionType).toBe("chapter-rewrite");
     expect(result.affectedScope).toBe("downstream");
+    expect(result.requiresTruthRebuild).toBe(true);
+  });
+
+  it("plans whole-chapter replacement transactions as chapter-scoped edits", () => {
+    const result = planEditTransaction({
+      kind: "chapter-replace",
+      bookId: "harbor",
+      chapterNumber: 3,
+      fullText: "# 第3章 新稿\n\n完整替换正文。",
+    });
+
+    expect(result.transactionType).toBe("chapter-replace");
+    expect(result.affectedScope).toBe("chapter");
     expect(result.requiresTruthRebuild).toBe(true);
   });
 
@@ -128,6 +141,108 @@ describe("edit controller", () => {
     expect(result.touchedFiles.length).toBeGreaterThan(0);
   });
 
+  it("does not rewrite story snapshots during entity rename", async () => {
+    const bookDir = join(projectRoot, "books", "harbor");
+    await writeFile(join(bookDir, "story", "story_bible.md"), "主角陆尘住在港口。", "utf-8");
+    await mkdir(join(bookDir, "story", "snapshots", "1"), { recursive: true });
+    await writeFile(join(bookDir, "story", "snapshots", "1", "current_state.md"), "陆尘在旧快照里。", "utf-8");
+
+    await executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async () => undefined,
+      },
+      {
+        kind: "entity-rename",
+        bookId: "harbor",
+        entityType: "protagonist",
+        oldValue: "陆尘",
+        newValue: "林砚",
+      },
+    );
+
+    await expect(readFile(join(bookDir, "story", "story_bible.md"), "utf-8")).resolves.toContain("林砚");
+    await expect(readFile(join(bookDir, "story", "snapshots", "1", "current_state.md"), "utf-8")).resolves.toContain("陆尘");
+  });
+
+  it("renames entity files whose filename embeds the old name so path references don't dangle", async () => {
+    const bookDir = join(projectRoot, "books", "rolebook");
+    await mkdir(join(bookDir, "roles", "主要角色"), { recursive: true });
+    await mkdir(join(bookDir, "story"), { recursive: true });
+    await writeFile(join(bookDir, "roles", "主要角色", "陈default.md"), "# 陈default\n\n陈default是主角。", "utf-8");
+    // A manifest that references the role file by path — the path must follow the rename.
+    await writeFile(join(bookDir, "story", "story_bible.md"), "主角档案见 roles/主要角色/陈default.md。", "utf-8");
+
+    const result = await executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async () => undefined,
+      },
+      {
+        kind: "entity-rename",
+        bookId: "rolebook",
+        entityType: "protagonist",
+        oldValue: "陈default",
+        newValue: "陈烬",
+      },
+    );
+
+    // The file is renamed on disk and its content updated.
+    await expect(readFile(join(bookDir, "roles", "主要角色", "陈烬.md"), "utf-8")).resolves.toContain("陈烬");
+    // The old filename is gone — no dangling reference.
+    await expect(access(join(bookDir, "roles", "主要角色", "陈default.md")).then(() => true).catch(() => false))
+      .resolves.toBe(false);
+    // The manifest's path reference now points at the renamed file.
+    await expect(readFile(join(bookDir, "story", "story_bible.md"), "utf-8"))
+      .resolves.toContain("roles/主要角色/陈烬.md");
+    expect(result.touchedFiles).toContain(join("roles", "主要角色", "陈烬.md"));
+    expect(result.summary).toContain("renamed on disk");
+  });
+
+  it("aborts an entity rename when the target filename already exists, without rewriting content", async () => {
+    const bookDir = join(projectRoot, "books", "collisionbook");
+    await mkdir(join(bookDir, "roles", "主要角色"), { recursive: true });
+    await writeFile(join(bookDir, "roles", "主要角色", "甲.md"), "甲的档案。", "utf-8");
+    await writeFile(join(bookDir, "roles", "主要角色", "乙.md"), "乙的档案,提到甲。", "utf-8");
+
+    await expect(executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async () => undefined,
+      },
+      {
+        kind: "entity-rename",
+        bookId: "collisionbook",
+        entityType: "character",
+        oldValue: "甲",
+        newValue: "乙",
+      },
+    )).rejects.toThrow(/already exists/);
+
+    // The collision is detected before any write — content stays untouched (no partial application).
+    await expect(readFile(join(bookDir, "roles", "主要角色", "乙.md"), "utf-8")).resolves.toBe("乙的档案,提到甲。");
+  });
+
+  it("rejects a rename target that contains a path separator", async () => {
+    await expect(executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => [],
+        saveChapterIndex: async () => undefined,
+      },
+      {
+        kind: "entity-rename",
+        bookId: "harbor",
+        entityType: "character",
+        oldValue: "陆尘",
+        newValue: "../evil",
+      },
+    )).rejects.toThrow(/path separators/);
+  });
+
   it("executes chapter text patches and marks the chapter for review", async () => {
     const bookDir = join(projectRoot, "books", "harbor");
     await writeFile(join(bookDir, "chapters", "0003_灰墙榜下.md"), "# 第3章 灰墙榜下\n\n旧名字在这里。", "utf-8");
@@ -166,6 +281,50 @@ describe("edit controller", () => {
     expect(savedIndex[0]?.status).toBe("audit-failed");
     expect(savedIndex[0]?.auditIssues.at(-1)).toContain("Manual text edit requires review");
     expect(result.reviewRequired).toBe(true);
+  });
+
+  it("executes whole-chapter replacement and marks the chapter for review", async () => {
+    const bookDir = join(projectRoot, "books", "replacebook");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await mkdir(join(bookDir, "story", "runtime"), { recursive: true });
+    await writeFile(join(bookDir, "chapters", "0002_旧章.md"), "# 第2章 旧章\n\n旧正文。", "utf-8");
+    await writeFile(join(bookDir, "story", "runtime", "chapter-0002.plan.md"), "stale plan", "utf-8");
+    const chapterIndex = [{
+      number: 2,
+      title: "旧章",
+      status: "ready-for-review" as const,
+      wordCount: 3,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      auditIssues: [],
+      lengthWarnings: [],
+    }];
+
+    let savedIndex: ChapterMeta[] = [...chapterIndex];
+    const result = await executeEditTransaction(
+      {
+        bookDir: (bookId) => join(projectRoot, "books", bookId),
+        loadChapterIndex: async () => chapterIndex,
+        saveChapterIndex: async (_bookId, index) => {
+          savedIndex = [...index];
+        },
+      },
+      {
+        kind: "chapter-replace",
+        bookId: "replacebook",
+        chapterNumber: 2,
+        fullText: "# 第2章 新章\n\n新正文完整替换。",
+      },
+    );
+
+    await expect(readFile(join(bookDir, "chapters", "0002_旧章.md"), "utf-8")).resolves.toContain("新正文完整替换");
+    await expect(access(join(bookDir, "story", "runtime", "chapter-0002.plan.md")).then(() => true).catch(() => false))
+      .resolves.toBe(false);
+    expect(savedIndex[0]?.status).toBe("audit-failed");
+    expect(savedIndex[0]?.wordCount).toBeGreaterThan(0);
+    expect(savedIndex[0]?.auditIssues.at(-1)).toContain("Manual chapter replacement requires review");
+    expect(result.reviewRequired).toBe(true);
+    expect(result.summary).toContain("Replaced chapter 2");
   });
 
   it("does not swallow unexpected filesystem errors while collecting editable files", async () => {

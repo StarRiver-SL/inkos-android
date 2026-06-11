@@ -64,24 +64,13 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     PipelineRunner: MockPipelineRunner,
     Scheduler: MockScheduler,
     isNewLayoutBook,
+    tryParseBookRulesFrontmatter: actual.tryParseBookRulesFrontmatter,
     createLLMClient: vi.fn(() => ({})),
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
     isSafeBookId: actual.isSafeBookId,
-    ensureSemanticCacheStorage: vi.fn((projectRoot: string) => ({
-      sqliteAvailable: false,
-      path: join(projectRoot, ".inkos", "cache", "semantic-cache.db"),
-      fallbackPath: join(projectRoot, ".inkos", "cache", "semantic-cache.json"),
-    })),
     chatCompletion: vi.fn(),
     loadProjectConfig: loadProjectConfigMock,
-    listBookSessions: vi.fn(async () => []),
-    buildExportArtifact: vi.fn(async () => ({ content: "", filename: "export.txt" })),
-    clearIdleL1Caches: vi.fn(async () => 0),
-    installPresetSceneTemplates: vi.fn(async () => {}),
-    getHeadroomSavingsTelemetry: vi.fn(() => ({})),
-    diffHeadroomSavingsTelemetry: vi.fn(() => ({})),
-    GLOBAL_CONFIG_DIR: join(tmpdir(), "inkos-global-config"),
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
 });
@@ -135,7 +124,7 @@ describe("Issue 1 — Studio: old book (no outline/story_frame.md)", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    await rm(root, { recursive: true, force: true });
   });
 
   it("GET story_bible.md has no legacy flag", async () => {
@@ -197,7 +186,7 @@ describe("Issue 1 — Studio: new book (has outline/story_frame.md)", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    await rm(root, { recursive: true, force: true });
   });
 
   it("GET story_bible.md has legacy:true", async () => {

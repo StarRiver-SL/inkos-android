@@ -1,16 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { InteractionRequestSchema } from "../interaction/intents.js";
 import { InteractionSessionSchema } from "../interaction/session.js";
 import { runInteractionRequest } from "../interaction/runtime.js";
 
 function makeTools(overrides: Partial<Parameters<typeof runInteractionRequest>[0]["tools"]> = {}) {
   return {
     listBooks: vi.fn(async () => ["harbor"]),
-    developBookDraft: vi.fn(),
     createBook: vi.fn(),
     exportBook: vi.fn(),
     writeNextChapter: vi.fn(),
     reviseDraft: vi.fn(),
     patchChapterText: vi.fn(),
+    replaceChapterText: vi.fn(),
     renameEntity: vi.fn(),
     updateCurrentFocus: vi.fn(),
     updateAuthorIntent: vi.fn(),
@@ -20,48 +21,6 @@ function makeTools(overrides: Partial<Parameters<typeof runInteractionRequest>[0
 }
 
 describe("interaction runtime", () => {
-  it("routes develop_book through the shared draft tool and updates the creation draft", async () => {
-    const developBookDraft = vi.fn(async () => ({
-      __interaction: {
-        responseText: "我先按港风商战悬疑收着。你更想写长篇连载，还是十来章能收住？",
-        details: {
-          creationDraft: {
-            concept: "港风商战悬疑，主角从灰产洗白。",
-            title: "夜港账本",
-            genre: "urban",
-            nextQuestion: "更想写长篇连载，还是十来章能收住？",
-            missingFields: ["targetChapters"],
-            readyToCreate: false,
-          },
-        },
-      },
-    }));
-
-    const result = await runInteractionRequest({
-      session: InteractionSessionSchema.parse({
-        sessionId: "session-draft",
-        projectRoot: "/tmp/project",
-        automationMode: "semi",
-        messages: [],
-        events: [],
-      }),
-      request: {
-        intent: "develop_book",
-        instruction: "我想写个港风商战悬疑，主角从灰产洗白。",
-      },
-      tools: makeTools({
-        developBookDraft,
-      }),
-    });
-
-    expect(developBookDraft).toHaveBeenCalledWith("我想写个港风商战悬疑，主角从灰产洗白。", undefined);
-    expect(result.session.creationDraft).toEqual(expect.objectContaining({
-      title: "夜港账本",
-      genre: "urban",
-    }));
-    expect(result.responseText).toContain("港风商战悬疑");
-  });
-
   it("routes create_book through the shared create tool and binds the created book", async () => {
     const createBook = vi.fn(async () => ({
       bookId: "night-harbor",
@@ -507,41 +466,42 @@ describe("interaction runtime", () => {
     expect(result.responseText).toContain("marked it for review");
   });
 
-  it("updates automation mode without invoking pipeline tools", async () => {
-    const writeNextChapter = vi.fn();
-    const reviseDraft = vi.fn();
-    const updateCurrentFocus = vi.fn();
-    const updateAuthorIntent = vi.fn();
-    const writeTruthFile = vi.fn();
+  it("routes replace_chapter_text to the whole-chapter replacement tool and waits for review", async () => {
+    const replaceChapterText = vi.fn(async () => ({
+      chapterNumber: 3,
+      __interaction: {
+        responseText: "Replaced chapter 3 and marked it for review.",
+      },
+    }));
 
     const result = await runInteractionRequest({
       session: InteractionSessionSchema.parse({
-        sessionId: "session-5",
+        sessionId: "session-4e",
         projectRoot: "/tmp/project",
         activeBookId: "harbor",
         automationMode: "semi",
         messages: [],
         events: [],
       }),
-      request: { intent: "switch_mode", mode: "auto" },
+      request: {
+        intent: "replace_chapter_text",
+        bookId: "harbor",
+        chapterNumber: 3,
+        fullText: "# 第3章 新稿\n\n完整替换正文。",
+      },
       tools: makeTools({
-        writeNextChapter,
-        reviseDraft,
-        updateCurrentFocus,
-        updateAuthorIntent,
-        writeTruthFile,
+        replaceChapterText,
       }),
     });
 
-    expect(result.session.automationMode).toBe("auto");
-    expect(writeNextChapter).not.toHaveBeenCalled();
-    expect(reviseDraft).not.toHaveBeenCalled();
-    expect(updateCurrentFocus).not.toHaveBeenCalled();
-    expect(updateAuthorIntent).not.toHaveBeenCalled();
-    expect(result.session.events.map((event) => event.kind)).toEqual([
-      "task.started",
-      "task.completed",
-    ]);
+    expect(replaceChapterText).toHaveBeenCalledWith("harbor", 3, "# 第3章 新稿\n\n完整替换正文。");
+    expect(result.session.currentExecution?.status).toBe("waiting_human");
+    expect(result.session.pendingDecision?.chapterNumber).toBe(3);
+    expect(result.responseText).toContain("marked it for review");
+  });
+
+  it("does not expose switch_mode as a natural-language intent", () => {
+    expect(() => InteractionRequestSchema.parse({ intent: "switch_mode", mode: "auto" })).toThrow();
   });
 
   it("binds the selected book without invoking pipeline tools", async () => {

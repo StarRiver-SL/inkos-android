@@ -1,5 +1,4 @@
-import YAML from "js-yaml";
-import { CHAPTER_MEMO_GOAL_MAX_CHARS, ChapterMemoSchema, type ChapterMemo } from "../models/input-governance.js";
+import { ChapterMemoSchema, type ChapterMemo } from "../models/input-governance.js";
 
 export class PlannerParseError extends Error {
   constructor(message: string) {
@@ -12,26 +11,37 @@ export class PlannerParseError extends Error {
 // The English headings come from PLANNER_MEMO_SYSTEM_PROMPT_EN — we accept
 // EITHER language at parse time so the same parser works for both.
 //
-// Phase hotfix 8: enforce meaningful non-empty sections without a hard
-// character floor. Some transition chapters legitimately need terse memo rows,
-// and the previous hard-length parser feedback made valid sparse memos fail
-// repeatedly. We now reject only blank/placeholder payloads.
+// Phase hotfix 7: minContentChars enforces non-emptiness per section so
+// "all 7 headings + blank payload" no longer slips through. The "do not"
+// section uses a relaxed threshold because "无 / N/A / none." is legitimate
+// for chapters with no extra prohibitions.
+//
+// Threshold rationale:
+// - 20 chars: long enough to catch obvious empty sections (whitespace,
+//   "(略)", "TODO") but short enough to accept genuinely sparse memos for
+//   breath/transition chapters (Phase 6 sparse-memo principle).
+// - 1 char for "## 不要做" / "## Do not" because "无" / "N/A" / "none" /
+//   "—" are all legitimate for a chapter with no extra prohibitions; we
+//   only need to ensure the section is not whitespace-only.
 interface RequiredSection {
   readonly zh: string;
   readonly en: string;
-  readonly allowNoExtraContent?: boolean;
+  readonly minContentChars: number;
 }
 
 const REQUIRED_SECTIONS: ReadonlyArray<RequiredSection> = [
-  { zh: "## 当前任务", en: "## Current task" },
-  { zh: "## 读者此刻在等什么", en: "## What the reader is waiting for right now" },
-  { zh: "## 该兑现的 / 暂不掀的", en: "## To pay off / to keep buried" },
-  { zh: "## 日常/过渡承担什么任务", en: "## What the slow / transitional beats carry" },
-  { zh: "## 关键抉择过三连问", en: "## Three-question check on the key choice" },
-  { zh: "## 章尾必须发生的改变", en: "## Required end-of-chapter change" },
-  { zh: "## 本章 hook 账", en: "## Hook ledger for this chapter" },
-  { zh: "## 不要做", en: "## Do not", allowNoExtraContent: true },
+  { zh: "## 当前任务", en: "## Current task", minContentChars: 20 },
+  { zh: "## 读者此刻在等什么", en: "## What the reader is waiting for right now", minContentChars: 20 },
+  { zh: "## 该兑现的 / 暂不掀的", en: "## To pay off / to keep buried", minContentChars: 20 },
+  { zh: "## 日常/过渡承担什么任务", en: "## What the slow / transitional beats carry", minContentChars: 20 },
+  { zh: "## 关键抉择过三连问", en: "## Three-question check on the key choice", minContentChars: 20 },
+  { zh: "## 章尾必须发生的改变", en: "## Required end-of-chapter change", minContentChars: 20 },
+  { zh: "## 本章 hook 账", en: "## Hook ledger for this chapter", minContentChars: 20 },
+  { zh: "## 不要做", en: "## Do not", minContentChars: 1 },
 ];
+
+const GOAL_HEADINGS = ["## 本章目标", "## Chapter goal"] as const;
+const THREAD_HEADINGS = ["## 关联线索", "## Thread refs", "## Related threads"] as const;
 
 /**
  * Extract the content between `heading` and the next `## ...` heading (or
@@ -51,78 +61,105 @@ function extractSectionContent(body: string, heading: string): string {
   return sectionRaw.replace(/\s+/g, " ").trim();
 }
 
-function isMeaningfulSectionContent(content: string, section: RequiredSection): boolean {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length === 0) return false;
+function stripWrappingFence(raw: string): string {
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/^```(?:md|markdown)?\s*\n([\s\S]*?)\n```\s*$/i);
+  return fenced?.[1]?.trim() ?? trimmed;
+}
 
-  const lowered = normalized.toLowerCase();
-  if (/^(?:todo|tbd|待定|待补|待填写|占位|placeholder)$/i.test(normalized)) return false;
-  if (/^(?:略|省略|（略）|\(略\)|\.{3}|…|—|-)$/.test(normalized)) return false;
-
-  if (section.allowNoExtraContent) {
-    return /^(?:无|没有|暂无|不适用|none|n\/a|na|no extra prohibitions?)[。.!！]*$/i.test(normalized)
-      || !/^(?:todo|tbd|placeholder)$/i.test(lowered);
+function dropLeadingProse(raw: string): string {
+  const markers = [
+    "# 第 ",
+    "# Chapter ",
+    ...GOAL_HEADINGS,
+    ...THREAD_HEADINGS,
+    ...REQUIRED_SECTIONS.flatMap((section) => [section.zh, section.en]),
+  ];
+  let first = -1;
+  for (const marker of markers) {
+    const index = raw.indexOf(marker);
+    if (index >= 0 && (first < 0 || index < first)) {
+      first = index;
+    }
   }
+  return first >= 0 ? raw.slice(first).trim() : raw.trim();
+}
 
-  return !/^(?:无|没有|暂无|不适用|none|n\/a|na)[。.!！]*$/i.test(normalized);
+function extractAnyHeading(body: string, headings: ReadonlyArray<string>): string {
+  for (const heading of headings) {
+    const content = extractSectionContent(body, heading);
+    if (content) return content;
+  }
+  return "";
+}
+
+function extractGoal(body: string): string {
+  const explicitGoal = extractAnyHeading(body, GOAL_HEADINGS);
+  if (explicitGoal) {
+    return explicitGoal.split(/\n|。|\. /)[0]?.trim() ?? "";
+  }
+  return "";
+}
+
+function extractThreadRefs(body: string): string[] {
+  const block = extractAnyHeading(body, THREAD_HEADINGS);
+  if (!block || /^(无|none|n\/a|na|—|-|\(none\))$/i.test(block.trim())) {
+    return [];
+  }
+  const matches = block.match(/\b[A-Za-z][A-Za-z0-9_-]*\d+[A-Za-z0-9_-]*\b/g) ?? [];
+  return [...new Set(matches)];
+}
+
+function extractMemoBody(markdown: string): string {
+  const starts = REQUIRED_SECTIONS
+    .flatMap((section) => [section.zh, section.en])
+    .map((heading) => markdown.indexOf(heading))
+    .filter((index) => index >= 0);
+  if (starts.length === 0) return markdown.trim();
+  return markdown.slice(Math.min(...starts)).trim();
+}
+
+function makeDisplayGoal(goal: string): string {
+  if (goal.length <= 50) return goal;
+  return `${goal.slice(0, 47).trimEnd()}...`;
+}
+
+function prependFullGoalIfNeeded(markdown: string, body: string, fullGoal: string, displayGoal: string): string {
+  if (fullGoal === displayGoal) return body;
+  const heading = markdown.includes("## Chapter goal") ? "## Chapter goal" : "## 本章目标";
+  return `${heading}\n${fullGoal}\n\n${body}`;
 }
 
 /**
  * Parse a planner memo produced by the LLM.
  *
- * Format: YAML frontmatter delimited by `---\n...\n---\n` followed by a
- * markdown body containing the seven required section headings.
+ * Format: plain Markdown containing a `## 本章目标` / `## Chapter goal`
+ * section, an optional thread-ref section, and the required memo section
+ * headings.
  *
- * Strict on core fields (chapter integer + matches expected, goal non-empty
- * and within the memo goal character budget, required section headings present). Lenient on aux fields
- * (threadRefs coerced to string[], defaults to []).
+ * Strict on the LLM-owned memo sections. Caller-owned fields (chapter /
+ * golden-opening) come from the host, not from the model. A long chapter goal
+ * is kept in the memo body and reduced only to a short display label for the
+ * schema field, so parser robustness does not silently delete planning intent.
  *
- * `isGoldenOpening` is authoritative from the caller — any value the LLM
- * includes in the frontmatter is ignored.
+ * The parser strips a wrapping Markdown code fence and any leading assistant
+ * prose ("好的，下面是...") before the first memo heading. It does not accept
+ * YAML frontmatter as a required model protocol anymore.
  */
 export function parseMemo(
   raw: string,
   expectedChapter: number,
   isGoldenOpening: boolean,
 ): ChapterMemo {
-  const trimmed = raw.trim();
-  const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
-  if (!match) {
-    throw new PlannerParseError("missing YAML frontmatter delimiters");
-  }
+  const markdown = dropLeadingProse(stripWrappingFence(raw));
+  const goal = extractGoal(markdown);
+  const body = extractMemoBody(markdown);
+  const threadRefs = extractThreadRefs(markdown);
 
-  const yamlText = match[1]!;
-  const body = match[2]!.trim();
-
-  let fm: unknown;
-  try {
-    fm = YAML.load(yamlText);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new PlannerParseError(`invalid YAML in frontmatter: ${message}`);
-  }
-  if (!fm || typeof fm !== "object" || Array.isArray(fm)) {
-    throw new PlannerParseError("frontmatter is not an object");
-  }
-  const f = fm as Record<string, unknown>;
-
-  if (typeof f.chapter !== "number" || !Number.isInteger(f.chapter)) {
-    throw new PlannerParseError("chapter must be an integer");
-  }
-  if (f.chapter !== expectedChapter) {
-    throw new PlannerParseError(
-      `chapter mismatch: expected ${expectedChapter}, got ${f.chapter}`,
-    );
-  }
-
-  if (typeof f.goal !== "string" || f.goal.length === 0) {
+  if (goal.length === 0) {
     throw new PlannerParseError("goal must be a non-empty string");
   }
-  if (f.goal.length > CHAPTER_MEMO_GOAL_MAX_CHARS) {
-    throw new PlannerParseError(
-      `goal too long: ${f.goal.length} chars (max ${CHAPTER_MEMO_GOAL_MAX_CHARS})`,
-    );
-  }
+  const displayGoal = makeDisplayGoal(goal);
 
   const missing = REQUIRED_SECTIONS.filter(
     (section) => !body.includes(section.zh) && !body.includes(section.en),
@@ -134,30 +171,28 @@ export function parseMemo(
     );
   }
 
-  // Phase hotfix 8: each section's payload must be meaningful, but short
-  // legitimate memo rows are allowed. Avoid leaking hard length-floor feedback
-  // into retry prompts.
+  // Phase hotfix 7: each section's payload must be non-empty (≥ minContentChars).
+  // Headings present + blank payload was previously accepted, allowing useless
+  // "shell" memos to flow downstream. Threshold differs per section: most need
+  // 20 chars (one short sentence) while "## 不要做" / "## Do not" allows 5
+  // (e.g. "无", "N/A") since "no extra prohibitions" is a legitimate state.
   const empty = REQUIRED_SECTIONS.filter((section) => {
     const heading = body.includes(section.zh) ? section.zh : section.en;
     const content = extractSectionContent(body, heading);
-    return !isMeaningfulSectionContent(content, section);
+    return content.length < section.minContentChars;
   });
   if (empty.length > 0) {
     const detail = empty
-      .map((s) => `${s.zh} (blank or placeholder content)`)
+      .map((s) => `${s.zh} (need ≥ ${s.minContentChars} chars)`)
       .join(", ");
     throw new PlannerParseError(`empty sections: ${detail}`);
   }
 
-  const threadRefs = Array.isArray(f.threadRefs)
-    ? f.threadRefs.filter((value): value is string => typeof value === "string")
-    : [];
-
   return ChapterMemoSchema.parse({
-    chapter: f.chapter,
-    goal: f.goal,
+    chapter: expectedChapter,
+    goal: displayGoal,
     isGoldenOpening,
-    body,
+    body: prependFullGoalIfNeeded(markdown, body, goal, displayGoal),
     threadRefs,
   });
 }

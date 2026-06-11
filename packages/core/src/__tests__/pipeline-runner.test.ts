@@ -314,68 +314,13 @@ describe("PipelineRunner", () => {
     vi.restoreAllMocks();
   });
 
-  it("aggregates real token usage across chapter writing, review, persistence analysis, and state validation", async () => {
-    const { root, runner, bookId } = await createRunnerFixture({
-      inputGovernanceMode: "legacy",
-    });
-    const draftBody = "初".repeat(3100);
-    const revisedBody = "修".repeat(3100);
+  it("forwards text deltas with the active agent name", async () => {
+    const onTextDelta = vi.fn();
+    const { runner } = await createRunnerFixture({ onTextDelta });
 
-    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
-      createWriterOutput({
-        content: draftBody,
-        wordCount: draftBody.length,
-        tokenUsage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
-      }),
-    );
-    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
-      .mockResolvedValueOnce(
-        createAuditResult({
-          passed: false,
-          issues: [CRITICAL_ISSUE],
-          summary: "needs revision",
-          overallScore: 40,
-          tokenUsage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
-        }),
-      )
-      .mockResolvedValueOnce(
-        createAuditResult({
-          passed: true,
-          issues: [],
-          summary: "clean",
-          overallScore: 95,
-          tokenUsage: { promptTokens: 8, completionTokens: 9, totalTokens: 17 },
-        }),
-      );
-    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
-      createReviseOutput({
-        revisedContent: revisedBody,
-        wordCount: revisedBody.length,
-        tokenUsage: { promptTokens: 6, completionTokens: 7, totalTokens: 13 },
-      }),
-    );
-    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
-      createAnalyzedOutput({
-        content: revisedBody,
-        wordCount: revisedBody.length,
-        tokenUsage: { promptTokens: 10, completionTokens: 11, totalTokens: 21 },
-      }),
-    );
-    vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
-      warnings: [],
-      passed: true,
-      tokenUsage: { promptTokens: 12, completionTokens: 13, totalTokens: 25 },
-    });
+    runner.createAgentContext("writer").onTextDelta?.("正文片段");
 
-    const result = await runner.writeNextChapter(bookId);
-
-    expect(result.tokenUsage).toEqual({
-      promptTokens: 41,
-      completionTokens: 47,
-      totalTokens: 88,
-    });
-
-    await rm(root, { recursive: true, force: true });
+    expect(onTextDelta).toHaveBeenCalledWith("正文片段", "writer");
   });
 
   it("does not reuse override clients when credential sources differ", () => {
@@ -1506,29 +1451,6 @@ describe("PipelineRunner", () => {
         chapter: 1,
       }));
       expect(writeInput?.contextPackage?.selectedContext.length).toBeGreaterThan(0);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("passes skipSettlement to writer in quick writeNextChapter mode", async () => {
-    const { root, runner, bookId } = await createRunnerFixture({
-      inputGovernanceMode: "legacy",
-    });
-    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
-      createWriterOutput({
-        chapterNumber: 1,
-        content: "Quick pipeline draft.",
-        wordCount: "Quick pipeline draft.".length,
-      }),
-    );
-
-    try {
-      await runner.writeNextChapter(bookId, 220, undefined, { mode: "quick" });
-
-      expect(writeChapter.mock.calls[0]?.[0]).toMatchObject({
-        skipSettlement: true,
-      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3378,6 +3300,68 @@ describe("PipelineRunner", () => {
     expect(result.importedCount).toBe(2);
     expect(result.totalWords).toBe("333333333333333".length + "4444444444444444444444444".length);
     expect(result.nextChapter).toBe(5);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("preserves imported chapter body when the analyzer only returns truth-file updates", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "前文",
+      status: "imported",
+      wordCount: 12,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+    await writeFile(
+      join(chaptersDir, "0002_旧标题.md"),
+      "# 第2章 旧标题\n\n旧正文不应该在重导入后继续留在目录里。",
+      "utf-8",
+    );
+    const importedBody = [
+      "老丁守了三十年桥，第一次在河灯节后半夜离开值班室。",
+      "",
+      "江面涨水，灯火贴着桥墩漂过去，他在第三个桥洞口捞起一盏湿透的河灯。",
+      "灯芯没有烧完，里面却夹着半张旧照片。",
+    ].join("\n");
+
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        chapterNumber: 2,
+        title: "河灯还亮着",
+        content: "",
+        wordCount: 0,
+        updatedState: "imported state",
+        updatedLedger: "imported ledger",
+        updatedHooks: "imported hooks",
+      }),
+    );
+    vi.spyOn(WriterAgent.prototype, "saveNewTruthFiles").mockResolvedValue(undefined);
+
+    const result = await runner.importChapters({
+      bookId,
+      resumeFrom: 2,
+      chapters: [
+        { title: "前文", content: "已导入的前文。" },
+        { title: "河灯还亮着", content: importedBody },
+      ],
+    });
+
+    const savedChapter = await readFile(join(chaptersDir, "0002_河灯还亮着.md"), "utf-8");
+    const chapterFiles = await readdir(chaptersDir);
+    const savedIndex = await state.loadChapterIndex(bookId);
+    const expectedCount = countChapterLength(importedBody, "zh_chars");
+
+    expect(result.importedCount).toBe(1);
+    expect(result.totalWords).toBe(expectedCount);
+    expect(savedChapter).toContain(importedBody);
+    expect(chapterFiles).not.toContain("0002_旧标题.md");
+    expect(savedIndex[1]?.wordCount).toBe(expectedCount);
+    expect(savedIndex[1]?.title).toBe("河灯还亮着");
 
     await rm(root, { recursive: true, force: true });
   });

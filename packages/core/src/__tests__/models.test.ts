@@ -361,6 +361,15 @@ describe("ProjectConfigSchema", () => {
     expect(overridden.writing.reviewRetries).toBe(3);
   });
 
+  it("keeps the long-form chapter review mode through config parsing", () => {
+    const parsed = ProjectConfigSchema.parse({
+      ...validProject,
+      writing: { reviewRetries: 1, reviewMode: "manual" },
+    });
+
+    expect(parsed.writing.reviewMode).toBe("manual");
+  });
+
   it("applies default empty notify array", () => {
     const withoutNotify = {
       name: "p1",
@@ -585,21 +594,11 @@ describe("ChapterMemoSchema", () => {
     expect(result.threadRefs).toEqual([]);
   });
 
-  it("allows chapter memo goals up to 80 chars", () => {
-    const result = ChapterMemoSchema.parse({
-      chapter: 1,
-      goal: "a".repeat(80),
-      body: "## 当前任务\nx",
-    });
-
-    expect(result.goal).toHaveLength(80);
-  });
-
-  it("rejects goal longer than 80 chars", () => {
+  it("rejects goal longer than 50 chars", () => {
     expect(() =>
       ChapterMemoSchema.parse({
         chapter: 1,
-        goal: "a".repeat(81),
+        goal: "a".repeat(51),
         body: "## 当前任务\nx",
       }),
     ).toThrow();

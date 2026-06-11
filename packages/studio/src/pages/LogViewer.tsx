@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchJson, useApi } from "../hooks/use-api";
+import { deleteApi, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
@@ -29,6 +29,10 @@ const LEVEL_COLORS: Record<string, string> = {
 };
 
 const MAX_VISIBLE_LOGS = 500;
+
+function isCoreWorkflowLog(entry: LogEntry): boolean {
+  return entry.tag !== "api";
+}
 
 function normalizeSseLog(data: unknown): LogEntry | null {
   if (!data || typeof data !== "object") {
@@ -75,7 +79,7 @@ function formatOperationElapsed(operation: ActiveOperation, now = Date.now()): s
 
 export function LogViewer({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: LogViewerSseState }) {
   const c = useColors(theme);
-  const { data, refetch } = useApi<{ entries: ReadonlyArray<LogEntry> }>("/logs");
+  const { data, error, refetch, mutate } = useApi<{ entries: ReadonlyArray<LogEntry> }>("/logs");
   const { messages, activeOperations = [] } = sse;
   const [liveEntries, setLiveEntries] = useState<ReadonlyArray<LogEntry>>([]);
   const [clearing, setClearing] = useState(false);
@@ -83,8 +87,21 @@ export function LogViewer({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: T
   const liveNow = useLiveNow(activeOperations.length > 0);
 
   useEffect(() => {
-    setLiveEntries(data?.entries ?? []);
+    setLiveEntries((data?.entries ?? []).filter(isCoreWorkflowLog));
   }, [data?.entries]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void refetch();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [refetch]);
 
   useEffect(() => {
     const lastMessage = messages[messages.length - 1];
@@ -96,11 +113,14 @@ export function LogViewer({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: T
       return;
     }
     const entry = normalizeSseLog(lastMessage.data);
-    if (!entry) {
+    if (!entry || !isCoreWorkflowLog(entry)) {
       return;
     }
+    const normalizedEntry = entry.timestamp
+      ? entry
+      : { ...entry, timestamp: new Date(lastMessage.timestamp).toISOString() };
     setLiveEntries((current) => {
-      const next = [...current, entry];
+      const next = [...current, normalizedEntry];
       const seen = new Set<string>();
       return next
         .filter((item) => {
@@ -121,8 +141,10 @@ export function LogViewer({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: T
     setClearing(true);
     setClearError(null);
     setLiveEntries([]);
+    mutate({ entries: [] });
     try {
-      await fetchJson<{ status: string }>("/logs", { method: "DELETE" });
+      await deleteApi<{ status: string }>("/logs");
+      mutate({ entries: [] });
     } catch (e) {
       setClearError(e instanceof Error ? e.message : String(e));
       void refetch();
@@ -177,9 +199,9 @@ export function LogViewer({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: T
         </section>
       )}
 
-      {clearError && (
+      {(clearError || error) && (
         <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {clearError}
+          {clearError ?? `日志接口读取失败：${error}`}
         </div>
       )}
 

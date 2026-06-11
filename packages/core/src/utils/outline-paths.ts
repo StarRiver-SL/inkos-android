@@ -30,6 +30,71 @@ export async function isNewLayoutBook(bookDir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Whether a book's architect foundation is fully written on disk. A long
+ * architect run (especially on a stronger model) can outlive the in-memory
+ * create-status tracking — or the server can restart mid-run — leaving the
+ * status endpoint with no entry. Checking disk lets create-status answer
+ * "ready" truthfully instead of an ambiguous 404 that reads as "failed".
+ *
+ * "Complete" mirrors the five sections the architect must emit
+ * (story_frame / volume_map / book_rules / pending_hooks / roles); a half-built
+ * book that is missing any of these is NOT ready.
+ */
+export async function isBookFoundationComplete(bookDir: string): Promise<boolean> {
+  const required = [
+    join(bookDir, "book.json"),
+    join(bookDir, "story", "outline", "story_frame.md"),
+    join(bookDir, "story", "outline", "volume_map.md"),
+    join(bookDir, "story", "book_rules.md"),
+    join(bookDir, "story", "pending_hooks.md"),
+  ];
+  for (const path of required) {
+    try {
+      await access(path);
+    } catch {
+      return false;
+    }
+  }
+  // Roles must exist via EITHER source the runtime actually reads: a character
+  // sheet under the new roles/<tier>/ dir, OR the legacy character_matrix.md
+  // (readCharacterContext falls back to it). The architect routinely persists
+  // roles to character_matrix.md, so requiring the roles/ dir alone falsely
+  // reported a complete book as "missing".
+  for (const tier of ["主要角色", "major", "次要角色", "minor"]) {
+    try {
+      const entries = await readdir(join(bookDir, "story", "roles", tier));
+      if (entries.some((file) => file.endsWith(".md"))) return true;
+    } catch {
+      // Try the next locale/tier directory.
+    }
+  }
+  try {
+    const matrix = await readFile(join(bookDir, "story", "character_matrix.md"), "utf-8");
+    if (hasLegacyCharacterMatrixRoles(matrix)) return true;
+  } catch {
+    // No legacy matrix either.
+  }
+  return false;
+}
+
+function hasLegacyCharacterMatrixRoles(content: string): boolean {
+  const normalized = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.includes("兼容提示"))
+    .filter((line) => !line.includes("story/roles/"))
+    .filter((line) => !/^\(?(?:none|无|暂无)\)?$/i.test(line));
+
+  return normalized.some((line) => {
+    const match = /^#{2,}\s+(.+)$/.exec(line);
+    if (!match) return false;
+    const title = match[1].trim().replace(/[*`#]/g, "");
+    return !/^(主要角色|次要角色|major roles?|minor roles?|characters?|角色矩阵)$/i.test(title);
+  });
+}
+
 async function readOr(path: string, fallback: string): Promise<string> {
   try {
     return await readFile(path, "utf-8");

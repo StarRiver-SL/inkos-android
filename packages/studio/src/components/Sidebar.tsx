@@ -39,7 +39,20 @@ import {
   Pencil,
   Trash2,
   X,
+  Gamepad2,
+  GitBranch,
+  BookPlus,
 } from "lucide-react";
+
+// 历史记录里的会话混装多种类型，用图标区分。
+function SessionKindIcon({ kind, className }: { readonly kind?: string; readonly className?: string }) {
+  const Icon =
+    kind === "play" ? Gamepad2
+    : kind === "short" ? ScrollText
+    : kind === "book-create" ? BookPlus
+    : MessageSquare;
+  return <Icon size={13} className={className} />;
+}
 
 interface BookSummary {
   readonly id: string;
@@ -55,6 +68,7 @@ interface Nav {
   toBook: (id: string) => void;
   toBookCreate: () => void;
   toServices: () => void;
+  toProjectSettings: () => void;
   toDaemon: () => void;
   toLogs: () => void;
   toGenres: () => void;
@@ -82,6 +96,7 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
   const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
   const activateSession = useChatStore((s) => s.activateSession);
   const createDraftSession = useChatStore((s) => s.createDraftSession);
+  const setInput = useChatStore((s) => s.setInput);
   const renameSession = useChatStore((s) => s.renameSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const [renameTarget, setRenameTarget] = useState<{ sessionId: string; currentTitle: string } | null>(null);
@@ -204,6 +219,14 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
     nav.toChat();
   };
 
+  const launchPlay = (playMode: "guided" | "open") => {
+    setProjectChatExpanded(true);
+    const sessionId = createDraftSession(null, "play", playMode);
+    setProjectChatSessionId(sessionId);
+    setInput("");
+    nav.toChat();
+  };
+
   const toggleProjectChat = () => {
     setProjectChatExpanded((prev) => {
       const next = !prev;
@@ -313,8 +336,12 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
                             <button
                               type="button"
                               onClick={() => openSession(book.id, session.sessionId)}
-                              className="flex min-h-10 min-w-0 flex-1 items-center gap-2 py-1 pl-9 pr-2 text-left text-[13px] transition-colors md:min-h-0"
+                              className="flex min-h-10 min-w-0 flex-1 items-center gap-2 py-1 pl-6 pr-2 text-left text-[13px] transition-colors md:min-h-0"
                             >
+                              <SessionKindIcon
+                                kind={(session as any).sessionKind}
+                                className={`shrink-0 ${isActiveSession ? "text-foreground" : "text-muted-foreground/60 group-hover/session:text-foreground"}`}
+                              />
                               <span className={`truncate flex-1 ${isActiveSession ? "text-foreground" : "text-muted-foreground group-hover/session:text-foreground"}`}>
                                 {label}
                               </span>
@@ -396,6 +423,12 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
               active={activePage === "services"}
               onClick={nav.toServices}
             />
+            <SidebarItem
+              label={t("nav.projectSettings")}
+              icon={<Settings size={16} />}
+              active={activePage === "project-settings"}
+              onClick={nav.toProjectSettings}
+            />
 {/*            <SidebarItem
               label={t("nav.daemon")}
               icon={<Zap size={16} />}
@@ -421,6 +454,18 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
             </span>
           </div>
           <div className="space-y-1">
+            <SidebarItem
+              label={t("nav.createBranching")}
+              icon={<GitBranch size={16} />}
+              active={false}
+              onClick={() => launchPlay("guided")}
+            />
+            <SidebarItem
+              label={t("nav.createFree")}
+              icon={<Gamepad2 size={16} />}
+              active={false}
+              onClick={() => launchPlay("open")}
+            />
             <div>
               <div
                 data-active={activePage === "chat"}
@@ -472,8 +517,12 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
                         <button
                           type="button"
                           onClick={() => openProjectChatSession(session.sessionId)}
-                          className="flex min-h-10 min-w-0 flex-1 items-center gap-2 py-1 pl-9 pr-2 text-left text-[13px] transition-colors md:min-h-0"
+                          className="flex min-h-10 min-w-0 flex-1 items-center gap-2 py-1 pl-6 pr-2 text-left text-[13px] transition-colors md:min-h-0"
                         >
+                          <SessionKindIcon
+                            kind={(session as any).sessionKind}
+                            className={`shrink-0 ${isActiveSession ? "text-foreground" : "text-muted-foreground/60 group-hover/session:text-foreground"}`}
+                          />
                           <span className={`truncate flex-1 ${isActiveSession ? "text-foreground" : "text-muted-foreground group-hover/session:text-foreground"}`}>
                             {label}
                           </span>

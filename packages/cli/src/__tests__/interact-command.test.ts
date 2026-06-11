@@ -1,142 +1,127 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createProgram } from "../program.js";
+import { createInteractCommand } from "../commands/interact.js";
+
+const {
+  buildPipelineConfigMock,
+  createClientMock,
+  findProjectRootMock,
+  loadConfigMock,
+  runAgentSessionMock,
+} = vi.hoisted(() => ({
+  buildPipelineConfigMock: vi.fn(() => ({})),
+  createClientMock: vi.fn(() => ({
+    _piModel: {
+      id: "gpt-5.4",
+      name: "gpt-5.4",
+      api: "openai-completions",
+      provider: "openai",
+      baseUrl: "https://example.invalid/v1",
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 8192,
+    },
+    _apiKey: "secret",
+  })),
+  findProjectRootMock: vi.fn(() => "/tmp/inkos-project"),
+  loadConfigMock: vi.fn(async () => ({
+    llm: {
+      provider: "openai",
+      model: "gpt-5.4",
+      apiFormat: "chat",
+      stream: false,
+    },
+    language: "zh",
+  })),
+  runAgentSessionMock: vi.fn(async () => ({
+    responseText: "Agent response.",
+    messages: [{ role: "assistant", content: "Agent response." }],
+  })),
+}));
+
+vi.mock("@actalk/inkos-core", async () => ({
+  PipelineRunner: class PipelineRunnerMock {
+    constructor(_config: unknown) {}
+  },
+  runAgentSession: runAgentSessionMock,
+}));
+
+vi.mock("../utils.js", () => ({
+  buildPipelineConfig: buildPipelineConfigMock,
+  createClient: createClientMock,
+  findProjectRoot: findProjectRootMock,
+  loadConfig: loadConfigMock,
+}));
 
 describe("interact command", () => {
-  const originalArgv = process.argv;
-  let projectRoot: string;
-  let stdoutSpy: ReturnType<typeof vi.spyOn> | {
-    mockClear: () => void;
-    mock: { calls: Array<ReadonlyArray<unknown>> };
-  };
+  let stdoutOutput: string[];
 
-  beforeEach(async () => {
-    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    projectRoot = await mkdtemp(join(tmpdir(), "inkos-interact-cli-"));
-    await mkdir(join(projectRoot, "books", "harbor"), { recursive: true });
-    await writeFile(join(projectRoot, "books", "harbor", "book.json"), "{}", "utf-8");
-    stdoutSpy.mockClear();
-    process.argv = originalArgv;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stdoutOutput = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      stdoutOutput.push(String(chunk));
+      return true;
+    });
   });
 
   afterEach(() => {
-    process.argv = originalArgv;
     vi.restoreAllMocks();
   });
 
-  it("routes natural language through the shared executor and prints plain text by default", async () => {
-    const runInteraction = vi.fn(async () => ({
-      request: { intent: "write_next" },
-      responseText: "Continuing harbor.",
-      session: {
-        activeBookId: "harbor",
-        automationMode: "semi",
-        messages: [{ role: "assistant", content: "Continuing harbor.", timestamp: 1 }],
-        events: [{ kind: "task.completed", status: "completed", timestamp: 1 }],
-      },
-    }));
+  it("routes natural language through runAgentSession", async () => {
+    const command = createInteractCommand({ readInput: async () => "" });
 
-    const program = createProgram({
-      runInteraction,
-      readInteractionInput: async () => "",
-    });
+    await command.parseAsync(["continue", "--book", "harbor"], { from: "user" });
 
-    await program.parseAsync(["interact", "continue", "--book", "harbor"], {
-      from: "user",
-    });
-
-    expect(runInteraction).toHaveBeenCalledWith(
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        projectRoot: process.cwd(),
-        input: "continue",
-        activeBookId: "harbor",
+        projectRoot: "/tmp/inkos-project",
+        bookId: "harbor",
+        sessionKind: "book",
+        actionSource: "free-text",
+        requestedIntent: undefined,
       }),
+      "continue",
     );
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("Continuing harbor."));
+    expect(stdoutOutput.join("")).toContain("Agent response.");
   });
 
-  it("emits structured JSON when --json is used", async () => {
-    const runInteraction = vi.fn(async () => ({
-      request: { intent: "switch_mode", mode: "auto" },
-      responseText: "Switched to auto.",
-      session: {
-        activeBookId: "harbor",
-        automationMode: "auto",
-        messages: [],
-        events: [{ kind: "task.completed", status: "completed", timestamp: 1 }],
-      },
-    }));
+  it("passes slash write as a requested intent", async () => {
+    const command = createInteractCommand({ readInput: async () => "" });
 
-    const program = createProgram({
-      runInteraction,
-      readInteractionInput: async () => "",
-    });
+    await command.parseAsync(["/write", "--book", "harbor", "--json"], { from: "user" });
 
-    await program.parseAsync(["interact", "切换到全自动", "--book", "harbor", "--json"], {
-      from: "user",
-    });
-
-    const output = stdoutSpy.mock.calls.map((call) => String(call[0])).join("");
-    const parsed = JSON.parse(output);
-    expect(parsed.request.intent).toBe("switch_mode");
-    expect(parsed.responseText).toBe("Switched to auto.");
-    expect(parsed.session.automationMode).toBe("auto");
-  });
-
-  it("accepts --message as an explicit OpenClaw-friendly input channel", async () => {
-    const runInteraction = vi.fn(async () => ({
-      request: { intent: "continue_book" },
-      responseText: "Continuing via --message.",
-      session: {
-        activeBookId: "harbor",
-        automationMode: "semi",
-        messages: [],
-        events: [],
-      },
-    }));
-
-    const program = createProgram({
-      runInteraction,
-      readInteractionInput: async () => "",
-    });
-
-    await program.parseAsync(["interact", "--book", "harbor", "--message", "continue current book"], {
-      from: "user",
-    });
-
-    expect(runInteraction).toHaveBeenCalledWith(
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        input: "continue current book",
-        activeBookId: "harbor",
+        bookId: "harbor",
+        sessionKind: "book",
+        actionSource: "slash",
+        requestedIntent: "write_next",
       }),
+      "/write",
     );
+    const output = stdoutOutput.join("");
+    expect(JSON.parse(output)).toEqual(expect.objectContaining({
+      responseText: "Agent response.",
+      session: expect.objectContaining({
+        sessionKind: "book",
+        activeBookId: "harbor",
+      }),
+    }));
   });
 
-  it("reads the message from stdin when no args are provided", async () => {
-    const runInteraction = vi.fn(async () => ({
-      request: { intent: "explain_status" },
-      responseText: "Explaining status.",
-      session: {
-        activeBookId: "harbor",
-        automationMode: "semi",
-        messages: [],
-        events: [],
-      },
-    }));
+  it("reads input from the injected stdin helper", async () => {
+    const command = createInteractCommand({ readInput: async () => "why did it stop?" });
 
-    const program = createProgram({
-      runInteraction,
-      readInteractionInput: async () => "why did it stop?",
-    });
+    await command.parseAsync([], { from: "user" });
 
-    await program.parseAsync(["interact"], { from: "user" });
-
-    expect(runInteraction).toHaveBeenCalledWith(
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        input: "why did it stop?",
+        sessionKind: "chat",
+        actionSource: "free-text",
       }),
+      "why did it stop?",
     );
   });
 });

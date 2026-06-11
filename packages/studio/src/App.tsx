@@ -11,6 +11,7 @@ import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
 import { ServiceListPage } from "./pages/ServiceListPage";
 import { ServiceDetailPage } from "./pages/ServiceDetailPage";
+import { ProjectSettings } from "./pages/ProjectSettings";
 import { TruthFiles } from "./pages/TruthFiles";
 import { DaemonControl } from "./pages/DaemonControl";
 import { LogViewer } from "./pages/LogViewer";
@@ -919,6 +920,7 @@ export function App() {
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
   const [startupRetryCount, setStartupRetryCount] = useState(0);
+  const [startupDiagnostics, setStartupDiagnostics] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const closeSidebar = () => setSidebarOpen(false);
 
@@ -988,6 +990,20 @@ export function App() {
     setReady(true);
   }, [projectError, project, refetchProject, startupRetryCount]);
 
+  useEffect(() => {
+    if (!projectError || !isNativeRuntime()) {
+      setStartupDiagnostics("");
+      return;
+    }
+    void readAndroidRuntimeDiagnostics().then(({ status, output }) => {
+      setStartupDiagnostics([
+        status?.state ? `状态：${status.state}` : "",
+        status?.message ?? "",
+        output?.trim().slice(-4000) ?? "",
+      ].filter(Boolean).join("\n\n"));
+    });
+  }, [projectError, startupRetryCount]);
+
   useSessionEvents(sse, route, setRoute);
 
   const nav = {
@@ -1000,13 +1016,14 @@ export function App() {
       { setRoute({ page: "chapter", bookId, chapterNumber }); closeSidebar(); },
     toAnalytics: (bookId: string) => { setRoute({ page: "analytics", bookId }); closeSidebar(); },
     toServices: () => { setRoute({ page: "services" }); closeSidebar(); },
+    toProjectSettings: () => { setRoute({ page: "project-settings" }); closeSidebar(); },
     toServiceDetail: (id: string) => { setRoute({ page: "service-detail", serviceId: id }); closeSidebar(); },
     toTruth: (bookId: string) => { setRoute({ page: "truth", bookId }); closeSidebar(); },
     toDaemon: () => { setRoute({ page: "daemon" }); closeSidebar(); },
     toLogs: () => { setRoute({ page: "logs" }); closeSidebar(); },
     toGenres: () => { setRoute({ page: "genres" }); closeSidebar(); },
     toStyle: () => { setRoute({ page: "style" }); closeSidebar(); },
-    toImport: () => { setRoute({ page: "import" }); closeSidebar(); },
+    toImport: (tab?: "chapters" | "canon" | "fanfic" | "spinoff" | "imitation") => { setRoute({ page: "import", ...(tab ? { tab } : {}) }); closeSidebar(); },
     toRadar: () => { setRoute({ page: "radar" }); closeSidebar(); },
     toDoctor: () => { setRoute({ page: "doctor" }); closeSidebar(); },
   };
@@ -1040,16 +1057,37 @@ export function App() {
         <div className="max-w-md rounded-3xl border border-destructive/20 bg-card/85 p-6 shadow-xl shadow-primary/5">
           <div className="text-sm font-semibold text-destructive">Studio 暂时连不上后端</div>
           <p className="mt-3 text-sm leading-7 text-muted-foreground">{projectError}</p>
-          <button
-            onClick={async () => {
-              await ensureEmbeddedNodeRunning();
-              setReady(false);
-              refetchProject();
-            }}
-            className="mt-5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-          >
-            重试
-          </button>
+          {startupDiagnostics && (
+            <pre className="mt-4 max-h-48 overflow-auto whitespace-pre-wrap rounded-2xl border border-border/60 bg-muted/40 p-3 text-left text-xs leading-5 text-muted-foreground">
+              {startupDiagnostics}
+            </pre>
+          )}
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button
+              onClick={async () => {
+                await ensureEmbeddedNodeRunning();
+                setReady(false);
+                setStartupRetryCount(0);
+                refetchProject();
+              }}
+              className="rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+            >
+              重启并重试
+            </button>
+            {isNativeRuntime() && (
+              <button
+                onClick={async () => {
+                  await resetEmbeddedNodeRuntime();
+                  setReady(false);
+                  setStartupRetryCount(0);
+                  window.setTimeout(() => refetchProject(), 1500);
+                }}
+                className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground"
+              >
+                重置运行时缓存
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1199,6 +1237,11 @@ export function App() {
               <ServiceListPage nav={nav} />
             </div>
           )}
+          {route.page === "project-settings" && (
+            <div className="max-w-6xl mx-auto px-4 py-6 md:px-10 md:py-10 lg:py-12 fade-in">
+              <ProjectSettings nav={nav} theme={theme} t={t} />
+            </div>
+          )}
           {route.page === "service-detail" && (
             <div className="max-w-6xl mx-auto px-4 py-6 md:px-10 md:py-10 lg:py-12 fade-in">
               <ServiceDetailPage serviceId={route.serviceId} nav={nav} />
@@ -1231,7 +1274,7 @@ export function App() {
           )}
           {route.page === "import" && (
             <div className="max-w-6xl mx-auto px-4 py-6 md:px-10 md:py-10 lg:py-12 fade-in">
-              <ImportManager nav={nav} theme={theme} t={t} />
+              <ImportManager nav={nav} theme={theme} t={t} initialTab={route.tab} />
             </div>
           )}
           {route.page === "radar" && (

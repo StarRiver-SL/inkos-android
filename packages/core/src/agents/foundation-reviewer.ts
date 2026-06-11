@@ -26,16 +26,17 @@ export class FoundationReviewerAgent extends BaseAgent {
     readonly sourceCanon?: string;
     readonly styleGuide?: string;
     readonly language: "zh" | "en";
+    readonly targetChapters?: number;
   }): Promise<FoundationReviewResult> {
     const canonBlock = params.sourceCanon
-      ? `\n## 原作正典参照\n${params.sourceCanon.slice(0, 8000)}\n`
+      ? `\n## 原作正典参照\n${params.sourceCanon}\n`
       : "";
     const styleBlock = params.styleGuide
-      ? `\n## 原作风格参照\n${params.styleGuide.slice(0, 2000)}\n`
+      ? `\n## 原作风格参照\n${params.styleGuide}\n`
       : "";
 
     const dimensions = params.mode === "original"
-      ? this.originalDimensions(params.language)
+      ? this.originalDimensions(params.language, params.targetChapters)
       : this.derivativeDimensions(params.language, params.mode);
 
     const systemPrompt = params.language === "en"
@@ -52,21 +53,26 @@ export class FoundationReviewerAgent extends BaseAgent {
     return this.parseReviewResult(response.content, dimensions);
   }
 
-  private originalDimensions(language: "zh" | "en"): ReadonlyArray<string> {
+  private originalDimensions(language: "zh" | "en", targetChapters?: number): ReadonlyArray<string> {
+    const target = Number.isFinite(targetChapters) && targetChapters && targetChapters > 0
+      ? Math.round(targetChapters)
+      : 40;
+    const openingWindow = Math.min(5, target);
+    const repeatWindow = Math.min(10, Math.max(3, target));
     return language === "en"
       ? [
-          "Core Conflict (Is there a clear, compelling central conflict that can sustain 40 chapters?)",
-          "Opening Momentum (Can the first 5 chapters create a page-turning hook?)",
+          `Core Conflict (Is there a clear, compelling central conflict that can sustain the requested ${target} chapters?)`,
+          `Opening Momentum (Can the first ${openingWindow} chapters create a page-turning hook?)`,
           "World Coherence (Is the worldbuilding internally consistent and specific?)",
           "Character Differentiation (Are the main characters distinct in voice and motivation?)",
-          "Pacing Feasibility (Does the volume outline have enough variety — not the same beat for 10 chapters?)",
+          `Pacing Feasibility (Does the outline fit the requested ${target} chapters and avoid repeating the same beat for ${repeatWindow} chapters?)`,
         ]
       : [
-          "核心冲突（是否有清晰且有足够张力的核心冲突支撑40章？）",
-          "开篇节奏（前5章能否形成翻页驱动力？）",
+          `核心冲突（是否有清晰且有足够张力的核心冲突支撑用户要求的${target}章？）`,
+          `开篇节奏（前${openingWindow}章能否形成翻页驱动力？）`,
           "世界一致性（世界观是否内洽且具体？）",
           "角色区分度（主要角色的声音和动机是否各不相同？）",
-          "节奏可行性（卷纲是否有足够变化——不会连续10章同一种节拍？）",
+          `节奏可行性（大纲是否适配用户要求的${target}章，并避免连续${repeatWindow}章同一种节拍？）`,
         ];
   }
 
@@ -166,8 +172,8 @@ Be strict. 80 means "ready to write without changes."`;
 
   private buildFoundationExcerpt(foundation: ArchitectOutput, language: "zh" | "en"): string {
     return language === "en"
-      ? `## Story Bible\n${foundation.storyBible.slice(0, 3000)}\n\n## Volume Outline\n${foundation.volumeOutline.slice(0, 3000)}\n\n## Book Rules\n${foundation.bookRules.slice(0, 1500)}\n\n## Initial State\n${foundation.currentState.slice(0, 1000)}\n\n## Initial Hooks\n${foundation.pendingHooks.slice(0, 1000)}`
-      : `## 世界设定\n${foundation.storyBible.slice(0, 3000)}\n\n## 卷纲\n${foundation.volumeOutline.slice(0, 3000)}\n\n## 规则\n${foundation.bookRules.slice(0, 1500)}\n\n## 初始状态\n${foundation.currentState.slice(0, 1000)}\n\n## 初始伏笔\n${foundation.pendingHooks.slice(0, 1000)}`;
+      ? `## Story Bible\n${foundation.storyBible}\n\n## Volume Outline\n${foundation.volumeOutline}\n\n## Book Rules\n${foundation.bookRules}\n\n## Initial State\n${foundation.currentState}\n\n## Initial Hooks\n${foundation.pendingHooks}`
+      : `## 世界设定\n${foundation.storyBible}\n\n## 卷纲\n${foundation.volumeOutline}\n\n## 规则\n${foundation.bookRules}\n\n## 初始状态\n${foundation.currentState}\n\n## 初始伏笔\n${foundation.pendingHooks}`;
   }
 
   private parseReviewResult(

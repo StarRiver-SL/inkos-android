@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriterAgent } from "../agents/writer.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
-import { getHeadroomSavingsTelemetry, headroomRetrieve } from "../utils/headroom-cache.js";
 
 const ZERO_USAGE = {
   promptTokens: 0,
@@ -102,107 +101,6 @@ describe("WriterAgent", () => {
     expect(prompt).toContain("当面对质");
   });
 
-  it("compresses governed chapter context before sending it to the model and keeps a CCR handle", async () => {
-    const projectRoot = await mkdtemp(join(tmpdir(), "inkos-writer-compressed-context-"));
-    try {
-      const agent = new WriterAgent({
-        client: {
-          provider: "openai",
-          apiFormat: "chat",
-          stream: false,
-          defaults: {
-            temperature: 0.7,
-            maxTokens: 4096,
-            thinkingBudget: 0,
-            extra: {},
-          },
-        },
-        model: "test-model",
-        projectRoot,
-      });
-      const verboseExcerpt = Array.from(
-        { length: 80 },
-        (_, index) => `第${index + 1}条：这是非常重要且极其关键的账本线索。`,
-      ).join("\n");
-
-      const prompt = (agent as unknown as {
-        buildGovernedUserPrompt(params: {
-          readonly chapterNumber: number;
-          readonly chapterMemo: {
-            readonly chapter: number;
-            readonly goal: string;
-            readonly isGoldenOpening: boolean;
-            readonly body: string;
-            readonly threadRefs: readonly string[];
-          };
-          readonly contextPackage: {
-            readonly chapter: number;
-            readonly selectedContext: ReadonlyArray<{
-              readonly source: string;
-              readonly reason: string;
-              readonly excerpt: string;
-            }>;
-          };
-          readonly ruleStack: {
-            readonly layers: readonly [];
-            readonly sections: {
-              readonly hard: readonly string[];
-              readonly soft: readonly string[];
-              readonly diagnostic: readonly string[];
-            };
-            readonly overrideEdges: readonly [];
-            readonly activeOverrides: readonly [];
-          };
-          readonly lengthSpec: ReturnType<typeof buildLengthSpec>;
-          readonly language?: "zh" | "en";
-          readonly externalContext?: string;
-        }): string;
-      }).buildGovernedUserPrompt({
-        chapterNumber: 8,
-        chapterMemo: {
-          chapter: 8,
-          goal: "追查账本",
-          isGoldenOpening: false,
-          body: "## 当前任务\n追查账本。",
-          threadRefs: [],
-        },
-        contextPackage: {
-          chapter: 8,
-          selectedContext: [{
-            source: "story/chapter_summaries.md",
-            reason: "保留账本线索",
-            excerpt: verboseExcerpt,
-          }],
-        },
-        ruleStack: {
-          layers: [],
-          sections: { hard: ["不得改变账本归属"], soft: [], diagnostic: [] },
-          overrideEdges: [],
-          activeOverrides: [],
-        },
-        lengthSpec: buildLengthSpec(1200, "zh"),
-        language: "zh",
-        externalContext: "本章必须在仓库对质。",
-      });
-
-      expect(prompt).toContain("<!-- headroom:ccr ");
-      expect(prompt).not.toContain("非常重要且极其关键");
-      expect(prompt).toContain("本章必须在仓库对质");
-      expect(prompt).toContain("不得改变账本归属");
-      const handle = prompt.match(/<!-- headroom:ccr ([^\s]+) /)?.[1];
-      expect(handle).toBeTruthy();
-      await expect(headroomRetrieve(projectRoot, handle!)).resolves.toContain("非常重要且极其关键");
-      expect(getHeadroomSavingsTelemetry().pipeline).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          kind: "compressed",
-          label: "writer-ch8-selected-context",
-        }),
-      ]));
-    } finally {
-      await rm(projectRoot, { recursive: true, force: true });
-    }
-  });
-
   it("caps oversized legacy truth files in creative prompts", () => {
     const agent = new WriterAgent({
       client: {
@@ -262,56 +160,6 @@ describe("WriterAgent", () => {
     expect(prompt).toContain("InkOS context budget");
     expect(prompt).toContain("story_bible");
     expect(prompt).not.toContain("MIDDLE-MARKER");
-  });
-
-  it("persists a generic resource ledger row for non-numerical genres", async () => {
-    const root = await mkdtemp(join(tmpdir(), "inkos-writer-ledger-test-"));
-    const bookDir = join(root, "book");
-    const storyDir = join(bookDir, "story");
-    await mkdir(storyDir, { recursive: true });
-
-    try {
-      const agent = new WriterAgent({
-        client: {
-          provider: "openai",
-          apiFormat: "chat",
-          stream: false,
-          defaults: {
-            temperature: 0.7,
-            maxTokens: 4096,
-            thinkingBudget: 0,
-            extra: {},
-          },
-        },
-        model: "test-model",
-        projectRoot: root,
-      });
-
-      await agent.saveChapter(bookDir, {
-        chapterNumber: 3,
-        title: "雨夜账本",
-        content: "林秋把账本藏进伞骨。",
-        wordCount: 9,
-        preWriteCheck: "",
-        postSettlement: "",
-        updatedState: "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前章节 | 3 |",
-        updatedLedger: "(账本未更新)",
-        updatedHooks: "# 待回收伏笔\n\n| hook_id | 状态 |\n|---|---|\n| ledger | open |",
-        chapterSummary: "| 3 | 雨夜账本 | 林秋 | 账本被藏入伞骨 | 线索从公开变为私藏 | ledger advanced | 紧张 | 主线 |",
-        updatedSubplots: "",
-        updatedEmotionalArcs: "",
-        updatedCharacterMatrix: "",
-        postWriteErrors: [],
-        postWriteWarnings: [],
-      }, false, "zh");
-
-      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
-      expect(ledger).toContain("雨夜账本");
-      expect(ledger).toContain("剧情资源");
-      expect(ledger).toContain("账本被藏入伞骨");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
   });
 
   it("uses compact summary context plus selected long-range evidence during governed settlement", async () => {
@@ -398,6 +246,10 @@ describe("WriterAgent", () => {
           "=== PRE_WRITE_CHECK ===",
           "- ok",
         ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
@@ -498,7 +350,7 @@ describe("WriterAgent", () => {
         lengthSpec: buildLengthSpec(220, "zh"),
       });
 
-      const settlePrompt = (chatSpy.mock.calls[1]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
+      const settlePrompt = (chatSpy.mock.calls[2]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
       expect(settlePrompt).toContain("## 本章控制输入");
       expect(settlePrompt).toContain("story/chapter_summaries.md#99");
       expect(settlePrompt).toContain("| 99 | Locked Gate |");
@@ -509,90 +361,6 @@ describe("WriterAgent", () => {
       expect(settlePrompt).not.toContain("old-seal");
       expect(settlePrompt).not.toContain("Guildmaster Ren");
       expect(settlePrompt).not.toContain("| Lin Yue | 40 | 麻木 |");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("skips the settlement LLM when quick writing requests deferred state settlement", async () => {
-    const root = await mkdtemp(join(tmpdir(), "inkos-writer-quick-skip-settlement-"));
-    const bookDir = join(root, "book");
-    const storyDir = join(bookDir, "story");
-    const chaptersDir = join(bookDir, "chapters");
-    await mkdir(storyDir, { recursive: true });
-    await mkdir(chaptersDir, { recursive: true });
-
-    await Promise.all([
-      writeFile(join(chaptersDir, "index.json"), "[]", "utf-8"),
-      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\nLong setting bible that should not force a second LLM call.\n", "utf-8"),
-      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nOpen with the ledger.\n", "utf-8"),
-      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Direct prose.\n", "utf-8"),
-      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n| Field | Value |\n| --- | --- |\n| Current Chapter | 0 |\n", "utf-8"),
-      writeFile(join(storyDir, "particle_ledger.md"), "# Particle Ledger\n", "utf-8"),
-      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n(None yet.)\n", "utf-8"),
-      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n\n| Chapter | Title | Characters | Key Events | State Changes | Hook Activity | Mood | Chapter Type |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n", "utf-8"),
-      writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n", "utf-8"),
-      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
-      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
-    ]);
-
-    const agent = new WriterAgent({
-      client: {
-        provider: "openai",
-        apiFormat: "chat",
-        stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0,
-          extra: {},
-        },
-      },
-      model: "test-model",
-      projectRoot: root,
-    });
-
-    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
-      .mockResolvedValueOnce({
-        content: [
-          "=== PRE_WRITE_CHECK ===",
-          "- ok",
-          "",
-          "=== CHAPTER_TITLE ===",
-          "Ledger Rain",
-          "",
-          "=== CHAPTER_CONTENT ===",
-          "Rain tapped the ledger while Lin Yue chose the road ahead.",
-        ].join("\n"),
-        usage: { promptTokens: 11, completionTokens: 22, totalTokens: 33 },
-      });
-
-    try {
-      const output = await agent.writeChapter({
-        book: {
-          id: "quick-book",
-          title: "Quick Book",
-          platform: "tomato",
-          genre: "xuanhuan",
-          status: "active",
-          targetChapters: 80,
-          chapterWordCount: 2200,
-          createdAt: "2026-03-23T00:00:00.000Z",
-          updatedAt: "2026-03-23T00:00:00.000Z",
-          language: "en",
-        },
-        bookDir,
-        chapterNumber: 1,
-        lengthSpec: buildLengthSpec(120, "en"),
-        skipSettlement: true,
-      });
-
-      expect(chatSpy).toHaveBeenCalledTimes(1);
-      expect(output.postSettlement).toContain("Quick mode skipped");
-      expect(output.updatedState).toBe("");
-      expect(output.updatedHooks).toBe("");
-      expect(output.chapterSummary).toContain("settlement deferred");
-      expect(output.tokenUsage).toEqual({ promptTokens: 11, completionTokens: 22, totalTokens: 33 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -666,6 +434,10 @@ describe("WriterAgent", () => {
           "=== PRE_WRITE_CHECK ===",
           "- ok",
         ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
@@ -743,6 +515,98 @@ describe("WriterAgent", () => {
     }
   });
 
+  it("falls back to legacy settlement tags when runtime-state delta JSON is malformed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-bad-delta-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- The jade seal cannot be destroyed.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 3\nTrace the debt.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep it tense.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n| Field | Value |\n| --- | --- |\n| Current Chapter | 2 |\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "| hook_id | status |\n| --- | --- |\n| mentor-debt | open |\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "| chapter | title | events |\n| --- | --- | --- |\n| 2 | Old Ledger | Debt sharpens |\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "| character | role |\n| --- | --- |\n| Lin Yue | lead |\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- legacy settlement survived",
+          "",
+          "=== RUNTIME_STATE_DELTA ===",
+          "{ this is not json }",
+          "",
+          "=== UPDATED_STATE ===",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| Current Chapter | 3 |",
+          "| Current Goal | Keep tracing the debt |",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "| hook_id | status |",
+          "| --- | --- |",
+          "| mentor-debt | progressing |",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 3 | River Ledger | Lin Yue | Legacy fallback wrote summary |",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.settleChapterState({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-03-25T00:00:00.000Z",
+          updatedAt: "2026-03-25T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 3,
+        title: "River Ledger",
+        content: "Lin Yue follows the debt into the river-port ledger.",
+      });
+
+      expect(output.runtimeStateDelta).toBeUndefined();
+      expect(output.postSettlement).toContain("legacy settlement survived");
+      expect(output.updatedState).toContain("Keep tracing the debt");
+      expect(output.updatedHooks).toContain("mentor-debt");
+      expect(output.chapterSummary).toContain("Legacy fallback wrote summary");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("overrides hallucinated chapter numbers across both delta and summary row", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-runtime-state-hallucinated-chapter-test-"));
     const bookDir = join(root, "book");
@@ -811,6 +675,10 @@ describe("WriterAgent", () => {
           "=== PRE_WRITE_CHECK ===",
           "- ok",
         ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
@@ -959,6 +827,10 @@ describe("WriterAgent", () => {
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
         content: [
           "=== POST_SETTLEMENT ===",
           "- source scope widens",
@@ -1081,6 +953,10 @@ describe("WriterAgent", () => {
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
         content: [
           "=== POST_SETTLEMENT ===",
           "| 伏笔变动 | mentor-oath 推进 | 同步更新伏笔池 |",
@@ -1128,6 +1004,8 @@ describe("WriterAgent", () => {
       expect(infos).toEqual(expect.arrayContaining([
         "阶段 1：创作正文（第1章）",
         "阶段 2：状态结算（第1章，18字）",
+        "阶段 2a：提取第1章事实",
+        "阶段 2b：把观察结果回写到真相文件",
       ]));
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1192,6 +1070,10 @@ describe("WriterAgent", () => {
           "=== PRE_WRITE_CHECK ===",
           "- ok",
         ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
@@ -1318,6 +1200,10 @@ describe("WriterAgent", () => {
           "=== PRE_WRITE_CHECK ===",
           "- ok",
         ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
@@ -1466,6 +1352,10 @@ describe("WriterAgent", () => {
         usage: ZERO_USAGE,
       })
       .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
         content: [
           "=== POST_SETTLEMENT ===",
           "- ledger-fragment advanced",
@@ -1541,7 +1431,7 @@ describe("WriterAgent", () => {
       const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
 
       expect(systemPrompt).not.toContain("Hook-A / Hook-B");
-      expect(systemPrompt).toContain("真实 hook_id");
+      expect(systemPrompt).toContain("Real hook_id"); // English book gets the English output scaffold
       // Enum/identifier fields (hookId, movement, chapterType) are NOT sanitized —
       // the writer needs them to understand which hook to move and what chapter type
       // to write. Free-text fields (goal, instruction, targetEffect) ARE sanitized.

@@ -8,6 +8,7 @@ export interface SSEMessage {
 }
 
 export interface ActiveOperation {
+  readonly id?: string;
   readonly type?: string;
   readonly bookId?: string;
   readonly status?: string;
@@ -65,16 +66,58 @@ export const STUDIO_SSE_EVENTS = [
   "fanfic:refresh:error",
   "draft:delta",
   "write:delta",
+  "llm:delta",
   "radar:start",
   "radar:complete",
   "radar:error",
   "log",
+  "logs:clear",
   "llm:progress",
+  "context:compression",
+  "tool:start",
+  "tool:update",
+  "tool:end",
   "operations:restore",
   "operations:update",
   "operations:history",
   "ping",
 ] as const;
+
+function operationId(event: string, data: unknown): string {
+  const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  return String(record.execId ?? record.requestId ?? record.sessionId ?? record.bookId ?? event);
+}
+
+function operationLabel(event: string, data: unknown): string {
+  const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const tool = String(record.tool ?? record.toolName ?? record.name ?? "").trim();
+  if (event === "tool:start" && tool) return tool.startsWith("play_") ? "InkOS Play" : tool;
+  const type = event.split(":")[0];
+  const labels: Record<string, string> = {
+    agent: "智能体任务",
+    write: "章节写作",
+    draft: "草稿生成",
+    audit: "章节审稿",
+    revise: "章节修订",
+    rewrite: "章节重写",
+    style: "文风分析",
+    import: "内容导入",
+    fanfic: "同人创作",
+    imitation: "仿写创作",
+    spinoff: "番外创作",
+    radar: "雷达分析",
+    foundation: "设定生成",
+  };
+  return labels[type] ?? "InkOS 正在执行任务";
+}
+
+function isOperationStart(event: string): boolean {
+  return event === "tool:start" || event.endsWith(":start") || event === "book:creating";
+}
+
+function isOperationEnd(event: string): boolean {
+  return event === "tool:end" || event.endsWith(":complete") || event.endsWith(":error") || event === "book:created" || event === "book:error";
+}
 
 function normalizeActiveOperations(operations: unknown): ActiveOperation[] {
   return Array.isArray(operations)
@@ -171,6 +214,25 @@ export function useSSE(url = "/events") {
     const handleEvent = (e: MessageEvent) => {
       try {
         const data = e.data ? JSON.parse(e.data) : null;
+        if (isOperationStart(e.type)) {
+          const id = operationId(e.type, data);
+          const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+          const operation: ActiveOperation = {
+            id,
+            type: e.type.replace(/:start$/, ""),
+            label: operationLabel(e.type, data),
+            message: String(record.message ?? record.instruction ?? "任务正在运行"),
+            sessionId: typeof record.sessionId === "string" ? record.sessionId : undefined,
+            bookId: typeof record.bookId === "string" ? record.bookId : undefined,
+            startedAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          setActiveOperations((current) => [operation, ...current.filter((item) => item.id !== id)].slice(0, 8));
+        } else if (isOperationEnd(e.type)) {
+          const id = operationId(e.type.replace(/:(?:complete|error|end)$/, ":start"), data);
+          const baseType = e.type.replace(/:(?:complete|error|end)$/, "");
+          setActiveOperations((current) => current.filter((item) => item.id !== id && item.type !== baseType));
+        }
         if (
           (e.type === "operations:restore" || e.type === "operations:update")
           && Array.isArray(data?.operations)

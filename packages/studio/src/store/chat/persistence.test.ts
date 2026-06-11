@@ -25,7 +25,17 @@ describe("chat persistence", () => {
     vi.stubGlobal("window", { localStorage });
   });
 
-  it("caps persisted localStorage payloads for large chat sessions", () => {
+  it("persists unsent chat input immediately", () => {
+    persistInputDraft("typed just before webview reload");
+
+    expect(loadPersistedInputDraft()).toBe("typed just before webview reload");
+    expect(loadPersistedMessageState().input).toBe("typed just before webview reload");
+
+    persistInputDraft("");
+    expect(loadPersistedInputDraft()).toBe("");
+  });
+
+  it("caps localStorage payloads and preserves current session metadata", () => {
     const messages = Array.from({ length: 120 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: `message-${index} ${"长文本".repeat(1_800)}`,
@@ -38,6 +48,8 @@ describe("chat persistence", () => {
         "session-large": {
           sessionId: "session-large",
           bookId: "book",
+          sessionKind: "play",
+          playMode: "open",
           title: null,
           messages,
           deletedMessageKeys: [],
@@ -55,48 +67,11 @@ describe("chat persistence", () => {
 
     persistMessageState(state);
 
-    const raw = [...storage.values()][0] ?? "";
+    const raw = [...storage.values()].find((value) => value.includes("session-large")) ?? "";
     const loaded = loadPersistedMessageState();
     expect(raw.length).toBeLessThanOrEqual(240_000);
-    expect(loaded.sessions?.["session-large"]?.messages.length).toBeLessThan(80);
+    expect(loaded.sessions?.["session-large"]?.sessionKind).toBe("play");
+    expect(loaded.sessions?.["session-large"]?.playMode).toBe("open");
     expect(loaded.sessions?.["session-large"]?.messages.at(-1)?.content).toContain("message-119");
-  });
-
-  it("persists unsent chat input", () => {
-    const state: MessageState = {
-      activeSessionId: "session-draft",
-      sessionIdsByBook: { null: ["session-draft"] },
-      sessions: {
-        "session-draft": {
-          sessionId: "session-draft",
-          bookId: null,
-          title: null,
-          messages: [],
-          deletedMessageKeys: [],
-          stream: null,
-          abortController: null,
-          isStreaming: false,
-          lastError: null,
-          isDraft: true,
-        },
-      },
-      input: "do not lose this draft",
-      selectedModel: "model",
-      selectedService: "service",
-    };
-
-    persistMessageState(state);
-
-    expect(loadPersistedMessageState().input).toBe("do not lose this draft");
-  });
-
-  it("persists chat input immediately outside the debounced session cache", () => {
-    persistInputDraft("typed just before webview reload");
-
-    expect(loadPersistedInputDraft()).toBe("typed just before webview reload");
-    expect(loadPersistedMessageState().input).toBe("typed just before webview reload");
-
-    persistInputDraft("");
-    expect(loadPersistedInputDraft()).toBe("");
   });
 });

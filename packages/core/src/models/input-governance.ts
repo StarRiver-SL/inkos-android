@@ -1,10 +1,8 @@
 import { z } from "zod";
 
-export const CHAPTER_MEMO_GOAL_MAX_CHARS = 80;
-
 export const ChapterMemoSchema = z.object({
   chapter: z.number().int().min(1),
-  goal: z.string().min(1).max(CHAPTER_MEMO_GOAL_MAX_CHARS),
+  goal: z.string().min(1).max(50),
   isGoldenOpening: z.boolean().default(false),
   body: z.string().min(1),
   threadRefs: z.array(z.string()).default([]),
@@ -95,6 +93,22 @@ export const ChapterTraceSchema = z.object({
   plannerInputs: z.array(z.string()),
   composerInputs: z.array(z.string()),
   selectedSources: z.array(z.string()),
+  contextTiers: z.object({
+    protectedSources: z.array(z.string()).default([]),
+    compressibleSources: z.array(z.string()).default([]),
+  }).default({
+    protectedSources: [],
+    compressibleSources: [],
+  }),
+  tokenBudget: z.object({
+    protectedTokens: z.number().int().nonnegative().default(0),
+    compressibleTokens: z.number().int().nonnegative().default(0),
+    totalSelectedTokens: z.number().int().nonnegative().default(0),
+  }).default({
+    protectedTokens: 0,
+    compressibleTokens: 0,
+    totalSelectedTokens: 0,
+  }),
   notes: z.array(z.string()).default([]),
 });
 

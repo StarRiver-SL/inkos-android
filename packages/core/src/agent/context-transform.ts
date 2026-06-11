@@ -3,25 +3,23 @@ import type { UserMessage } from "@mariozechner/pi-ai";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isNewLayoutBook } from "../utils/outline-paths.js";
+import type { ContextCompressionCallback } from "../models/context-compression.js";
 
 /** Files read in this order; anything else in story/ comes after, sorted alphabetically. */
 const PRIORITY_FILES = [
+  "outline/story_frame.md",
+  "outline/volume_map.md",
   "story_bible.md",
   "volume_outline.md",
   "book_rules.md",
+  "author_intent.md",
   "current_focus.md",
+  "current_state.md",
 ];
 
-/** Total character budget for the entire truth-file injection block.
- *  Keeps the per-turn context injection from ballooning on long-running books. */
-const MAX_CONTEXT_INJECT_CHARS = 30_000;
-
-/** Per-file character cap so a single oversized truth file cannot monopolize the budget. */
-const MAX_SINGLE_FILE_CHARS = 8_000;
-
-/** Maximum number of messages to keep in the agent's context window.
- *  When exceeded, oldest messages are compacted into a summary placeholder. */
-const MAX_CONTEXT_MESSAGES = 60;
+const FULL_INLINE_CHAR_LIMIT = 6000;
+const MAX_INDEX_HEADINGS_PER_FILE = 80;
+const MAX_INDEX_HEADING_CHARS = 220;
 
 const UPGRADE_HINT =
   "[提示] 当前这本书的架构稿是旧的条目式格式（story_bible.md / volume_outline.md / character_matrix.md）。" +
@@ -32,6 +30,7 @@ const UPGRADE_HINT =
 export function createBookContextTransform(
   bookId: string | null,
   projectRoot: string,
+  options: { readonly onContextCompression?: ContextCompressionCallback } = {},
 ): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   if (bookId === null) {
     return async (messages) => messages;
@@ -41,25 +40,35 @@ export function createBookContextTransform(
   const storyDir = join(bookDir, "story");
 
   return async (messages) => {
-    // Slide-window: drop oldest messages when history grows too long.
-    const compacted = compactSessionMessages(messages, MAX_CONTEXT_MESSAGES);
-
     const sections = await readTruthFiles(storyDir);
-    if (sections.length === 0) return compacted;
+    if (sections.length === 0) return messages;
 
     const isNew = await isNewLayoutBook(bookDir);
     const hintBlock = isNew ? "" : `\n\n${UPGRADE_HINT}`;
+    const compactedSources = sections
+      .filter((section) => section.content.length > FULL_INLINE_CHAR_LIMIT)
+      .map((section) => section.name);
 
-    // Apply per-file cap first, then total budget cap to avoid token blowout.
-    const cappedSections = sections.map((s) => ({
-      ...s,
-      content: capFileContent(s.content, s.name, MAX_SINGLE_FILE_CHARS),
-    }));
-    const rawBody =
-      "[以下是当前书籍的真相文件，每次对话时自动从磁盘读取注入。请基于这些内容进行创作和判断。]" +
+    if (compactedSources.length > 0) {
+      options.onContextCompression?.({
+        category: "session_context",
+        phase: "start",
+        sources: compactedSources,
+      });
+    }
+
+    const body =
+      "[以下是当前书籍的上下文压缩包，每次对话时自动从磁盘读取生成。请基于这些内容进行创作和判断；需要完整原文时再按文件读取。]" +
       hintBlock + "\n\n" +
-      cappedSections.map((s) => `=== ${s.name} ===\n${s.content}`).join("\n\n");
-    const body = capTotalBody(rawBody);
+      sections.map(renderContextSection).join("\n\n");
+
+    if (compactedSources.length > 0) {
+      options.onContextCompression?.({
+        category: "session_context",
+        phase: "end",
+        sources: compactedSources,
+      });
+    }
 
     const injected: UserMessage = {
       role: "user",
@@ -67,7 +76,7 @@ export function createBookContextTransform(
       timestamp: Date.now(),
     };
 
-    return [injected, ...compacted];
+    return [injected, ...messages];
   };
 }
 
@@ -76,20 +85,63 @@ interface TruthFileSection {
   content: string;
 }
 
+function renderContextSection(section: TruthFileSection): string {
+  if (section.content.length <= FULL_INLINE_CHAR_LIMIT) {
+    return `=== ${section.name} ===\n${section.content}`;
+  }
+
+  const index = buildMarkdownFileIndex(section.content);
+  return [
+    `=== ${section.name} ===`,
+    `[未全文注入：原文件 ${section.content.length} 字符 / ${index.totalLines} 行。以下为 Markdown 目录索引；避免让旧设定原文淹没当前用户指令。]`,
+    index.lines.length > 0
+      ? index.lines.join("\n")
+      : "[未检测到 Markdown 标题；需要内容时按文件读取完整内容。]",
+    index.omittedHeadings > 0 ? `[未注入标题数：${index.omittedHeadings}。]` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function buildMarkdownFileIndex(content: string): { readonly lines: ReadonlyArray<string>; readonly omittedHeadings: number; readonly totalLines: number } {
+  const lines = content.split(/\r?\n/);
+  const selected: string[] = [];
+  let headingCount = 0;
+
+  for (const rawLine of lines) {
+    const heading = normalizeMarkdownHeading(rawLine);
+    if (!heading) continue;
+    headingCount += 1;
+    if (selected.length < MAX_INDEX_HEADINGS_PER_FILE) selected.push(heading);
+  }
+
+  return {
+    lines: selected,
+    omittedHeadings: Math.max(0, headingCount - selected.length),
+    totalLines: lines.length,
+  };
+}
+
+function normalizeMarkdownHeading(line: string): string | null {
+  const trimmed = line.trimStart();
+  const match = /^(#{1,6})\s+(.+?)\s*$/.exec(trimmed);
+  if (!match) return null;
+  const marker = match[1]!;
+  const title = match[2]!;
+  return `${marker} ${title.length > MAX_INDEX_HEADING_CHARS ? `${title.slice(0, MAX_INDEX_HEADING_CHARS - 1)}…` : title}`;
+}
+
 async function readTruthFiles(storyDir: string): Promise<TruthFileSection[]> {
-  let entries: string[];
+  let files: string[];
   try {
-    entries = await readdir(storyDir);
+    files = await listTruthMarkdownFiles(storyDir);
   } catch {
     return [];
   }
 
-  const mdFiles = entries.filter((f) => f.endsWith(".md"));
-  if (mdFiles.length === 0) return [];
+  if (files.length === 0) return [];
 
   const prioritySet = new Set(PRIORITY_FILES);
-  const prioritized = PRIORITY_FILES.filter((f) => mdFiles.includes(f));
-  const rest = mdFiles.filter((f) => !prioritySet.has(f)).sort();
+  const prioritized = PRIORITY_FILES.filter((f) => files.includes(f));
+  const rest = files.filter((f) => !prioritySet.has(f)).sort();
   const ordered = [...prioritized, ...rest];
 
   const sections: TruthFileSection[] = [];
@@ -104,72 +156,36 @@ async function readTruthFiles(storyDir: string): Promise<TruthFileSection[]> {
   return sections;
 }
 
-/** Head+tail cap for a single truth file section. */
-function capFileContent(content: string, fileName: string, maxChars: number): string {
-  if (content.length <= maxChars) return content;
-  const note = `\n[InkOS context budget: truncated ${fileName} — omitted ${content.length - maxChars} chars, kept head and tail.]\n`;
-  const keep = maxChars - note.length;
-  if (keep <= 4) return content.slice(0, maxChars);
-  const head = Math.max(1, Math.floor(keep * 0.45));
-  const tail = Math.max(1, keep - head);
-  return `${content.slice(0, head)}${note}${content.slice(-tail)}`;
-}
+async function listTruthMarkdownFiles(storyDir: string): Promise<string[]> {
+  const topEntries = await readdir(storyDir, { withFileTypes: true });
+  const files = topEntries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .map((entry) => entry.name);
 
-/** Cap the full assembled context-injection body to the total budget. */
-function capTotalBody(body: string): string {
-  if (body.length <= MAX_CONTEXT_INJECT_CHARS) return body;
-  const note = `\n\n[InkOS context budget: total truth-file injection truncated — omitted ${body.length - MAX_CONTEXT_INJECT_CHARS} chars; kept beginning and latest tail.]\n\n`;
-  const keep = MAX_CONTEXT_INJECT_CHARS - note.length;
-  if (keep <= 4) return body.slice(0, MAX_CONTEXT_INJECT_CHARS);
-  const head = Math.max(1, Math.floor(keep * 0.4));
-  const tail = Math.max(1, keep - head);
-  return `${body.slice(0, head)}${note}${body.slice(-tail)}`;
-}
-
-/** Sliding-window compaction for agent session history.
- *  Keeps the most recent `maxMessages` messages and replaces dropped older
- *  messages with a single summary placeholder. Never splits a toolCall /
- *  toolResult pair across the cut boundary. */
-function compactSessionMessages(
-  messages: AgentMessage[],
-  maxMessages: number,
-): AgentMessage[] {
-  if (messages.length <= maxMessages) return messages;
-
-  // Walk backwards from the cut point to avoid splitting a toolCall/toolResult pair.
-  let cutIndex = messages.length - maxMessages + 1; // +1 for the summary msg we'll insert
-  while (cutIndex > 0 && cutIndex < messages.length) {
-    const msg = messages[cutIndex] as { role?: string; toolCallId?: string };
-    // If the message at the cut is a toolResult, move the cut earlier so the
-    // matching assistant toolCall is also included in the kept window.
-    if (msg.role === "toolResult") {
-      cutIndex--;
-      continue;
-    }
-    // If the previous message is an assistant with toolCalls, include it too.
-    if (cutIndex > 0) {
-      const prev = messages[cutIndex - 1] as { role?: string; content?: unknown[] };
-      if (
-        prev?.role === "assistant" &&
-        Array.isArray(prev.content) &&
-        prev.content.some((b: unknown) => typeof b === "object" && b !== null && (b as { type?: string }).type === "toolCall")
-      ) {
-        cutIndex--;
-        continue;
-      }
-    }
-    break;
+  for (const dirName of ["outline", "roles"]) {
+    files.push(...await listNestedMarkdownFiles(storyDir, dirName));
   }
-  cutIndex = Math.max(0, cutIndex);
 
-  const droppedCount = cutIndex;
-  const kept = messages.slice(cutIndex);
+  return files;
+}
 
-  const summary: UserMessage = {
-    role: "user",
-    content: `[InkOS session compaction: ${droppedCount} older messages were dropped to stay within the context window. The conversation continues from the most recent exchanges below.]`,
-    timestamp: Date.now(),
-  };
+async function listNestedMarkdownFiles(storyDir: string, relativeDir: string): Promise<string[]> {
+  const dirPath = join(storyDir, relativeDir);
+  let entries;
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
 
-  return [summary, ...kept];
+  const files: string[] = [];
+  for (const entry of entries) {
+    const child = `${relativeDir}/${entry.name}`;
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      files.push(child);
+    } else if (entry.isDirectory()) {
+      files.push(...await listNestedMarkdownFiles(storyDir, child));
+    }
+  }
+  return files;
 }

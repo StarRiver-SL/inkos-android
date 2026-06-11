@@ -6,7 +6,7 @@ import type {
   SessionResponse,
   SessionSummary,
 } from "../../types";
-import { buildApiUrl, fetchJson } from "../../../../hooks/use-api";
+import { fetchJson, buildApiUrl } from "../../../../hooks/use-api";
 import { ensureEmbeddedNodeRunning } from "../../../../lib/android-runtime-plugin";
 import { isNativeRuntime } from "../../../../lib/mobile-runtime";
 import { persistInputDraft } from "../../persistence";
@@ -14,6 +14,7 @@ import { attachSessionStreamListeners } from "./stream-events";
 import {
   bookKey,
   createSessionRuntime,
+  deriveResolvedProposals,
   deserializeMessages,
   extractErrorMessage,
   filterDeletedMessages,
@@ -88,7 +89,7 @@ function normalizeAgentTokenUsage(data: AgentResponse): TokenUsageSnapshot | und
           updatedAt: Date.now(),
         }
       : undefined;
-  const hasSavings = Boolean(savings && (savings.estimatedTokensSaved > 0 || savings.cacheSkippedCalls > 0));
+  const hasSavings = Boolean(savings && ((savings.estimatedTokensSaved ?? 0) > 0 || (savings.cacheSkippedCalls ?? 0) > 0));
   if (!normalizedUsage && !hasSavings) return undefined;
   return {
     ...(normalizedUsage ?? {
@@ -128,6 +129,18 @@ function isCancelledAgentResponse(data: AgentResponse): boolean {
   if (!error) return false;
   const message = extractErrorMessage(error);
   return /operation_cancelled|用户已停止当前生成|当前生成已停止/i.test(message);
+}
+
+function hasVisibleStreamResult(message: Message | undefined): boolean {
+  if (!message) return false;
+  if (message.content.trim()) return true;
+  if (message.thinking?.trim()) return true;
+  return (message.toolExecutions?.length ?? 0) > 0
+    || (message.parts?.some((part) => {
+      if (part.type === "text") return part.content.trim().length > 0;
+      if (part.type === "thinking") return part.content.trim().length > 0;
+      return true;
+    }) ?? false);
 }
 
 function isRecoverableBackendApiError(data: AgentResponse): boolean {
@@ -370,6 +383,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         if (session.messages.length > 0) return {};
         return { messages: deserializeMessages(msgs) };
       }),
+      resolvedProposals: {
+        ...state.resolvedProposals,
+        ...deriveResolvedProposals(deserializeMessages(msgs)),
+      },
     })),
 
   setSelectedModel: (model, service) => set({ selectedModel: model, selectedService: service }),
@@ -397,11 +414,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  createSession: async (bookId) => {
+  createSession: async (bookId, sessionKind, playMode) => {
     const data = await fetchJson<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId }),
+      body: JSON.stringify({ bookId, sessionKind, playMode }),
     });
     const sessionId = data.session?.sessionId;
     if (!sessionId) {
@@ -412,6 +429,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       const runtime = createSessionRuntime({
         sessionId,
         bookId: data.session?.bookId ?? bookId ?? null,
+        sessionKind: data.session?.sessionKind ?? sessionKind,
+        playMode: data.session?.playMode ?? playMode,
         title: data.session?.title ?? null,
       });
       return {
@@ -433,7 +452,26 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     return sessionId;
   },
 
-  createDraftSession: (bookId) => {
+  setSessionPlayMode: (sessionId, playMode) => {
+    const session = get().sessions[sessionId];
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, () => ({ playMode })),
+    }));
+    if (!session || session.isDraft) return;
+    void fetchJson(`/sessions/${encodeURIComponent(sessionId)}/play-mode`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playMode }),
+    }).catch((error) => {
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, () => ({
+          lastError: error instanceof Error ? error.message : String(error),
+        })),
+      }));
+    });
+  },
+
+  createDraftSession: (bookId, sessionKind, playMode) => {
     // 前端生成 sessionId（与后端 createBookSession 同格式），暂不持久化到磁盘，
     // 也暂不写入 sessionIdsByBook——侧边栏看不到这条 draft。
     // 发送第一条消息时 sendMessage 会调 POST /sessions { sessionId, bookId } 落盘
@@ -445,6 +483,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         bookId,
         title: null,
         isDraft: true,
+        sessionKind,
+        playMode,
       });
       return {
         sessions: {
@@ -562,10 +602,16 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  sendMessage: async (sessionId, text, activeBookId) => {
+  sendMessage: async (sessionId, text, options) => {
     const trimmed = text.trim();
     const session = get().sessions[sessionId];
     if (!trimmed || !session || session.isStreaming) return;
+    const activeBookId = options?.activeBookId;
+    const sessionKind = options?.sessionKind;
+    const actionSource = options?.actionSource;
+    const requestedIntent = options?.requestedIntent;
+    const actionPayload = options?.actionPayload;
+    const playMode = options?.playMode;
 
     if (!get().selectedModel) {
       get().addUserMessage(sessionId, trimmed);
@@ -584,7 +630,12 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         await fetchJson<SessionResponse>("/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, bookId: session.bookId }),
+          body: JSON.stringify({
+            sessionId,
+            bookId: session.bookId,
+            sessionKind: session.sessionKind,
+            playMode: playMode ?? session.playMode,
+          }),
         });
         // 落盘成功：把 isDraft 翻成 false，同时把 sessionId 追加进 sessionIdsByBook
         // 让侧边栏现在才看到这条会话。
@@ -634,19 +685,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     get().addUserMessage(sessionId, trimmed);
 
     session.stream?.close();
-    const eventsUrl = buildApiUrl("/events");
-    if (!eventsUrl) {
-      get().addErrorMessage(sessionId, "API 地址无效");
-      set((state) => ({
-        input: state.input || trimmed,
-        sessions: updateSession(state.sessions, sessionId, () => ({
-          isStreaming: false,
-          stream: null,
-          abortController: null,
-        })),
-      }));
-      return;
-    }
+    const eventsUrl = buildApiUrl("/api/v1/events") || "/api/v1/events";
     const streamEs = new EventSource(eventsUrl);
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, () => ({ stream: streamEs })),
@@ -707,9 +746,35 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       const finalContent = data.details?.draftRaw || data.response || "";
       const toolCall = data.details?.toolCall ?? undefined;
       const tokenUsage = normalizeAgentTokenUsage(data);
+      const responseBookId = data.session?.activeBookId ?? data.session?.bookId;
+      const responseSessionKind = data.session?.sessionKind;
+      if (responseBookId || responseSessionKind || data.session?.title || data.session?.playMode) {
+        set((state) => {
+          const runtime = state.sessions[sessionId];
+          if (!runtime) return {};
+          const nextBookId = responseBookId ?? runtime.bookId;
+          return {
+            sessions: updateSession(state.sessions, sessionId, () => ({
+              bookId: nextBookId,
+              sessionKind: responseSessionKind ?? runtime.sessionKind,
+              playMode: data.session?.playMode ?? runtime.playMode,
+              title: data.session?.title ?? runtime.title,
+            })),
+            sessionIdsByBook: {
+              ...state.sessionIdsByBook,
+              [bookKey(nextBookId)]: mergeSessionIds(
+                state.sessionIdsByBook[bookKey(nextBookId)],
+                [sessionId],
+              ),
+            },
+          };
+        });
+      }
       const hasStream = Boolean(
         get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
       );
+      const streamMessage = get().sessions[sessionId]?.messages.find((message) => message.timestamp === streamTs);
+      const hasVisibleStream = hasVisibleStreamResult(streamMessage);
 
       if (data.error) {
         const errorMessage = extractErrorMessage(data.error);
@@ -737,6 +802,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
             })),
           }));
         }
+      } else if (hasStream && hasVisibleStream) {
+        get().finalizeStream(sessionId, streamTs, "", toolCall, tokenUsage ?? streamMessage?.tokenUsage);
       } else {
         const emptyMessage = "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。";
         if (hasStream) {
@@ -772,6 +839,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
             clientStartedAt,
             model: get().selectedModel ?? undefined,
             service: get().selectedService ?? undefined,
+            sessionKind,
+            actionSource,
+            requestedIntent,
+            actionPayload,
+            playMode,
           }),
         });
       } catch (error) {

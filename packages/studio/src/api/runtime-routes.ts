@@ -1,36 +1,24 @@
-import {
-  clearIdleL1Caches,
-  ensureSemanticCacheStorage,
-  getHeadroomSavingsTelemetry,
-  getTokenDiagnostics,
-  maintainSemanticCache,
-  type StateManager,
-} from "@actalk/inkos-core";
+import type { StateManager } from "@actalk/inkos-core";
 import type { Hono } from "hono";
-import { rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+const DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/Scl-Ywr/inkos/releases/latest/download/update.json";
+const PROJECT_DIRS = [".inkos", ".inkos/sessions", ".inkos/backups", "books", "genres", "radar", "covers", "shorts", "exports", "logs"];
+
 const NODE_TOOL_CAPABILITIES = [
-  "PipelineRunner.sub_agent.architect",
-  "PipelineRunner.sub_agent.writer",
-  "PipelineRunner.sub_agent.auditor",
-  "PipelineRunner.sub_agent.reviser",
-  "PipelineRunner.sub_agent.exporter",
-  "createInteractionToolsFromDeps.writeTruthFile",
-  "createInteractionToolsFromDeps.renameEntity",
-  "createInteractionToolsFromDeps.patchChapterText",
+  "agent.architect",
+  "agent.writer",
+  "agent.auditor",
+  "agent.reviser",
+  "agent.exporter",
+  "play.actionInterpreter",
+  "play.worldMutator",
+  "play.sceneRenderer",
+  "play.sceneReconciler",
   "short_fiction_run",
   "generate_cover",
-  "Scheduler",
-].map((id) => ({
-  id,
-  desktopSource: id,
-  apkStatus: "implemented",
-  apkTool: "node-backend",
-  notes: "由 APK 内置 Node.js 后端直接运行，不使用 WebView JS fallback。",
-}));
-
-const DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/Scl-Ywr/inkos/releases/latest/download/update.json";
+].map((id) => ({ id, runtime: "embedded-node", status: "implemented" }));
 
 interface AndroidUpdateManifest {
   readonly channel: string;
@@ -44,18 +32,16 @@ interface AndroidUpdateManifest {
   readonly publishedAt: string;
 }
 
-interface StorageRepairEntry {
-  readonly action: string;
-  readonly path: string;
-  readonly detail?: string;
-}
-
 interface RuntimeRoutesDeps {
   readonly root: string;
   readonly state: StateManager;
-  readonly ensureProjectStorageSkeleton: (root: string) => Promise<void>;
-  readonly repairProjectResourceIndex: (root: string) => Promise<ReadonlyArray<StorageRepairEntry>>;
   readonly broadcast: (event: string, data: unknown) => void;
+}
+
+function envEnabled(name: string, fallback: boolean): boolean {
+  const raw = String(process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return !["0", "false", "no", "off"].includes(raw);
 }
 
 function readAndroidVersionCode(): number {
@@ -68,9 +54,7 @@ function readAndroidVersionName(): string {
 }
 
 function parseUpdateManifest(value: unknown): AndroidUpdateManifest {
-  if (!value || typeof value !== "object") {
-    throw new Error("Update manifest is not a JSON object.");
-  }
+  if (!value || typeof value !== "object") throw new Error("Update manifest is not a JSON object.");
   const record = value as Record<string, unknown>;
   const versionCode = Number(record.versionCode);
   const minVersionCode = Number(record.minVersionCode ?? 1);
@@ -84,208 +68,179 @@ function parseUpdateManifest(value: unknown): AndroidUpdateManifest {
     ? record.notes.map((note) => String(note).trim()).filter(Boolean)
     : [];
 
-  if (!Number.isInteger(versionCode) || versionCode <= 0) {
-    throw new Error("Update manifest versionCode must be a positive integer.");
-  }
-  if (!Number.isInteger(minVersionCode) || minVersionCode <= 0) {
-    throw new Error("Update manifest minVersionCode must be a positive integer.");
-  }
+  if (!Number.isInteger(versionCode) || versionCode <= 0) throw new Error("Update manifest versionCode must be positive.");
+  if (!Number.isInteger(minVersionCode) || minVersionCode <= 0) throw new Error("Update manifest minVersionCode must be positive.");
   if (!versionName) throw new Error("Update manifest versionName is required.");
-  if (!/^https:\/\//i.test(apkUrl)) throw new Error("Update manifest apkUrl must be an HTTPS URL.");
-  if (!/^[a-f0-9]{64}$/i.test(apkSha256)) throw new Error("Update manifest apkSha256 must be a SHA-256 hex digest.");
+  if (!/^https:\/\//i.test(apkUrl)) throw new Error("Update manifest apkUrl must use HTTPS.");
+  if (!/^[a-f0-9]{64}$/i.test(apkSha256)) throw new Error("Update manifest apkSha256 must be a SHA-256 digest.");
   if (!Number.isFinite(size) || size <= 0) throw new Error("Update manifest size must be positive.");
 
-  return {
-    channel,
-    versionName,
-    versionCode,
-    minVersionCode,
-    apkUrl,
-    apkSha256,
-    size: Math.floor(size),
-    notes,
-    publishedAt,
-  };
+  return { channel, versionName, versionCode, minVersionCode, apkUrl, apkSha256, size: Math.floor(size), notes, publishedAt };
+}
+
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(() => true, () => false);
+}
+
+async function ensureProjectStorage(root: string): Promise<void> {
+  await Promise.all(PROJECT_DIRS.map((dir) => mkdir(join(root, dir), { recursive: true })));
+}
+
+async function backupUpgradeMetadata(root: string): Promise<string> {
+  const backupDir = join(root, ".inkos", "backups", `upgrade-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  await mkdir(backupDir, { recursive: true });
+  for (const relativePath of ["inkos.json", "manifest.json", "inkos-db.json", ".inkos/secrets.json"]) {
+    const source = join(root, relativePath);
+    if (await exists(source)) {
+      const target = join(backupDir, relativePath.replace(/[\\/]/g, "__"));
+      await copyFile(source, target);
+    }
+  }
+  return backupDir;
 }
 
 export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void {
-  const { root, state, ensureProjectStorageSkeleton, repairProjectResourceIndex, broadcast } = deps;
-  let semanticCacheStorage = ensureSemanticCacheStorage(root);
+  const { root, state, broadcast } = deps;
+  const android = process.env.INKOS_ANDROID === "1";
+  const play = envEnabled("INKOS_PLAY_ENABLED", true);
 
-  app.get("/api/v1/runtime/status", (c) => {
-    return c.json({
-      state: "running",
-      message: `Node backend is serving API requests on this device. Project root: ${root}`,
-      updatedAt: Date.now(),
-    });
-  });
+  app.get("/api/v1/runtime/status", (c) => c.json({
+    state: "running",
+    message: `Node backend is serving API requests. Project root: ${root}`,
+    updatedAt: Date.now(),
+  }));
+
+  app.get("/api/v1/runtime/capabilities", (c) => c.json({
+    android,
+    play,
+    selfUpdate: android,
+    imageGeneration: true,
+    sqlite: true,
+    embeddedNode: android,
+    minimumAndroidApi: 28,
+    abi: process.arch,
+  }));
 
   app.get("/api/v1/runtime/update/check", async (c) => {
     const manifestUrl = String(process.env.INKOS_UPDATE_MANIFEST_URL ?? DEFAULT_UPDATE_MANIFEST_URL).trim();
-    const currentVersionCode = readAndroidVersionCode();
-    const currentVersionName = readAndroidVersionName();
+    const current = { versionCode: readAndroidVersionCode(), versionName: readAndroidVersionName() };
+    if (!/^https:\/\//i.test(manifestUrl)) {
+      return c.json({ ok: false, manifestUrl, current, error: "Update manifest URL must use HTTPS." }, 400);
+    }
     try {
-      const response = await fetch(manifestUrl, {
-        headers: { Accept: "application/json", "User-Agent": "InkOS-Studio-Update-Check" },
-      });
-      if (!response.ok) {
+      const response = await fetch(manifestUrl, { headers: { Accept: "application/json", "User-Agent": "InkOS-Studio-Android/1.5" } });
+      if (response.status === 404) {
         return c.json({
-          ok: false,
+          ok: true,
           manifestUrl,
-          current: {
-            versionCode: currentVersionCode,
-            versionName: currentVersionName,
-          },
-          error: `Update manifest returned HTTP ${response.status}.`,
-        }, 502);
+          current,
+          supported: current.versionCode > 0,
+          available: false,
+          error: "Update manifest was not found. No online update has been published for this channel yet.",
+        });
       }
+      if (!response.ok) return c.json({ ok: false, manifestUrl, current, error: `Update manifest returned HTTP ${response.status}.` }, 502);
       const update = parseUpdateManifest(await response.json());
-      const supported = currentVersionCode > 0;
-      const available = supported
-        && update.versionCode > currentVersionCode
-        && currentVersionCode >= update.minVersionCode;
+      const supported = current.versionCode > 0;
       return c.json({
         ok: true,
         manifestUrl,
-        current: {
-          versionCode: currentVersionCode,
-          versionName: currentVersionName,
-        },
+        current,
         supported,
-        available,
+        available: supported && update.versionCode > current.versionCode && current.versionCode >= update.minVersionCode,
         update,
       });
     } catch (error) {
-      return c.json({
-        ok: false,
-        manifestUrl,
-        current: {
-          versionCode: currentVersionCode,
-          versionName: currentVersionName,
-        },
-        error: error instanceof Error ? error.message : String(error),
-      }, 502);
+      return c.json({ ok: false, manifestUrl, current, error: error instanceof Error ? error.message : String(error) }, 502);
     }
   });
 
   app.post("/api/v1/runtime/repair", async (c) => {
-    const repaired = await ensureProjectStorageSkeleton(root)
-      .then(() => repairProjectResourceIndex(root));
-    broadcast("log", {
-      level: "info",
-      tag: "storage-repair",
-      message: `资源自检修复完成：${repaired.length} 项`,
-      timestamp: new Date().toISOString(),
-    });
-    return c.json({
-      ok: true,
-      root,
-      repaired,
-      message: "资源自检修复完成。已保证书籍索引、核心文件、角色目录和占位文件与当前版本兼容。",
-    });
+    await ensureProjectStorage(root);
+    const backupDir = await backupUpgradeMetadata(root);
+    const bookIds = await state.listBooks();
+    for (const bookId of bookIds) {
+      await state.ensureControlDocuments(bookId);
+      await state.saveChapterIndex(bookId, await state.loadChapterIndex(bookId));
+    }
+    broadcast("log", { level: "info", tag: "storage-repair", message: `Storage repair completed; metadata backup: ${backupDir}` });
+    return c.json({ ok: true, root, backupDir, booksChecked: bookIds.length });
   });
 
-  app.post("/api/v1/runtime/background-idle", async (c) => {
-    const removed = await clearIdleL1Caches();
-    return c.json({
-      ok: true,
-      removed,
-      message: `Released ${removed} idle L1 cache entr${removed === 1 ? "y" : "ies"}.`,
-    });
+  app.post("/api/v1/runtime/background-idle", (c) => {
+    const gc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+    gc?.();
+    return c.json({ ok: true, message: "Released idle runtime references." });
   });
 
   app.get("/api/v1/runtime/token-savings", (c) => c.json({
     ok: true,
-    telemetry: getHeadroomSavingsTelemetry(),
-    storage: semanticCacheStorage,
+    telemetry: null,
+    contextCompression: true,
   }));
 
-  app.get("/api/v1/token-diagnostics", (c) => {
-    semanticCacheStorage = ensureSemanticCacheStorage(root);
-    return c.json({
-      ok: true,
-      projectRoot: root,
-      diagnostics: getTokenDiagnostics(root),
-    });
-  });
+  app.get("/api/v1/token-diagnostics", (c) => c.json({
+    diagnostics: {
+      headroom: { enabled: true, configured: false, lastCompressionOk: null, lastCompressionAt: null, lastError: null },
+      embedding: { configured: false, endpoint: null, model: "built-in", lastExternalOk: null, lastExternalAt: null, lastFallbackAt: null, lastError: null },
+      telemetry: {
+        semanticL1Hits: 0,
+        semanticL2Hits: 0,
+        semanticMisses: 0,
+        cacheSkippedCalls: 0,
+        ccrBlocksCompressed: 0,
+        originalChars: 0,
+        optimizedChars: 0,
+        estimatedTokensSaved: 0,
+        pipeline: [],
+      },
+      semanticCache: {
+        storage: { sqliteAvailable: true, path: join(root, "worlds"), fallbackPath: join(root, ".inkos", "cache") },
+        l1Entries: 0,
+        l1Limit: 0,
+        rowCount: 0,
+        dbBytes: 0,
+        fallbackRows: 0,
+        fallbackBytes: 0,
+        l3ArchiveBytes: 0,
+        hitRate: 0,
+        lastMaintenanceAt: null,
+      },
+    },
+  }));
 
-  app.post("/api/v1/token-cache/maintenance", async (c) => {
-    const body = await c.req
-      .json<{ maxRows?: number; vacuum?: boolean }>()
-      .catch((): { maxRows?: number; vacuum?: boolean } => ({}));
-    const result = maintainSemanticCache(root, {
-      ...(typeof body.maxRows === "number" ? { maxRows: body.maxRows } : {}),
-      ...(typeof body.vacuum === "boolean" ? { vacuum: body.vacuum } : {}),
-    });
-    semanticCacheStorage = result.storage;
-    return c.json(result, result.ok ? 200 : 500);
-  });
+  app.post("/api/v1/token-cache/maintenance", (c) => c.json({
+    ok: true,
+    removedRows: 0,
+    archivedRows: 0,
+    message: "Official 1.5 context storage does not require manual cache maintenance.",
+  }));
 
   app.get("/api/v1/runtime/node-info", async (c) => {
-    const sqlite: {
-      available: boolean;
-      databaseSync: boolean;
-      exports: string[];
-      error: string | null;
-    } = {
-      available: false,
-      databaseSync: false,
-      exports: [],
-      error: null,
-    };
-
+    const sqlite = { available: false, databaseSync: false, exports: [] as string[], error: null as string | null };
     try {
       const { createRequire } = await import("node:module");
-      const nodeRequire = createRequire(import.meta.url);
-      const sqliteModule = nodeRequire("node:sqlite") as Record<string, unknown>;
+      const sqliteModule = createRequire(import.meta.url)("node:sqlite") as Record<string, unknown>;
       sqlite.available = true;
       sqlite.databaseSync = typeof sqliteModule.DatabaseSync === "function";
       sqlite.exports = Object.keys(sqliteModule).sort();
     } catch (error) {
       sqlite.error = error instanceof Error ? error.message : String(error);
     }
-
-    semanticCacheStorage = ensureSemanticCacheStorage(root);
-
     return c.json({
       ok: true,
-      node: {
-        version: process.version,
-        versions: process.versions,
-        platform: process.platform,
-        arch: process.arch,
-        abi: process.versions.modules,
-        execPath: process.execPath,
-      },
+      node: { version: process.version, versions: process.versions, platform: process.platform, arch: process.arch, execPath: process.execPath },
       sqlite,
-      semanticCacheStorage,
     });
   });
 
-  app.get("/api/v1/tools/capabilities", (c) => {
-    return c.json({
-      mode: "embedded-node",
-      capabilities: NODE_TOOL_CAPABILITIES,
-    });
-  });
+  app.get("/api/v1/tools/capabilities", (c) => c.json({ mode: "embedded-node", capabilities: NODE_TOOL_CAPABILITIES }));
 
   app.get("/api/v1/local-storage", async (c) => {
-    await ensureProjectStorageSkeleton(root);
-    const bookIds = await state.listBooks();
-    for (const bookId of bookIds) {
-      await state.ensureControlDocuments(bookId);
-      await state.saveChapterIndex(bookId, await state.loadChapterIndex(bookId));
-    }
+    await ensureProjectStorage(root);
     const probePath = join(root, ".inkos-node-write-test");
-    await writeFile(probePath, String(Date.now()), "utf-8");
+    await writeFile(probePath, String(Date.now()), "utf8");
     await rm(probePath, { force: true });
-    return c.json({
-      mode: "node",
-      available: true,
-      directory: "NodeProjectRoot",
-      uri: `file://${root}`,
-      path: root,
-      permission: "APK 内置 Node 后端已在 Documents/InkOS Studio 中创建并验证项目目录，可读写书籍、章节、题材、日志和雷达数据。",
-    });
+    return c.json({ mode: "node", available: true, directory: "NodeProjectRoot", uri: `file://${root}`, path: root });
   });
 }

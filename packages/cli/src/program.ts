@@ -37,7 +37,6 @@ const { version } = require("../package.json") as { version: string };
 export interface ProgramHooks {
   readonly launchTui?: (projectRoot: string) => Promise<void> | void;
   readonly launchStudio?: (projectRoot: string, port: string) => Promise<void> | void;
-  readonly runInteraction?: InteractCommandHooks["runInteraction"];
   readonly readInteractionInput?: InteractCommandHooks["readInput"];
 }
 
@@ -89,7 +88,6 @@ export function createProgram(hooks: ProgramHooks = {}): Command {
   program.addCommand(createStudioCommand({ launchStudio: hooks.launchStudio }));
   program.addCommand(consolidateCommand);
   program.addCommand(createInteractCommand({
-    runInteraction: hooks.runInteraction,
     readInput: hooks.readInteractionInput,
   }));
   program.addCommand(createTuiCommand({ launchTui: hooks.launchTui }));

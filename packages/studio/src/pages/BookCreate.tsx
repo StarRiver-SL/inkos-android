@@ -1,17 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { BookCreationDraft } from "@actalk/inkos-core";
 import { BookPlus, CheckCircle2, RotateCcw, Sparkles } from "lucide-react";
-import { buildApiUrl, fetchJson, useApi } from "../hooks/use-api";
+import { fetchJson, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { StudioSelect } from "../components/StudioSelect";
-import { mobileTextInputHandlers } from "../lib/mobile-input";
 import {
-  getBookCreateAssistantInput,
   clearBookCreateSessionId,
   getBookCreateSessionId,
-  setBookCreateAssistantInput,
   setBookCreateSessionId,
 } from "./chat-page-state";
 
@@ -50,6 +47,14 @@ export interface DraftSummaryRow {
   readonly value: string;
 }
 
+export interface DraftSummaryStage {
+  readonly key: string;
+  readonly label: string;
+  readonly status: "complete" | "partial" | "missing";
+  readonly rows: ReadonlyArray<DraftSummaryRow>;
+  readonly missing: ReadonlyArray<string>;
+}
+
 interface InteractionSessionResponse {
   readonly session?: {
     readonly activeBookId?: string;
@@ -60,7 +65,7 @@ interface InteractionSessionResponse {
 
 interface AgentResponse {
   readonly response?: string;
-  readonly error?: string | { readonly code?: string; readonly message?: string };
+  readonly error?: string;
   readonly session?: {
     readonly sessionId?: string;
     readonly activeBookId?: string;
@@ -73,31 +78,6 @@ interface SessionResponse {
     readonly sessionId?: string;
     readonly bookId?: string | null;
   };
-}
-
-function parseAgentSseResult(text: string): AgentResponse | null {
-  const blocks = text.split(/\r?\n\r?\n/u);
-  for (const block of blocks) {
-    let eventName = "";
-    const dataLines: string[] = [];
-
-    for (const rawLine of block.split(/\r?\n/u)) {
-      const line = rawLine.trimEnd();
-      if (line.startsWith("event:")) {
-        eventName = line.slice("event:".length).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice("data:".length).trimStart());
-      }
-    }
-
-    if (eventName !== "result" || dataLines.length === 0) continue;
-    try {
-      return JSON.parse(dataLines.join("\n")) as AgentResponse;
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 interface PlatformCopy {
@@ -287,27 +267,135 @@ export function buildBookCreatePayload(
   };
 }
 
-export function resolveDraftInstruction(input: string, hasDraft: boolean): string {
+export function resolveDraftInstruction(input: string, _hasDraft: boolean): string {
   const trimmed = input.trim();
   if (!trimmed) {
     return "";
   }
-  return hasDraft ? trimmed : `/new ${trimmed}`;
+  return trimmed;
 }
 
+// The story core that must be present to create. Length
+// (targetChapters/chapterWordCount) is a run parameter with editable defaults,
+// so it never gates creation — it's only shown in the basics stage. Mirrors
+// missingCoreDraftFields in core/interaction/project-tools.ts.
 export function canCreateFromDraft(draft?: BookCreationDraft): boolean {
   if (!draft) {
     return false;
   }
-  if (draft.readyToCreate) {
-    return true;
-  }
   return Boolean(
     draft.title?.trim()
       && draft.genre?.trim()
-      && typeof draft.targetChapters === "number"
-      && typeof draft.chapterWordCount === "number",
+      && draft.platform?.trim()
+      && draft.worldPremise?.trim()
+      && draft.protagonist?.trim()
+      && draft.conflictCore?.trim(),
   );
+}
+
+const DRAFT_STAGE_LABELS: Record<"zh" | "en", Record<string, string>> = {
+  zh: {
+    basic: "基础信息",
+    world: "世界观与规则",
+    characters: "主角与角色",
+    conflict: "冲突与回报",
+    structure: "结构与写作约束",
+    title: "书名",
+    genre: "题材",
+    platform: "平台",
+    language: "语言",
+    targetChapters: "目标章数",
+    chapterWordCount: "每章字数",
+    worldPremise: "世界观",
+    settingNotes: "设定补充",
+    protagonist: "主角",
+    supportingCast: "配角",
+    conflictCore: "核心冲突",
+    blurb: "简介",
+    authorIntent: "作者意图",
+    volumeOutline: "卷纲方向",
+    currentFocus: "当前重点",
+    constraints: "写作约束",
+  },
+  en: {
+    basic: "Basics",
+    world: "World & Rules",
+    characters: "Protagonist & Cast",
+    conflict: "Conflict & Payoff",
+    structure: "Structure & Constraints",
+    title: "Title",
+    genre: "Genre",
+    platform: "Platform",
+    language: "Language",
+    targetChapters: "Target Chapters",
+    chapterWordCount: "Words per Chapter",
+    worldPremise: "World",
+    settingNotes: "Setting Notes",
+    protagonist: "Protagonist",
+    supportingCast: "Supporting Cast",
+    conflictCore: "Core Conflict",
+    blurb: "Blurb",
+    authorIntent: "Author Intent",
+    volumeOutline: "Volume Direction",
+    currentFocus: "Current Focus",
+    constraints: "Constraints",
+  },
+};
+
+const DRAFT_STAGE_FIELDS: ReadonlyArray<{
+  readonly key: string;
+  readonly fields: ReadonlyArray<keyof BookCreationDraft>;
+}> = [
+  { key: "basic", fields: ["title", "genre", "platform", "targetChapters", "chapterWordCount", "language"] },
+  { key: "world", fields: ["worldPremise", "settingNotes"] },
+  { key: "characters", fields: ["protagonist", "supportingCast"] },
+  { key: "conflict", fields: ["conflictCore", "blurb", "authorIntent"] },
+  { key: "structure", fields: ["volumeOutline", "currentFocus", "constraints"] },
+];
+
+function draftValueAsText(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+export function buildCreationDraftStages(
+  draft: BookCreationDraft,
+  language: "zh" | "en",
+): ReadonlyArray<DraftSummaryStage> {
+  const labels = DRAFT_STAGE_LABELS[language];
+  const missingSet = new Set(draft.missingFields ?? []);
+
+  return DRAFT_STAGE_FIELDS.map((stage) => {
+    const rows: DraftSummaryRow[] = [];
+    for (const field of stage.fields) {
+      const value = draftValueAsText(draft[field]);
+      if (value) {
+        rows.push({ key: String(field), label: labels[field] ?? String(field), value });
+      }
+    }
+    const missing = stage.fields
+      .filter((field) => missingSet.has(field))
+      .map((field) => labels[field] ?? String(field));
+    const status = rows.length === 0
+      ? "missing"
+      : missing.length > 0
+        ? "partial"
+        : "complete";
+
+    return {
+      key: stage.key,
+      label: labels[stage.key] ?? stage.key,
+      status,
+      rows,
+      missing,
+    };
+  });
 }
 
 export function buildCreationDraftSummary(
@@ -367,12 +455,25 @@ function readSessionId(response: SessionResponse): string | null {
 export function buildBookCreateAgentRequest(
   instruction: string,
   sessionId: string,
-): { instruction: string; sessionId: string } {
+): {
+  instruction: string;
+  sessionId: string;
+  sessionKind: "book-create";
+  actionSource: "free-text" | "slash";
+  requestedIntent?: "create_book";
+} {
   const trimmedSessionId = sessionId.trim();
   if (!trimmedSessionId) {
     throw new Error("Book create session is not ready.");
   }
-  return { instruction, sessionId: trimmedSessionId };
+  const trimmedInstruction = instruction.trim();
+  return {
+    instruction,
+    sessionId: trimmedSessionId,
+    sessionKind: "book-create",
+    actionSource: trimmedInstruction.startsWith("/") ? "slash" : "free-text",
+    ...(trimmedInstruction === "/create" ? { requestedIntent: "create_book" as const } : {}),
+  };
 }
 
 export async function ensureBookCreateSessionId(
@@ -389,7 +490,7 @@ export async function ensureBookCreateSessionId(
     ?? (() => fetchJson<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId: null }),
+      body: JSON.stringify({ bookId: null, sessionKind: "book-create" }),
     }));
   const getStoredSessionId = options.getStoredSessionId ?? getBookCreateSessionId;
   const setStoredSessionId = options.setStoredSessionId ?? setBookCreateSessionId;
@@ -485,22 +586,16 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
 
   const [draft, setDraft] = useState<BookCreationDraft | undefined>();
   const [form, setForm] = useState<BookCreateFormState>(() => defaultBookCreateForm(projectLang));
-  const [input, setInputState] = useState(() => getBookCreateAssistantInput());
+  const [input, setInput] = useState("");
   const [loadingDraft, setLoadingDraft] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [bookCreateSessionId, setBookCreateSessionIdState] = useState<string | null>(null);
-  const titleRef = useRef<HTMLInputElement>(null);
-  const genreRef = useRef<HTMLInputElement>(null);
-  const targetChaptersRef = useRef<HTMLInputElement>(null);
-  const chapterWordCountRef = useRef<HTMLInputElement>(null);
-  const briefRef = useRef<HTMLTextAreaElement>(null);
-  const assistantInputRef = useRef<HTMLTextAreaElement>(null);
 
-  const summaryRows = useMemo(
-    () => (draft ? buildCreationDraftSummary(draft, projectLang) : []),
+  const summaryStages = useMemo(
+    () => (draft ? buildCreationDraftStages(draft, projectLang) : []),
     [draft, projectLang],
   );
   const canSubmitForm = isBookCreateFormReady(form);
@@ -520,43 +615,6 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   const updateForm = (patch: Partial<BookCreateFormState>) => {
     setForm((current) => ({ ...current, ...patch }));
   };
-  const formTextHandlers = (key: keyof BookCreateFormState) =>
-    mobileTextInputHandlers((value) => updateForm({ [key]: value }));
-
-  const writeFormToDom = (nextForm: BookCreateFormState): void => {
-    if (titleRef.current) titleRef.current.value = nextForm.title;
-    if (genreRef.current) genreRef.current.value = nextForm.genre;
-    if (targetChaptersRef.current) targetChaptersRef.current.value = nextForm.targetChapters;
-    if (chapterWordCountRef.current) chapterWordCountRef.current.value = nextForm.chapterWordCount;
-    if (briefRef.current) briefRef.current.value = nextForm.brief;
-  };
-
-  const readFormFromDom = (): BookCreateFormState => {
-    const nextForm = {
-      ...form,
-      title: titleRef.current?.value ?? form.title,
-      genre: genreRef.current?.value ?? form.genre,
-      targetChapters: targetChaptersRef.current?.value ?? form.targetChapters,
-      chapterWordCount: chapterWordCountRef.current?.value ?? form.chapterWordCount,
-      brief: briefRef.current?.value ?? form.brief,
-    };
-    setForm(nextForm);
-    return nextForm;
-  };
-
-  const setAssistantInput = (value: string): void => {
-    setInputState(value);
-    setBookCreateAssistantInput(value);
-    if (assistantInputRef.current && assistantInputRef.current.value !== value) {
-      assistantInputRef.current.value = value;
-    }
-  };
-
-  const readAssistantInput = (): string => {
-    const nextInput = assistantInputRef.current?.value ?? input;
-    setAssistantInput(nextInput);
-    return nextInput;
-  };
 
   const applyDraftToForm = () => {
     if (!draft) {
@@ -570,18 +628,14 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       draft.volumeOutline,
     ].filter((part): part is string => Boolean(part?.trim())).join("\n\n");
     const platformValues = platformChoices.map((option) => option.value);
-    setForm((current) => {
-      const nextForm = {
-        title: draft.title?.trim() || current.title,
-        genre: draft.genre?.trim() || current.genre,
-        platform: pickValidValue(draft.platform ?? current.platform, platformValues),
-        targetChapters: draft.targetChapters ? String(draft.targetChapters) : current.targetChapters,
-        chapterWordCount: draft.chapterWordCount ? String(draft.chapterWordCount) : current.chapterWordCount,
-        brief: draftBrief || current.brief,
-      };
-      writeFormToDom(nextForm);
-      return nextForm;
-    });
+    setForm((current) => ({
+      title: draft.title?.trim() || current.title,
+      genre: draft.genre?.trim() || current.genre,
+      platform: pickValidValue(draft.platform ?? current.platform, platformValues),
+      targetChapters: draft.targetChapters ? String(draft.targetChapters) : current.targetChapters,
+      chapterWordCount: draft.chapterWordCount ? String(draft.chapterWordCount) : current.chapterWordCount,
+      brief: draftBrief || current.brief,
+    }));
   };
 
   const refreshDraft = async (): Promise<BookCreationDraft | undefined> => {
@@ -637,48 +691,15 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     if (!bookCreateSessionId) {
       setBookCreateSessionIdState(sessionId);
     }
-
-    const agentUrl = buildApiUrl("/agent");
-    if (!agentUrl) {
-      throw new Error(projectLang === "zh" ? "API 地址无效。" : "Invalid API URL.");
-    }
-
-    const response = await fetch(agentUrl, {
+    return fetchJson<AgentResponse>("/agent", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildBookCreateAgentRequest(instruction, sessionId)),
     });
-
-    let data: AgentResponse | null = null;
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      data = await response.json() as AgentResponse;
-    } else if (response.body) {
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-      }
-      buffer += decoder.decode();
-      data = parseAgentSseResult(buffer);
-    }
-
-    if (!data) {
-      throw new Error(response.ok ? "未收到服务器响应" : `${response.status} ${response.statusText}`.trim());
-    }
-    return data;
   };
 
   const handleDraftSubmit = async () => {
-    const instruction = resolveDraftInstruction(readAssistantInput(), Boolean(draft));
+    const instruction = resolveDraftInstruction(input, Boolean(draft));
     if (!instruction) {
       return;
     }
@@ -695,7 +716,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
         nav.toBook(createdBookId);
         return;
       }
-      setAssistantInput("");
+      setInput("");
       setStatus(data.response ?? null);
       setDraft(data.session?.creationDraft);
     } catch (cause) {
@@ -706,8 +727,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   };
 
   const handleFormCreate = async () => {
-    const latestForm = readFormFromDom();
-    if (!isBookCreateFormReady(latestForm)) {
+    if (!canSubmitForm) {
       return;
     }
 
@@ -715,7 +735,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     setError(null);
     setStatus(copy.creationStatus);
     try {
-      const payload = buildBookCreatePayload(latestForm, projectLang);
+      const payload = buildBookCreatePayload(form, projectLang);
       const data = await fetchJson<{ status?: string; bookId?: string }>("/books/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -765,7 +785,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       const data = await runAgentInstruction("/discard");
       setStatus(data.response ?? null);
       setDraft(undefined);
-      setAssistantInput("");
+      setInput("");
       await refreshDraft().catch(() => undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -812,9 +832,8 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
             <label className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground">{copy.titleLabel}</span>
               <input
-                ref={titleRef}
-                defaultValue={form.title}
-                {...formTextHandlers("title")}
+                value={form.title}
+                onChange={(event) => updateForm({ title: event.target.value })}
                 className={`w-full ${c.input} rounded-md px-3 py-2.5 focus:outline-none text-sm`}
                 placeholder={copy.titlePlaceholder}
               />
@@ -822,9 +841,8 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
             <label className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground">{copy.genreLabel}</span>
               <input
-                ref={genreRef}
-                defaultValue={form.genre}
-                {...formTextHandlers("genre")}
+                value={form.genre}
+                onChange={(event) => updateForm({ genre: event.target.value })}
                 className={`w-full ${c.input} rounded-md px-3 py-2.5 focus:outline-none text-sm`}
                 placeholder={copy.genrePlaceholder}
               />
@@ -838,28 +856,26 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
                 value={form.platform}
                 onValueChange={(platform) => updateForm({ platform })}
                 options={platformChoices}
-                triggerClassName="h-11 rounded-md bg-background shadow-none"
+                triggerClassName="min-h-11 rounded-md bg-background text-sm"
               />
             </label>
             <label className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground">{copy.targetChaptersLabel}</span>
               <input
-                ref={targetChaptersRef}
                 type="number"
                 min={1}
-                defaultValue={form.targetChapters}
-                {...formTextHandlers("targetChapters")}
+                value={form.targetChapters}
+                onChange={(event) => updateForm({ targetChapters: event.target.value })}
                 className={`w-full ${c.input} rounded-md px-3 py-2.5 focus:outline-none text-sm`}
               />
             </label>
             <label className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground">{copy.chapterWordCountLabel}</span>
               <input
-                ref={chapterWordCountRef}
                 type="number"
                 min={1000}
-                defaultValue={form.chapterWordCount}
-                {...formTextHandlers("chapterWordCount")}
+                value={form.chapterWordCount}
+                onChange={(event) => updateForm({ chapterWordCount: event.target.value })}
                 className={`w-full ${c.input} rounded-md px-3 py-2.5 focus:outline-none text-sm`}
               />
             </label>
@@ -868,9 +884,8 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
           <label className="space-y-2 block">
             <span className="text-xs font-medium text-muted-foreground">{copy.briefLabel}</span>
             <textarea
-              ref={briefRef}
-              defaultValue={form.brief}
-              {...formTextHandlers("brief")}
+              value={form.brief}
+              onChange={(event) => updateForm({ brief: event.target.value })}
               rows={9}
               className={`w-full ${c.input} rounded-md px-3 py-3 focus:outline-none text-sm leading-7 resize-y`}
               placeholder={copy.briefPlaceholder}
@@ -908,11 +923,8 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
             </div>
 
             <textarea
-              ref={assistantInputRef}
               value={input}
-              {...mobileTextInputHandlers(setAssistantInput)}
-              onInput={(event) => setAssistantInput(event.currentTarget.value)}
-              onCompositionEnd={(event) => setAssistantInput(event.currentTarget.value)}
+              onChange={(event) => setInput(event.target.value)}
               rows={7}
               className={`w-full ${c.input} rounded-md px-3 py-3 focus:outline-none text-sm leading-7 resize-y`}
               placeholder={draft ? copy.promptPlaceholderFollowup : copy.promptPlaceholder}
@@ -950,12 +962,39 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
               <div className="text-sm text-muted-foreground">{projectLang === "zh" ? "读取草案中…" : "Loading draft…"}</div>
             ) : draft ? (
               <div className="space-y-4">
-                {summaryRows.length > 0 ? (
-                  <div className="space-y-2">
-                    {summaryRows.map((row) => (
-                      <div key={row.key} className="rounded-md border border-border/50 bg-background/70 px-3 py-2">
-                        <div className="text-[10px] uppercase text-muted-foreground font-semibold">{row.label}</div>
-                        <div className="mt-1 text-sm leading-6 whitespace-pre-wrap">{row.value}</div>
+                {summaryStages.some((stage) => stage.rows.length > 0) ? (
+                  <div className="space-y-3">
+                    {summaryStages.map((stage) => (
+                      <div key={stage.key} className="rounded-md border border-border/50 bg-background/70 px-3 py-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-[10px] uppercase text-muted-foreground font-semibold">{stage.label}</div>
+                          <span className="rounded-full border border-border/60 px-2 py-0.5 text-[10px] text-muted-foreground">
+                            {stage.status === "complete"
+                              ? (projectLang === "zh" ? "已补齐" : "Ready")
+                              : stage.status === "partial"
+                                ? (projectLang === "zh" ? "待补充" : "Partial")
+                                : (projectLang === "zh" ? "未开始" : "Missing")}
+                          </span>
+                        </div>
+                        {stage.rows.length > 0 ? (
+                          <div className="mt-2 space-y-2">
+                            {stage.rows.map((row) => (
+                              <div key={row.key}>
+                                <div className="text-[10px] uppercase text-muted-foreground">{row.label}</div>
+                                <div className="mt-0.5 text-sm leading-6 whitespace-pre-wrap">{row.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {stage.missing.length > 0 ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {stage.missing.map((field) => (
+                              <span key={field} className="rounded-md bg-secondary/60 px-2 py-0.5 text-[10px] text-muted-foreground">
+                                {field}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     ))}
                   </div>

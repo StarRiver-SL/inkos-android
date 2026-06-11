@@ -1,4 +1,4 @@
-import { getAllEndpoints, getEndpoint } from "./providers/index.js";
+import { getEndpoint } from "./providers/index.js";
 import { probeModelsFromUpstream } from "./providers/probe.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 
@@ -124,15 +124,11 @@ export function guessServiceFromBaseUrl(baseUrl: string): string {
 }
 
 export const SERVICE_TO_PI_PROVIDER: Record<string, string> = Object.fromEntries(
-  getAllEndpoints()
-    .filter((endpoint) => endpoint.id !== "custom")
-    .map((endpoint) => {
-      const legacy = SERVICE_PRESETS[endpoint.id];
-      const providerFamily = endpoint.api.startsWith("anthropic") ? "anthropic" : "openai";
-      const piProvider = endpoint.id === "google" ? "google" : legacy?.piProvider ?? providerFamily;
-      return [endpoint.id, piProvider];
-    }),
+  Object.entries(SERVICE_PRESETS)
+    .filter(([service]) => service !== "custom")
+    .map(([service, preset]) => [service, preset.piProvider ?? preset.providerFamily]),
 ) as Record<string, string>;
+SERVICE_TO_PI_PROVIDER.google = "google";
 
 export interface ModelInfo {
   readonly id: string;
@@ -178,11 +174,9 @@ export async function listModelsForService(
   if ((apiKey || canProbeWithoutApiKey) && probeBaseUrl) {
     const probed = await probeModelsFromUpstream(probeBaseUrl, apiKey ?? "", 10_000);
     if (probed.length > 0) {
-      const { isActiveTextModel, lookupModel } = await import("./providers/lookup.js");
+      const { lookupModel } = await import("./providers/lookup.js");
       for (const m of probed) {
         const card = lookupModel(service, m.id);
-        if (provider && provider.id !== "ollama" && provider.models.length > 0 && !card) continue;
-        if (card && !isActiveTextModel(card)) continue;
         byId.set(m.id, card ? toModelInfo(card) : { id: m.id, name: m.name, contextWindow: m.contextWindow });
       }
     }
@@ -190,9 +184,8 @@ export async function listModelsForService(
 
   // 2) provider bank fallback / 补充
   if (provider) {
-    const { isActiveTextModel } = await import("./providers/lookup.js");
     for (const m of provider.models) {
-      if (!isActiveTextModel(m)) continue;
+      if (m.enabled === false) continue;
       if (byId.has(m.id)) continue;
       byId.set(m.id, toModelInfo(m));
     }
@@ -210,11 +203,13 @@ export async function listModelsForService(
 
 export async function listServicesWithModelCount(): Promise<ReadonlyArray<{ service: string; label: string; modelCount: number }>> {
   const result: { service: string; label: string; modelCount: number }[] = [];
-  for (const endpoint of getAllEndpoints()) {
-    if (endpoint.id === "custom") continue;
-    const models = await listModelsForService(endpoint.id);
-    result.push({ service: endpoint.id, label: endpoint.label, modelCount: models.length });
+  for (const [key, preset] of Object.entries(SERVICE_PRESETS)) {
+    if (key === "custom") {
+      result.push({ service: key, label: preset.label, modelCount: 0 });
+      continue;
+    }
+    const models = await listModelsForService(key);
+    result.push({ service: key, label: preset.label, modelCount: models.length });
   }
-  result.push({ service: "custom", label: SERVICE_PRESETS.custom.label, modelCount: 0 });
   return result;
 }

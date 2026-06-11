@@ -22,24 +22,11 @@ export interface ChatPageServiceInfo {
 
 export interface ChatPageSessionSummary {
   readonly sessionId: string;
+  readonly sessionKind?: string;
   readonly messageCount: number;
 }
 
-export interface ComposerTextSyncInput {
-  readonly storeInput: string;
-  readonly composerText: string;
-  readonly elementValue: string | null;
-  readonly elementFocused: boolean;
-}
-
-export interface ComposerTextSyncResult {
-  readonly text: string;
-  readonly syncStoreText: string | null;
-  readonly syncElementText: string | null;
-}
-
 const BOOK_CREATE_SESSION_KEY = "inkos.book-create.session-id";
-const BOOK_CREATE_ASSISTANT_INPUT_KEY = "inkos.book-create.assistant-input";
 const PROJECT_CHAT_SESSION_KEY = "inkos.project-chat.session-id";
 
 export function getBookCreateSessionId(): string | null {
@@ -52,22 +39,6 @@ export function setBookCreateSessionId(sessionId: string): void {
 
 export function clearBookCreateSessionId(): void {
   globalThis.localStorage?.removeItem(BOOK_CREATE_SESSION_KEY);
-}
-
-export function getBookCreateAssistantInput(): string {
-  return globalThis.localStorage?.getItem(BOOK_CREATE_ASSISTANT_INPUT_KEY) ?? "";
-}
-
-export function setBookCreateAssistantInput(input: string): void {
-  if (input.length > 0) {
-    globalThis.localStorage?.setItem(BOOK_CREATE_ASSISTANT_INPUT_KEY, input);
-  } else {
-    globalThis.localStorage?.removeItem(BOOK_CREATE_ASSISTANT_INPUT_KEY);
-  }
-}
-
-export function clearBookCreateAssistantInput(): void {
-  globalThis.localStorage?.removeItem(BOOK_CREATE_ASSISTANT_INPUT_KEY);
 }
 
 export function getProjectChatSessionId(): string | null {
@@ -96,12 +67,43 @@ export function filterModelGroups(
     .filter((group) => group.models.length > 0);
 }
 
+export function buildModelGroups(
+  services: ReadonlyArray<ChatPageServiceInfo>,
+  modelsByService: Readonly<Record<string, ReadonlyArray<ChatPageModelInfo>>>,
+  preference?: ChatPageModelPreference | null,
+  current?: ChatPageModelPreference | null,
+): ReadonlyArray<ChatPageModelGroup> {
+  return services
+    .filter((service) => service.connected)
+    .map((service) => {
+      const discovered = modelsByService[service.service] ?? [];
+      const fallbackModel = preference?.service === service.service
+        ? preference.model?.trim()
+        : current?.service === service.service
+          ? current.model?.trim()
+          : "";
+      if (discovered.length > 0) {
+        const models = fallbackModel && !discovered.some((model) => model.id === fallbackModel)
+          ? [{ id: fallbackModel, name: fallbackModel }, ...discovered]
+          : discovered;
+        return { service: service.service, label: service.label, models };
+      }
+      return fallbackModel
+        ? {
+            service: service.service,
+            label: service.label,
+            models: [{ id: fallbackModel, name: fallbackModel }],
+          }
+        : null;
+    })
+    .filter((group): group is ChatPageModelGroup => group !== null);
+}
+
 export function pickModelSelection(
   groupedModels: ReadonlyArray<ChatPageModelGroup>,
   selectedModel: string | null,
   selectedService: string | null,
   preference?: ChatPageModelPreference | null,
-  options: { readonly modelsLoading?: boolean } = {},
 ): { model: string; service: string } | null {
   const selectedStillAvailable = selectedModel && selectedService
     ? groupedModels.some((group) =>
@@ -110,7 +112,6 @@ export function pickModelSelection(
       )
     : false;
   if (selectedStillAvailable) return null;
-  if (options.modelsLoading && selectedModel && selectedService) return null;
 
   const preferredService = preference?.service?.trim();
   const preferredModel = preference?.model?.trim();
@@ -141,67 +142,39 @@ export function pickModelSelection(
   return { model: firstModel.id, service: firstGroup.service };
 }
 
-export function ensureConfiguredModelGroup(
-  groupedModels: ReadonlyArray<ChatPageModelGroup>,
-  services: ReadonlyArray<ChatPageServiceInfo>,
-  preference?: ChatPageModelPreference | null,
-): ReadonlyArray<ChatPageModelGroup> {
-  const preferredService = preference?.service?.trim();
-  const preferredModel = preference?.model?.trim();
-  if (!preferredService || !preferredModel) return groupedModels;
-
-  const existingIndex = groupedModels.findIndex((group) => group.service === preferredService);
-  if (existingIndex >= 0) {
-    const existing = groupedModels[existingIndex]!;
-    if (existing.models.some((model) => model.id === preferredModel)) return groupedModels;
-    return groupedModels.map((group, index) => index === existingIndex
-      ? {
-          ...existing,
-          models: [
-            { id: preferredModel, name: preferredModel },
-            ...existing.models,
-          ],
-        }
-      : group);
-  }
-
-  const service = services.find((item) => item.service === preferredService);
-  return [
-    {
-      service: preferredService,
-      label: service?.label || preferredService,
-      models: [{ id: preferredModel, name: preferredModel }],
-    },
-    ...groupedModels,
-  ];
-}
-
 export function pickProjectChatSessionId(
   sessions: ReadonlyArray<ChatPageSessionSummary>,
 ): string | null {
-  return sessions.find((session) => session.messageCount > 0)?.sessionId
-    ?? sessions[0]?.sessionId
+  const projectSurfaceSessions = sessions.filter((session) =>
+    !session.sessionKind
+    || session.sessionKind === "chat"
+    || session.sessionKind === "short"
+    || session.sessionKind === "play"
+  );
+  return projectSurfaceSessions.find((session) => session.messageCount > 0)?.sessionId
+    ?? projectSurfaceSessions[0]?.sessionId
     ?? null;
 }
 
-export function resolveComposerTextSync(input: ComposerTextSyncInput): ComposerTextSyncResult {
-  const liveElementText = input.elementValue ?? input.composerText;
+export function shouldShowPlayChoicePanel(input: {
+  readonly playMode?: string | null;
+  readonly choiceSetKey?: string | null;
+  readonly consumedChoiceKey?: string | null;
+  readonly choiceCount: number;
+}): boolean {
+  if (input.playMode !== "guided") return false;
+  if (!input.choiceSetKey) return false;
+  if (input.choiceCount <= 0) return false;
+  return input.choiceSetKey !== input.consumedChoiceKey;
+}
 
-  if (input.elementFocused && liveElementText !== input.storeInput) {
-    return {
-      text: liveElementText,
-      syncStoreText: liveElementText,
-      syncElementText: null,
-    };
-  }
-
-  const nextText = input.storeInput.length === 0 && input.composerText.length > 0
-    ? input.composerText
-    : input.storeInput;
-
-  return {
-    text: nextText,
-    syncStoreText: nextText !== input.storeInput ? nextText : null,
-    syncElementText: input.elementValue !== null && input.elementValue !== nextText ? nextText : null,
-  };
+export function isChatScrollNearBottom(input: {
+  readonly scrollTop: number;
+  readonly clientHeight: number;
+  readonly scrollHeight: number;
+  readonly thresholdPx?: number;
+}): boolean {
+  const threshold = input.thresholdPx ?? 96;
+  const distanceFromBottom = input.scrollHeight - input.scrollTop - input.clientHeight;
+  return distanceFromBottom <= threshold;
 }

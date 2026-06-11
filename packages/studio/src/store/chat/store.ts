@@ -27,13 +27,14 @@ function schedulePersist(state: ChatStore): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
+    const current = useChatStore.getState();
     persistMessageState({
-      sessions: useChatStore.getState().sessions,
-      sessionIdsByBook: useChatStore.getState().sessionIdsByBook,
-      activeSessionId: useChatStore.getState().activeSessionId,
-      input: useChatStore.getState().input,
-      selectedModel: useChatStore.getState().selectedModel,
-      selectedService: useChatStore.getState().selectedService,
+      sessions: current.sessions,
+      sessionIdsByBook: current.sessionIdsByBook,
+      activeSessionId: current.activeSessionId,
+      input: current.input,
+      selectedModel: current.selectedModel,
+      selectedService: current.selectedService,
     });
   }, 300);
 }

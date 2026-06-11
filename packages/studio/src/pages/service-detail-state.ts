@@ -12,26 +12,21 @@ export interface ServiceDetailDetectedConfig {
   readonly modelsSource?: "api" | "fallback";
 }
 
-export type ServiceCompatibilityStatus = "pass" | "warn" | "fail";
-
-export interface ServiceCompatibilityCheck {
-  readonly id: string;
-  readonly label: string;
-  readonly status: ServiceCompatibilityStatus;
-  readonly message: string;
-  readonly action?: string;
-}
-
-export interface ServiceCompatibilityReport {
-  readonly ok: boolean;
-  readonly level: ServiceCompatibilityStatus;
-  readonly summary: string;
-  readonly checks: ReadonlyArray<ServiceCompatibilityCheck>;
-  readonly recommended?: {
+export interface ServiceDetailOfficialVerification {
+  readonly recommendedTransport?: {
     readonly apiFormat?: "chat" | "responses";
     readonly stream?: boolean;
-    readonly maxTokens?: number;
   };
+  readonly probe: {
+    readonly ok: boolean;
+    readonly models: number;
+    readonly error?: string;
+  };
+  readonly chat: {
+    readonly ok: boolean;
+    readonly latencyMs?: number;
+    readonly error?: string;
+  } | null;
 }
 
 export type ServiceDetailConnectionStatus =
@@ -49,7 +44,7 @@ export interface ServiceProbeResponse {
   readonly models?: ServiceDetailModelInfo[];
   readonly selectedModel?: string;
   readonly detected?: ServiceDetailDetectedConfig;
-  readonly compatibility?: ServiceCompatibilityReport;
+  readonly official?: ServiceDetailOfficialVerification;
   readonly error?: string;
 }
 
@@ -61,6 +56,7 @@ export interface ServiceDetailVerifiedProbe {
   readonly models: ServiceDetailModelInfo[];
   readonly selectedModel?: string;
   readonly detected?: ServiceDetailDetectedConfig;
+  readonly official?: ServiceDetailOfficialVerification;
 }
 
 export async function probeServiceForDetail(
@@ -71,7 +67,6 @@ export async function probeServiceForDetail(
     readonly stream: boolean;
     readonly baseUrl?: string;
     readonly model?: string;
-    readonly diagnose?: boolean;
   },
   deps?: { readonly fetchJsonImpl?: JsonFetcher },
 ): Promise<ServiceProbeResponse> {
@@ -139,6 +134,7 @@ export async function saveServiceConfig(args: {
   readonly stream: boolean;
   readonly temperature: string;
   readonly detectedModel: string;
+  readonly testModel?: string;
   readonly verifiedProbe?: ServiceDetailVerifiedProbe | null;
   readonly fetchJsonImpl?: JsonFetcher;
 }): Promise<{
@@ -173,7 +169,7 @@ export async function saveServiceConfig(args: {
       && verified.baseUrl === verifiedBaseUrl
       && verified.apiFormat === args.apiFormat
       && verified.stream === args.stream
-      && (!args.detectedModel || verified.selectedModel === args.detectedModel),
+      && (!args.testModel?.trim() || verified.selectedModel === args.testModel.trim()),
   );
 
   let probe: ServiceProbeResponse;
@@ -183,6 +179,7 @@ export async function saveServiceConfig(args: {
       models: verified.models,
       selectedModel: verified.selectedModel,
       detected: verified.detected,
+      official: verified.official,
     };
   } else {
     try {
@@ -190,8 +187,8 @@ export async function saveServiceConfig(args: {
         apiKey: trimmedKey,
         apiFormat: args.apiFormat,
         stream: args.stream,
-        ...(args.detectedModel ? { model: args.detectedModel } : {}),
         ...(args.isCustom ? { baseUrl: trimmedBaseUrl } : {}),
+        ...(args.testModel?.trim() ? { model: args.testModel.trim() } : {}),
       }, { fetchJsonImpl });
     } catch (error) {
       return {
@@ -210,7 +207,7 @@ export async function saveServiceConfig(args: {
     };
   }
 
-  const detectedModel = probe.selectedModel ?? args.detectedModel;
+  const detectedModel = args.testModel?.trim() || probe.selectedModel || args.detectedModel;
   const detectedConfig = probe.detected ?? null;
   const savedApiFormat = detectedConfig?.apiFormat ?? args.apiFormat;
   const savedStream = typeof detectedConfig?.stream === "boolean" ? detectedConfig.stream : args.stream;

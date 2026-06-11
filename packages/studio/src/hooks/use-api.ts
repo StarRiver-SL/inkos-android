@@ -35,6 +35,10 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return [getApiCacheKey("/books")];
   }
 
+  if (/^\/api\/v1\/(spinoff|imitation)\/init$/.test(normalized)) {
+    return [getApiCacheKey("/books")];
+  }
+
   if (normalized === "/api/v1/project") {
     return [getApiCacheKey("/project")];
   }
@@ -64,6 +68,10 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
 
   if (/^\/api\/v1\/daemon\/(start|stop)$/.test(normalized)) {
     return [getApiCacheKey("/daemon")];
+  }
+
+  if (normalized === "/api/v1/logs") {
+    return [getApiCacheKey("/logs")];
   }
 
   return [];
@@ -260,6 +268,12 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  invalidateApiPaths(deriveInvalidationPaths(path));
+  return result;
+}
+
+export async function deleteApi<T>(path: string): Promise<T> {
+  const result = await fetchJson<T>(path, { method: "DELETE" });
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }

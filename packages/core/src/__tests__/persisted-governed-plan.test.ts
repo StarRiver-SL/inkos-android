@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -72,6 +72,11 @@ describe("persisted-governed-plan round trip", () => {
 
     const plan = buildPlan(1);
     await savePersistedPlan(dir, plan);
+
+    const persisted = await readFile(join(dir, "story", "runtime", "chapter-0001.plan.md"), "utf-8");
+    expect(persisted.trimStart()).not.toMatch(/^---\s*\n/);
+    expect(persisted).toContain("## 本章目标");
+    expect(persisted).toContain("## 关联线索");
 
     const loaded = await loadPersistedPlan(dir, 1);
     expect(loaded).not.toBeNull();

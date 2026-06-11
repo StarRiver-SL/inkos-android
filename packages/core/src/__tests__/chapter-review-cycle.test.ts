@@ -101,6 +101,56 @@ describe("runChapterReviewCycle v9", () => {
     expect(reviseChapter.mock.calls[0]?.[4]).toBe("auto");
   });
 
+  it("does not auto-revise when audit output parsing failed", async () => {
+    const originalContent = "b".repeat(200);
+    const auditChapter = vi.fn().mockResolvedValue(createAuditResult({
+      passed: false,
+      overallScore: 0,
+      parseFailed: true,
+      summary: "审稿输出解析失败",
+      issues: [{
+        severity: "critical",
+        category: "系统错误",
+        description: "审稿输出格式异常，无法解析为 JSON",
+        suggestion: "检查模型输出格式",
+      }],
+    }));
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "a".repeat(200),
+      wordCount: 200,
+      fixedIssues: ["should not run"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockImplementation(async (content: string) => ({
+        content,
+        wordCount: content.length,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      }));
+
+    const result = await runChapterReviewCycle({
+      ...baseParams,
+      initialOutput: {
+        content: originalContent,
+        wordCount: originalContent.length,
+        postWriteErrors: [],
+      },
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      maxReviewIterations: 1,
+    });
+
+    expect(reviseChapter).not.toHaveBeenCalled();
+    expect(result.finalContent).toBe(originalContent);
+    expect(result.revised).toBe(false);
+    expect(result.auditResult.parseFailed).toBe(true);
+  });
+
   it("runs repair loop when score is below threshold, picks best version", async () => {
     const auditChapter = vi.fn()
       .mockResolvedValueOnce(createAuditResult({
@@ -166,6 +216,56 @@ describe("runChapterReviewCycle v9", () => {
     expect(result.auditResult.overallScore).toBe(80);
     expect(result.finalContent).toBe("a".repeat(200));
     expect(result.revised).toBe(true);
+  });
+
+  it("does not let a higher-scoring hard-range failure displace an in-range draft", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        overallScore: 80,
+        issues: [{ severity: "warning", category: "pacing", description: "needs work", suggestion: "tighten" }],
+      }))
+      .mockResolvedValueOnce(createAuditResult({
+        passed: true,
+        overallScore: 95,
+        issues: [],
+      }));
+
+    const reviseChapter = vi.fn().mockResolvedValueOnce({
+      revisedContent: "x".repeat(80),
+      wordCount: 80,
+      fixedIssues: ["tightened"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockImplementation(async (content: string) => ({
+        content,
+        wordCount: content.length,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      }));
+
+    const result = await runChapterReviewCycle({
+      ...baseParams,
+      initialOutput: {
+        content: "c".repeat(200),
+        wordCount: 200,
+        postWriteErrors: [],
+      },
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      maxReviewIterations: 1,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(result.finalContent).toBe("c".repeat(200));
+    expect(result.finalWordCount).toBe(200);
+    expect(result.auditResult.overallScore).toBe(80);
   });
 
   it("defaults to one automatic repair pass", async () => {
@@ -253,36 +353,6 @@ describe("runChapterReviewCycle v9", () => {
     // No revision should have been called
     expect(reviseChapter).not.toHaveBeenCalled();
     expect(result.auditResult.overallScore).toBe(88);
-    expect(result.revised).toBe(false);
-  });
-
-  it("skips LLM audit and repair when skipAudit is enabled", async () => {
-    const auditChapter = vi.fn();
-    const reviseChapter = vi.fn();
-    const normalizeDraftLengthIfNeeded = vi.fn()
-      .mockImplementation(async (content: string) => ({
-        content,
-        wordCount: content.length,
-        applied: false,
-        tokenUsage: ZERO_USAGE,
-      }));
-
-    const result = await runChapterReviewCycle({
-      ...baseParams,
-      initialOutput: {
-        content: "e".repeat(200),
-        wordCount: 200,
-        postWriteErrors: [],
-      },
-      skipAudit: true,
-      createReviser: () => ({ reviseChapter }),
-      auditor: { auditChapter },
-      normalizeDraftLengthIfNeeded,
-    });
-
-    expect(auditChapter).not.toHaveBeenCalled();
-    expect(reviseChapter).not.toHaveBeenCalled();
-    expect(result.auditResult.passed).toBe(true);
     expect(result.revised).toBe(false);
   });
 

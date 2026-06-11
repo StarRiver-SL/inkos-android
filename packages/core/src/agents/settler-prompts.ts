@@ -13,7 +13,7 @@ export function buildSettlerSystemPrompt(
   const numericalBlock = genreProfile.numericalSystem
     ? `\n- 本题材有数值/资源体系，你必须在 UPDATED_LEDGER 中追踪正文中出现的所有资源变动
 - 数值验算铁律：期初 + 增量 = 期末，三项必须可验算`
-    : `\n- 本题材无数值系统，UPDATED_LEDGER 仍必须作为通用资源账本更新：追踪物品、线索、权限、身份筹码、欠债/承诺、人脉、情报、可用机会等剧情资源；没有数量时写状态与依据章节`;
+    : `\n- 本题材无数值系统，UPDATED_LEDGER 留空`;
 
   const hookRules = `
 ## 伏笔追踪规则（严格执行）
@@ -40,28 +40,20 @@ export function buildSettlerSystemPrompt(
 ## 工作模式
 
 你不是在写作。你的任务是：
-1. 仔细阅读正文，逐维度提取所有可观察的事实变化（宁多勿少）
+1. 仔细阅读正文，提取所有状态变化
 2. 基于"当前追踪文件"做增量更新
 3. 严格按照 === TAG === 格式输出
 
-## 分析维度（逐维度从正文提取，不遗漏）
+## 分析维度
 
-1. **角色行为**：谁做了什么，对谁，为什么；出场、退场、状态变化（受伤/突破/死亡等）
-2. **位置变化**：谁去了哪里，从哪里来；场景转换
-3. **资源变化**：获得、失去、消耗了什么；包括数值、物品、线索、情报、权限、承诺、人脉、身份筹码、机会窗口
-4. **关系变化**：新相遇、信任/不信任转变、结盟、背叛；角色间关系变化
-5. **情绪变化**：角色情绪从X到Y，触发事件是什么
-6. **信息流动**：谁知道了什么新信息，谁仍然不知情；新的信息边界
-7. **剧情线索**：新埋下的悬念、已有线索的推进、线索的解答；伏笔的埋设、推进、回收
-8. **时间推进**：过了多少时间，提到的时间标记
-9. **身体状态**：受伤、恢复、疲劳、战力变化
-10. **支线进展**：各支线的推进或停滞
-
-提取规则：
-- 只从正文提取——不推测可能发生的事
-- 宁多勿少：不确定是否重要时也要记录
-- 具体化："陆承烬左肩旧伤开裂" 而非 "陆承烬受伤了"
-- 标注每个场景中在场的角色
+从正文中提取以下信息：
+- 角色出场、退场、状态变化（受伤/突破/死亡等）
+- 位置移动、场景转换
+- 物品/资源的获得与消耗
+- 伏笔的埋设、推进、回收
+- 情感弧线变化
+- 支线进展
+- 角色间关系变化、新的信息边界
 
 ## 书籍信息
 
@@ -185,7 +177,7 @@ export function buildSettlerUserPrompt(params: {
   readonly validationFeedback?: string;
 }): string {
   const ledgerBlock = params.ledger
-    ? `\n## 当前资源账本（数值/物品/线索/情报/权限/承诺等剧情资源）\n${params.ledger}\n`
+    ? `\n## 当前资源账本\n${params.ledger}\n`
     : "";
 
   const summariesBlock = params.chapterSummaries !== "(文件尚未创建)"
@@ -205,7 +197,7 @@ export function buildSettlerUserPrompt(params: {
     : "";
 
   const observationsBlock = params.observations
-    ? `\n## 补充观察日志\n${params.observations}\n\n结合以上观察日志和正文，更新所有追踪文件。确保观察日志中的每一项变化都反映在对应的文件中。\n`
+    ? `\n## 观察日志（由 Observer 提取，包含本章所有事实变化）\n${params.observations}\n\n基于以上观察日志和正文，更新所有追踪文件。确保观察日志中的每一项变化都反映在对应的文件中。\n`
     : "";
   const selectedEvidenceBlock = params.selectedEvidenceBlock
     ? `\n## 已选长程证据\n${params.selectedEvidenceBlock}\n`

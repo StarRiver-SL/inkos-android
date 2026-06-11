@@ -1,24 +1,29 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { Theme } from "../../hooks/use-theme";
 import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
-import { mobileTextInputHandlers } from "../../lib/mobile-input";
 import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X } from "lucide-react";
-import { LazyStreamdown } from "../ai-elements/lazy-streamdown";
+import { Streamdown } from "streamdown";
+import { cjk } from "@streamdown/cjk";
 import { ProgressSection } from "../sidebar/ProgressSection";
-import { FoundationSection, invalidateFoundationFilesCache } from "../sidebar/FoundationSection";
+import { FoundationSection } from "../sidebar/FoundationSection";
 import { SummarySection } from "../sidebar/SummarySection";
 import { ChaptersSection } from "../sidebar/ChaptersSection";
-import { CharacterSection, invalidateCharactersCache } from "../sidebar/CharacterSection";
+import { CharacterSection } from "../sidebar/CharacterSection";
+import { FrontmatterCards } from "../sidebar/FrontmatterCards";
+import { PendingHooksView } from "../sidebar/PendingHooksView";
 import {
-  getCachedArtifactContent,
-  invalidateBookArtifactContent,
-  loadArtifactContent,
-  setCachedArtifactContent,
-  type ArtifactContentTarget,
-} from "../sidebar/artifact-content-cache";
+  FOUNDATION_FILE_LABELS,
+  frontmatterToCards,
+  hasTableRows,
+  presentCurrentState,
+  relabelOkrJargon,
+  roleFromPath,
+  stripStructuralMarkers,
+  type TruthFrontmatter,
+} from "../../lib/truth-display";
 
 export interface BookSidebarProps {
   readonly bookId: string;
@@ -27,64 +32,53 @@ export interface BookSidebarProps {
   readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
 }
 
-const FOUNDATION_LABELS: Record<string, string> = {
-  "story_bible.md": "世界观设定",
-  "outline/story_frame.md": "世界观设定",
-  "volume_outline.md": "卷纲规划",
-  "outline/volume_map.md": "卷纲规划",
-  "book_rules.md": "叙事规则",
-  "current_state.md": "状态卡",
-  "pending_hooks.md": "伏笔池",
-  "particle_ledger.md": "资源账本",
-  "chapter_summaries.md": "章节摘要",
-  "subplot_board.md": "支线进度",
-  "emotional_arcs.md": "感情线",
-  "character_matrix.md": "角色矩阵",
-};
+const streamdownPlugins = { cjk };
 
-function isCompatPointerContent(content: string): boolean {
-  return /兼容指针|兼容入口|已废弃|compat pointer|deprecated|authoritative source/iu.test(content);
+// Friendly header label for an opened truth file: character files show the
+// character's name, foundation files their friendly label, everything else its
+// path as a last resort.
+function artifactLabel(file: string): string {
+  return roleFromPath(file)?.name ?? FOUNDATION_FILE_LABELS[file] ?? file;
 }
 
-function presentArtifactContent(file: string | null, content: string | null): string | null {
-  if (content === null || !file || !isCompatPointerContent(content)) return content;
-
-  if (file === "book_rules.md") {
-    return [
-      "# 叙事规则索引",
-      "",
-      "本书使用新版结构，叙事规则的权威内容已经合并到 `outline/story_frame.md` 文件顶部的 YAML 配置区。",
-      "",
-      "请在核心文件中打开“世界观设定”查看完整设定与规则。这个入口只用于兼容旧书和外部读取。",
-    ].join("\n");
+// Read-mode body for an opened file. A few files need reader-friendly handling
+// instead of raw markdown: pending_hooks.md (a wide tracking table) renders as
+// cards, current_state.md hides its engineering seed note, and files with YAML
+// frontmatter (story_frame.md) render structured cards above clean prose.
+function renderTruthBody(
+  file: string | null,
+  content: string,
+  frontmatter: TruthFrontmatter | null,
+  body: string | null,
+) {
+  if (file === "pending_hooks.md") {
+    return <PendingHooksView content={content} />;
   }
-
-  if (file === "character_matrix.md") {
-    const roleLines = content
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .filter((line) => /^-\s+roles\//.test(line));
-    return [
-      "# 角色矩阵索引",
-      "",
-      "本书使用新版角色图谱，角色矩阵已经拆分为 `roles/` 下的一人一卡文件。侧栏“角色”会直接读取这些角色卡，并按当前章节相关性显示。",
-      "",
-      roleLines.length > 0 ? "## 角色文件" : "",
-      ...roleLines,
-    ].filter(Boolean).join("\n");
+  if (file === "current_state.md") {
+    const { isEmpty, body: stateBody } = presentCurrentState(content);
+    return isEmpty ? (
+      <p className="text-[14px] leading-6 text-muted-foreground/60 italic">
+        还没有运行状态。开始写作后，每写完一章这里会自动记录最新的故事进展。
+      </p>
+    ) : (
+      <Streamdown plugins={streamdownPlugins} mode="static">{stateBody}</Streamdown>
+    );
   }
-
-  if (file === "story_bible.md") {
-    return [
-      "# 世界观设定索引",
-      "",
-      "本书使用新版结构，世界观权威内容位于 `outline/story_frame.md`，卷纲位于 `outline/volume_map.md`，角色档案位于 `roles/`。",
-      "",
-      "请优先打开核心文件中的“世界观设定”和“卷纲规划”。",
-    ].join("\n");
+  if (file === "emotional_arcs.md" && !hasTableRows(content)) {
+    return (
+      <p className="text-[14px] leading-6 text-muted-foreground/60 italic">
+        还没有情感弧线记录。开始写作后，这里会记录角色在各章的情绪变化。
+      </p>
+    );
   }
-
-  return content.replace(/已废弃/g, "兼容入口").replace(/deprecated/gi, "compat entry");
+  return (
+    <>
+      <FrontmatterCards cards={frontmatterToCards(frontmatter)} />
+      <Streamdown plugins={streamdownPlugins} mode="static">
+        {relabelOkrJargon(stripStructuralMarkers(body ?? content))}
+      </Streamdown>
+    </>
+  );
 }
 
 function ArtifactView({ bookId }: { readonly bookId: string }) {
@@ -92,53 +86,41 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
   const artifactChapter = useChatStore((s) => s.artifactChapter);
   const closeArtifact = useChatStore((s) => s.closeArtifact);
   const [content, setContent] = useState<string | null>(null);
+  const [frontmatter, setFrontmatter] = useState<TruthFrontmatter | null>(null);
+  const [body, setBody] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
-  const editRef = useRef<HTMLTextAreaElement>(null);
 
   const isChapter = artifactChapter !== null;
-  const target = useMemo<ArtifactContentTarget | null>(
-    () => isChapter
-      ? { type: "chapter", chapter: artifactChapter }
-      : artifactFile ? { type: "truth", file: artifactFile } : null,
-    [artifactFile, artifactChapter, isChapter],
-  );
   const label = isChapter
     ? `第 ${artifactChapter} 章`
-    : artifactFile ? FOUNDATION_LABELS[artifactFile] ?? artifactFile : "";
+    : artifactFile ? artifactLabel(artifactFile) : "";
 
   useEffect(() => {
-    if (!target) return;
-    let ignore = false;
-    const cached = getCachedArtifactContent(bookId, target);
     setEditing(false);
-
-    if (cached !== undefined) {
-      setContent(cached);
-      setLoading(false);
-    } else {
-      setContent(null);
-      setLoading(true);
+    setLoading(true);
+    setFrontmatter(null);
+    setBody(null);
+    if (isChapter) {
+      fetchJson<{ content: string }>(`/books/${bookId}/chapters/${artifactChapter}`)
+        .then((data) => setContent(data.content ?? ""))
+        .catch(() => setContent(null))
+        .finally(() => setLoading(false));
+    } else if (artifactFile) {
+      fetchJson<{ content: string | null; frontmatter?: TruthFrontmatter; body?: string }>(
+        `/books/${bookId}/truth/${artifactFile}`,
+      )
+        .then((data) => {
+          setContent(data.content ?? "");
+          setFrontmatter(data.frontmatter ?? null);
+          setBody(data.body ?? null);
+        })
+        .catch(() => setContent(null))
+        .finally(() => setLoading(false));
     }
-
-    loadArtifactContent(bookId, target)
-      .then((nextContent) => {
-        if (!ignore) {
-          setContent(nextContent);
-        }
-      })
-      .finally(() => {
-        if (!ignore) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      ignore = true;
-    };
-  }, [bookId, artifactFile, artifactChapter, target]);
+  }, [bookId, artifactFile, artifactChapter, isChapter]);
 
   const handleEdit = useCallback(() => {
     setEditContent(content ?? "");
@@ -146,34 +128,29 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
   }, [content]);
 
   const handleSave = useCallback(async () => {
-    const nextContent = editRef.current?.value ?? editContent;
-    setEditContent(nextContent);
     setSaving(true);
     try {
       if (isChapter) {
         await fetchJson(`/books/${bookId}/chapters/${artifactChapter}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: nextContent }),
+          body: JSON.stringify({ content: editContent }),
         });
       } else if (artifactFile) {
         await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: nextContent }),
+          body: JSON.stringify({ content: editContent }),
         });
       }
-      if (target) {
-        setCachedArtifactContent(bookId, target, nextContent);
-      }
-      setContent(nextContent);
+      setContent(editContent);
       setEditing(false);
     } catch {
       // keep editing state on error
     } finally {
       setSaving(false);
     }
-  }, [bookId, artifactFile, artifactChapter, isChapter, editContent, target]);
+  }, [bookId, artifactFile, artifactChapter, isChapter, editContent]);
 
   return (
     <div className="flex flex-col h-full">
@@ -184,8 +161,8 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
         >
           <ArrowLeft size={14} />
         </button>
-        <span className="text-sm font-medium truncate flex-1">{label}</span>
-        {!loading && content !== null && !editing && !isCompatPointerContent(content) && (
+        <span className="text-[15px] leading-6 font-medium truncate flex-1">{label}</span>
+        {!loading && content !== null && !editing && (
           <button
             onClick={handleEdit}
             className="w-6 h-6 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
@@ -217,17 +194,16 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
             <Loader2 size={16} className="text-muted-foreground animate-spin" />
           </div>
         ) : content === null ? (
-          <p className="text-xs text-muted-foreground/50 italic px-4 py-3">文件不存在</p>
+          <p className="text-[14px] leading-6 text-muted-foreground/50 italic px-4 py-3">文件不存在</p>
         ) : editing ? (
           <textarea
-            ref={editRef}
-            defaultValue={editContent}
-            {...mobileTextInputHandlers(setEditContent)}
-            className="w-full h-full min-h-[300px] bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            className="w-full h-full min-h-[300px] bg-transparent text-[15px] leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
           />
         ) : (
-          <div className="artifact-markdown px-4 py-3 text-sm leading-7">
-            <LazyStreamdown mode="static" pluginSet="cjk">{presentArtifactContent(artifactFile, content) ?? ""}</LazyStreamdown>
+          <div className="px-4 py-3 text-[15px] leading-7">
+            {renderTruthBody(isChapter ? null : artifactFile, content, frontmatter, body)}
           </div>
         )}
       </div>
@@ -269,7 +245,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
       {activeOp && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/5 border border-primary/10">
           <Loader2 size={12} className="text-primary animate-spin shrink-0" />
-          <span className="text-xs text-primary font-medium">
+          <span className="text-[14px] leading-5 text-primary font-medium">
             {OP_LABELS[activeOp] ?? activeOp}
           </span>
         </div>
@@ -293,20 +269,8 @@ function defaultSidebarWidth(): number {
 
 export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
   const sidebarView = useChatStore((s) => s.sidebarView);
-  const bumpBookDataVersion = useChatStore((s) => s.bumpBookDataVersion);
   const [width, setWidth] = useState(defaultSidebarWidth);
   const dragging = useRef(false);
-
-  useEffect(() => {
-    const latest = sse.messages.at(-1);
-    if (!latest || (latest.event !== "resync:complete" && latest.event !== "resync:error")) return;
-    const data = latest.data as { bookId?: unknown } | null;
-    if (data?.bookId !== bookId) return;
-    invalidateBookArtifactContent(bookId);
-    invalidateFoundationFilesCache(bookId);
-    invalidateCharactersCache(bookId);
-    bumpBookDataVersion();
-  }, [bookId, bumpBookDataVersion, sse.messages]);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -354,39 +318,37 @@ export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
     <>
       <button
         onClick={() => setOpen(true)}
-        className="fixed right-3 top-[7rem] z-20 flex h-10 w-10 items-center justify-center rounded-2xl border border-border/50 bg-card/90 text-muted-foreground shadow-lg shadow-primary/10 backdrop-blur transition-colors hover:text-foreground lg:hidden"
+        className="fixed right-3 top-[88px] z-20 flex h-11 w-11 items-center justify-center rounded-xl border border-border/40 bg-card text-muted-foreground shadow-sm transition-colors hover:text-foreground lg:hidden"
         aria-label="打开书籍信息"
       >
-        <PanelRightOpen size={18} />
+        <PanelRightOpen size={17} />
       </button>
 
-      <div
-        className={`fixed inset-0 z-40 lg:hidden transition-opacity duration-150 ${open ? "opacity-100" : "pointer-events-none opacity-0"}`}
-        aria-hidden={!open}
-        onClick={() => setOpen(false)}
-      >
-        <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" />
-        <aside
-          className={`absolute right-0 top-0 h-full w-[min(28rem,calc(100vw-1rem))] overflow-y-auto border-l border-border/20 bg-background shadow-2xl shadow-primary/10 transition-transform duration-150 ${open ? "translate-x-0" : "translate-x-full"}`}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-between border-b border-border/20 px-3 py-2.5 mobile-safe-top">
-            <span className="text-xs font-medium text-muted-foreground">书籍信息</span>
-            <button
-              onClick={() => setOpen(false)}
-              className="flex h-10 w-10 items-center justify-center rounded-xl text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
-              aria-label="关闭书籍信息"
-            >
-              <PanelRightClose size={16} />
-            </button>
-          </div>
-          {sidebarView === "artifact" ? (
-            <ArtifactView bookId={bookId} />
-          ) : (
-            <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
-          )}
-        </aside>
-      </div>
+      {open && (
+        <div className="fixed inset-0 z-40 lg:hidden" onClick={() => setOpen(false)}>
+          <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" />
+          <aside
+            className="absolute right-0 top-0 h-full w-[420px] max-w-[85vw] bg-background border-l border-border/20 overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border/20 px-4 pb-3 pt-[calc(env(safe-area-inset-top)+1rem)]">
+              <span className="text-[15px] leading-6 font-medium text-muted-foreground">书籍信息</span>
+              <button
+                onClick={() => setOpen(false)}
+                className="flex h-11 w-11 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+                aria-label="收起书籍信息"
+              >
+                <PanelRightClose size={17} />
+              </button>
+            </div>
+            {sidebarView === "artifact" ? (
+              <ArtifactView bookId={bookId} />
+            ) : (
+              <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
+            )}
+          </aside>
+        </div>
+      )}
     </>
   );
 }

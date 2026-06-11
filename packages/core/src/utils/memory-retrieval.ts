@@ -6,7 +6,7 @@ import {
   CurrentStateStateSchema,
   HooksStateSchema,
 } from "../models/runtime-state.js";
-import { MemoryDB, type Fact, type StoredHook, type StoredSummary, type VectorHit } from "../state/memory-db.js";
+import { MemoryDB, type Fact, type StoredHook, type StoredSummary } from "../state/memory-db.js";
 import { bootstrapStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
 import {
   filterActiveHooks,
@@ -20,7 +20,6 @@ import {
   renderHookSnapshot,
   renderSummarySnapshot,
 } from "./story-markdown.js";
-import { INKOS_PROMPT_CACHE_POLICY, headroomLightCompress } from "./prompt-optimizer.js";
 export {
   isFuturePlannedHook,
   isHookWithinChapterWindow,
@@ -45,7 +44,6 @@ export interface MemorySelection {
   readonly recyclableHooks: ReadonlyArray<StoredHook>;
   readonly facts: ReadonlyArray<Fact>;
   readonly volumeSummaries: ReadonlyArray<VolumeSummarySelection>;
-  readonly vectorHits?: ReadonlyArray<VectorHit>;
   readonly dbPath?: string;
 }
 
@@ -73,12 +71,14 @@ export async function retrieveMemorySelection(params: {
 
   const [
     currentStateMarkdown,
+    hooksMarkdown,
     volumeSummariesMarkdown,
     structuredCurrentState,
     structuredHooks,
     structuredSummaries,
   ] = await Promise.all([
     readCurrentStateWithFallback(params.bookDir),
+    readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
     readFile(join(storyDir, "volume_summaries.md"), "utf-8").catch(() => ""),
     readStructuredState(join(stateDir, "current_state.json"), CurrentStateStateSchema),
     readStructuredState(join(stateDir, "hooks.json"), HooksStateSchema),
@@ -102,6 +102,11 @@ export async function retrieveMemorySelection(params: {
     parseVolumeSummariesMarkdown(volumeSummariesMarkdown),
     narrativeQueryTerms,
   );
+  // Hooks stay on the authority path instead of the SQLite acceleration path:
+  // the DB table intentionally stores only a small subset and cannot preserve
+  // promoted/core/dependency metadata, which is load-bearing for hook debt.
+  const hooks = structuredHooks?.hooks ?? parsePendingHooksMarkdown(hooksMarkdown);
+  const activeHooks = filterActiveHooks(hooks);
 
   const memoryDb = openMemoryDB(params.bookDir);
   if (memoryDb) {
@@ -114,23 +119,18 @@ export async function retrieveMemorySelection(params: {
           memoryDb.replaceSummaries(summaries);
         }
       }
-      if (memoryDb.getActiveHooks().length === 0) {
-        const hooks = structuredHooks?.hooks ?? parsePendingHooksMarkdown(
-          await readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
-        );
-        if (hooks.length > 0) {
-          memoryDb.replaceHooks(hooks);
-        }
-      }
       if (memoryDb.getCurrentFacts().length === 0 && facts.length > 0) {
         memoryDb.replaceCurrentFacts(facts);
       }
 
-      const activeHooks = memoryDb.getActiveHooks();
-      const vectorHits = memoryDb.searchVectors(
-        [params.goal, params.outlineNode ?? "", ...(params.mustKeep ?? [])].join("\n"),
-        INKOS_PROMPT_CACHE_POLICY.ragTopK,
-      );
+      // Structured/markdown hook state is authoritative because it preserves
+      // metadata the SQLite acceleration table does not. In migration/minimal
+      // projects that projection can be absent or empty while SQLite already
+      // has usable hook rows, so fall back only when the authority path yields
+      // no active hooks at all.
+      const effectiveActiveHooks = activeHooks.length > 0
+        ? activeHooks
+        : filterActiveHooks(memoryDb.getActiveHooks());
 
       return {
         summaries: selectRelevantSummaries(
@@ -138,12 +138,11 @@ export async function retrieveMemorySelection(params: {
           params.chapterNumber,
           narrativeQueryTerms,
         ),
-        hooks: selectRelevantHooks(activeHooks, narrativeQueryTerms, params.chapterNumber),
-        activeHooks,
-        recyclableHooks: computeRecyclableHooks(activeHooks, params.chapterNumber),
+        hooks: selectRelevantHooks(effectiveActiveHooks, narrativeQueryTerms, params.chapterNumber),
+        activeHooks: effectiveActiveHooks,
+        recyclableHooks: computeRecyclableHooks(effectiveActiveHooks, params.chapterNumber),
         facts: selectRelevantFacts(memoryDb.getCurrentFacts(), factQueryTerms),
         volumeSummaries,
-        vectorHits,
         dbPath: join(storyDir, "memory.db"),
       };
     } finally {
@@ -151,13 +150,10 @@ export async function retrieveMemorySelection(params: {
     }
   }
 
-  const [summariesMarkdown, hooksMarkdown] = await Promise.all([
+  const [summariesMarkdown] = await Promise.all([
     readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
-    readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
   ]);
   const summaries = structuredSummaries?.rows ?? parseChapterSummariesMarkdown(summariesMarkdown);
-  const hooks = structuredHooks?.hooks ?? parsePendingHooksMarkdown(hooksMarkdown);
-  const activeHooks = filterActiveHooks(hooks);
 
   return {
     summaries: selectRelevantSummaries(summaries, params.chapterNumber, narrativeQueryTerms),
@@ -380,10 +376,10 @@ function selectRelevantSummaries(
         summary.chapterType,
       ].join(" "), queryTerms),
     }))
-    .filter((entry) => entry.matched || entry.summary.chapter >= chapterNumber - INKOS_PROMPT_CACHE_POLICY.rollingChapterWindow)
+    .filter((entry) => entry.matched || entry.summary.chapter >= chapterNumber - 3)
     .sort((left, right) => right.score - left.score || right.summary.chapter - left.summary.chapter)
-    .slice(0, INKOS_PROMPT_CACHE_POLICY.ragTopK)
-    .map((entry) => compressSummary(entry.summary))
+    .slice(0, 4)
+    .map((entry) => entry.summary)
     .sort((left, right) => left.chapter - right.chapter);
 }
 
@@ -410,7 +406,7 @@ function selectRelevantHooks(
       entry.matched || isHookWithinChapterWindow(entry.hook, chapterNumber, 5),
     )
     .sort((left, right) => right.score - left.score || right.hook.lastAdvancedChapter - left.hook.lastAdvancedChapter)
-    .slice(0, INKOS_PROMPT_CACHE_POLICY.ragTopK);
+    .slice(0, 6);
 
   const selectedIds = new Set(primary.map((entry: { hook: StoredHook; score: number; matched: boolean }) => entry.hook.hookId));
   const stale = ranked
@@ -422,7 +418,7 @@ function selectRelevantHooks(
     .sort((left, right) => left.hook.lastAdvancedChapter - right.hook.lastAdvancedChapter || right.score - left.score)
     .slice(0, 2);
 
-  return [...primary, ...stale].map((entry: { hook: StoredHook; score: number; matched: boolean }) => compressHook(entry.hook));
+  return [...primary, ...stale].map((entry: { hook: StoredHook; score: number; matched: boolean }) => entry.hook);
 }
 
 function selectRelevantFacts(
@@ -456,8 +452,8 @@ function selectRelevantFacts(
     })
     .filter((entry) => entry.matched || entry.score >= 14)
     .sort((left, right) => right.score - left.score)
-    .slice(0, INKOS_PROMPT_CACHE_POLICY.ragTopK)
-    .map((entry) => compressFact(entry.fact));
+    .slice(0, 4)
+    .map((entry) => entry.fact);
 }
 
 function selectRelevantVolumeSummaries(
@@ -483,39 +479,11 @@ function selectRelevantVolumeSummaries(
     })
     .filter((entry, index, all) => entry.matched || index === all.length - 1)
     .sort((left, right) => right.score - left.score)
-    .slice(0, INKOS_PROMPT_CACHE_POLICY.ragTopK)
+    .slice(0, 2)
     .sort((left, right) => left.index - right.index)
-    .map((entry) => ({
-      ...entry.summary,
-      content: headroomLightCompress(entry.summary.content, "narrative"),
-    }));
+    .map((entry) => entry.summary);
 
   return ranked;
-}
-
-function compressSummary(summary: StoredSummary): StoredSummary {
-  return {
-    ...summary,
-    characters: headroomLightCompress(summary.characters, "setting"),
-    events: headroomLightCompress(summary.events, "narrative"),
-    stateChanges: headroomLightCompress(summary.stateChanges, "narrative"),
-    hookActivity: headroomLightCompress(summary.hookActivity, "narrative"),
-  };
-}
-
-function compressHook(hook: StoredHook): StoredHook {
-  return {
-    ...hook,
-    expectedPayoff: headroomLightCompress(hook.expectedPayoff, "narrative"),
-    notes: headroomLightCompress(hook.notes, "narrative"),
-  };
-}
-
-function compressFact(fact: Fact): Fact {
-  return {
-    ...fact,
-    object: headroomLightCompress(fact.object, "setting"),
-  };
 }
 
 function scoreSummary(summary: StoredSummary, chapterNumber: number, queryTerms: ReadonlyArray<string>): number {
