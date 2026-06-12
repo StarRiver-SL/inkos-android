@@ -1,9 +1,5 @@
 import { useEffect, useState } from "react";
-import { Streamdown } from "streamdown";
-import { cjk } from "@streamdown/cjk";
-import { code } from "@streamdown/code";
-import { math } from "@streamdown/math";
-import { mermaid } from "@streamdown/mermaid";
+import { MarkdownView } from "@/components/ai-elements/markdown-view";
 import { useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
@@ -13,8 +9,6 @@ import {
   frontmatterToCards,
   type TruthFrontmatter,
 } from "../../lib/truth-display";
-
-const streamdownPlugins = { cjk, code, math, mermaid };
 
 const SIDEBAR_MD_CLASS =
   "text-[15px] text-muted-foreground leading-7 " +
@@ -104,23 +98,23 @@ export function SummarySection({ bookId }: SummarySectionProps) {
       <>
         {legacy.world && (
           <SidebarCard title="世界观">
-            <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+            <MarkdownView className={SIDEBAR_MD_CLASS} preset="full">
               {legacy.world}
-            </Streamdown>
+            </MarkdownView>
           </SidebarCard>
         )}
         {(legacy.protagonist || legacy.cast) && (
           <SidebarCard title="角色">
             {legacy.protagonist && (
-              <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+              <MarkdownView className={SIDEBAR_MD_CLASS} preset="full">
                 {legacy.protagonist}
-              </Streamdown>
+              </MarkdownView>
             )}
             {legacy.cast && (
               <div className={legacy.protagonist ? "mt-2" : undefined}>
-                <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+                <MarkdownView className={SIDEBAR_MD_CLASS} preset="full">
                   {legacy.cast}
-                </Streamdown>
+                </MarkdownView>
               </div>
             )}
           </SidebarCard>
@@ -150,9 +144,9 @@ export function SummarySection({ bookId }: SummarySectionProps) {
       )}
       {worldOverview && (
         <SidebarCard title="世界观">
-          <Streamdown className={SIDEBAR_MD_CLASS} plugins={streamdownPlugins}>
+          <MarkdownView className={SIDEBAR_MD_CLASS} preset="full">
             {worldOverview}
-          </Streamdown>
+          </MarkdownView>
           {openFull}
         </SidebarCard>
       )}

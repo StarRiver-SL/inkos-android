@@ -178,3 +178,15 @@ export function isChatScrollNearBottom(input: {
   const distanceFromBottom = input.scrollHeight - input.scrollTop - input.clientHeight;
   return distanceFromBottom <= threshold;
 }
+
+export function shouldSyncExternalChatInput(input: {
+  readonly domValue: string;
+  readonly storeValue: string;
+  readonly sessionChanged: boolean;
+  readonly focused: boolean;
+  readonly composing: boolean;
+}): boolean {
+  if (input.domValue === input.storeValue) return false;
+  if (input.sessionChanged) return true;
+  return !input.focused && !input.composing;
+}

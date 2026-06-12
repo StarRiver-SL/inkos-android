@@ -1,6 +1,7 @@
 import type { AuditIssue, AuditResult } from "../agents/continuity.js";
 import type { ReviseMode, ReviseOutput } from "../agents/reviser.js";
 import type { WriteChapterOutput } from "../agents/writer.js";
+import type { TruthContextCache } from "../agents/truth-context-cache.js";
 import type { ChapterIntent, ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { countChapterLength, isOutsideHardRange } from "../utils/length-metrics.js";
@@ -65,6 +66,7 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         lengthSpec?: LengthSpec;
+        contextCache?: TruthContextCache;
       },
     ) => Promise<ReviseOutput>;
   };
@@ -80,6 +82,7 @@ export async function runChapterReviewCycle(params: {
         chapterMemo?: ChapterMemo;
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
+        contextCache?: TruthContextCache;
       },
     ) => Promise<AuditResult>;
   };
@@ -105,6 +108,7 @@ export async function runChapterReviewCycle(params: {
   readonly maxReviewIterations?: number;
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
+  readonly contextCache?: TruthContextCache;
 }): Promise<ChapterReviewCycleResult> {
   let totalUsage = params.initialUsage;
   let normalizeApplied = false;
@@ -156,8 +160,8 @@ export async function runChapterReviewCycle(params: {
       params.chapterNumber,
       params.book.genre,
       params.reducedControlInput
-        ? { ...params.reducedControlInput, ...(options ?? {}) }
-        : options,
+        ? { ...params.reducedControlInput, ...(options ?? {}), contextCache: params.contextCache }
+        : { ...(options ?? {}), contextCache: params.contextCache },
     );
     totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
     const aiTellsResult = params.analyzeAITells(content);
@@ -250,7 +254,7 @@ export async function runChapterReviewCycle(params: {
         currentAudit.auditResult.issues,
         "auto",
         params.book.genre,
-        { ...params.reducedControlInput, lengthSpec: params.lengthSpec },
+        { ...params.reducedControlInput, lengthSpec: params.lengthSpec, contextCache: params.contextCache },
       );
       totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);
 

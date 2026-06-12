@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriterAgent } from "../agents/writer.js";
@@ -35,6 +35,71 @@ function createCaptureLogger() {
 describe("WriterAgent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("does not overwrite runtime truth files with settlement placeholders", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-save-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    const stableState = "# Current State\n\n- Lin Yue keeps the sealed letter.\n";
+    const stableHooks = "# Pending Hooks\n\n| hook_id | status |\n| --- | --- |\n| letter | open |\n";
+    const stableLedger = "# Ledger\n\n- stable resource count\n";
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), stableState, "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), stableHooks, "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), stableLedger, "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    try {
+      await agent.saveChapter(bookDir, {
+        chapterNumber: 1,
+        title: "Placeholder Settlement",
+        content: "Chapter body survives.",
+        wordCount: 3,
+        preWriteCheck: "",
+        postSettlement: "",
+        updatedState: "(状态卡未更新)",
+        updatedLedger: "(账本未更新)",
+        updatedHooks: "(伏笔池未更新)",
+        chapterSummary: "",
+        updatedSubplots: "",
+        updatedEmotionalArcs: "",
+        updatedCharacterMatrix: "",
+        postWriteErrors: [],
+        postWriteWarnings: [],
+        tokenUsage: ZERO_USAGE,
+      });
+
+      await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe(stableState);
+      await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe(stableHooks);
+      await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8")).resolves.toBe(stableLedger);
+
+      const chapterFile = (await readdir(join(bookDir, "chapters"))).find((file) => file.startsWith("0001_"));
+      expect(chapterFile).toBeTruthy();
+      const chapter = await readFile(join(bookDir, "chapters", chapterFile!), "utf-8");
+      expect(chapter).toContain("Chapter body survives.");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("renders per-chapter user context in governed creative prompts", () => {

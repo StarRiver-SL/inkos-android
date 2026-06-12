@@ -5,8 +5,7 @@ import type { SSEMessage } from "../../hooks/use-sse";
 import { useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
 import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X } from "lucide-react";
-import { Streamdown } from "streamdown";
-import { cjk } from "@streamdown/cjk";
+import { MarkdownView } from "../ai-elements/markdown-view";
 import { ProgressSection } from "../sidebar/ProgressSection";
 import { FoundationSection } from "../sidebar/FoundationSection";
 import { SummarySection } from "../sidebar/SummarySection";
@@ -31,8 +30,6 @@ export interface BookSidebarProps {
   readonly t: TFunction;
   readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
 }
-
-const streamdownPlugins = { cjk };
 
 // Friendly header label for an opened truth file: character files show the
 // character's name, foundation files their friendly label, everything else its
@@ -61,7 +58,7 @@ function renderTruthBody(
         还没有运行状态。开始写作后，每写完一章这里会自动记录最新的故事进展。
       </p>
     ) : (
-      <Streamdown plugins={streamdownPlugins} mode="static">{stateBody}</Streamdown>
+      <MarkdownView mode="static" preset="cjk">{stateBody}</MarkdownView>
     );
   }
   if (file === "emotional_arcs.md" && !hasTableRows(content)) {
@@ -74,9 +71,9 @@ function renderTruthBody(
   return (
     <>
       <FrontmatterCards cards={frontmatterToCards(frontmatter)} />
-      <Streamdown plugins={streamdownPlugins} mode="static">
+      <MarkdownView mode="static" preset="cjk">
         {relabelOkrJargon(stripStructuralMarkers(body ?? content))}
-      </Streamdown>
+      </MarkdownView>
     </>
   );
 }

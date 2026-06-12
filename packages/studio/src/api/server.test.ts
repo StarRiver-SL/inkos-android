@@ -1200,6 +1200,37 @@ describe("createStudioServer daemon lifecycle", () => {
     ]);
   });
 
+  it("normalizes encoded custom service ids from array-based config", async () => {
+    await writeFile(join(root, "inkos.json"), JSON.stringify({
+      ...projectConfig,
+      llm: {
+        services: [
+          {
+            service: "custom%253ALocal",
+            baseUrl: "http://127.0.0.1:8001/v1",
+            apiFormat: "chat",
+            stream: false,
+          },
+        ],
+      },
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const response = await app.request("http://localhost/api/v1/services/config");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      services: [{
+        service: "custom",
+        name: "Local",
+        baseUrl: "http://127.0.0.1:8001/v1",
+        apiFormat: "chat",
+        stream: false,
+      }],
+    });
+  });
+
   it("rejects cleartext external service URLs but allows loopback HTTP", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -3171,6 +3202,75 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(pipelineConfigs.at(-1)).toEqual(expect.objectContaining({
       writingReviewRetries: 3,
     }));
+  });
+
+  it("passes quick write mode from Studio write-next into the pipeline", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "quick", wordCount: 1200 }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", {
+      mode: "quick",
+      wordCount: 1200,
+    });
+  });
+
+  it("normalizes encoded custom service ids in agent model overrides before writing", async () => {
+    await writeFile(
+      join(root, "inkos.json"),
+      JSON.stringify({
+        ...cloneProjectConfig(),
+        llm: {
+          ...cloneProjectConfig().llm,
+          services: [
+            {
+              service: "custom",
+              name: "Novel API",
+              baseUrl: "https://novel.example.com/v1",
+              apiFormat: "responses",
+              stream: false,
+            },
+          ],
+        },
+        modelOverrides: {
+          writer: { service: "custom%3ANovel%20API", model: "novel-pro" },
+        },
+      }, null, 2),
+      "utf-8",
+    );
+    loadSecretsMock.mockResolvedValue({
+      services: { "custom:Novel API": { apiKey: "sk-novel" } },
+      cover: {},
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(200);
+    expect(pipelineConfigs.at(-1)).toMatchObject({
+      modelOverrides: {
+        writer: expect.objectContaining({
+          service: "custom",
+          model: "novel-pro",
+          baseUrl: "https://novel.example.com/v1",
+          apiKey: "sk-novel",
+          apiFormat: "responses",
+          stream: false,
+        }),
+      },
+    });
   });
 
   it("handles explicit chat chapter edits outside the InkOS writing agent", async () => {

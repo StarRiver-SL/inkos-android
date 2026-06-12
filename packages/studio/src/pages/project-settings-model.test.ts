@@ -80,4 +80,18 @@ describe("project settings form model", () => {
       model: "model/name:latest",
     });
   });
+
+  it("normalizes double-encoded custom service ids before saving model routes", () => {
+    const doubleEncoded = `${encodeURIComponent(encodeURIComponent("custom:中文服务"))}::${encodeURIComponent("novel-pro")}`;
+
+    expect(parseModelRouteValue(doubleEncoded)).toEqual({
+      service: "custom:中文服务",
+      model: "novel-pro",
+    });
+    expect(buildAgentModelOverrides([
+      { agent: "writer", service: "custom%3A中文服务", model: "novel-pro" },
+    ])).toEqual({
+      writer: { service: "custom:中文服务", model: "novel-pro" },
+    });
+  });
 });

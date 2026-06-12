@@ -88,6 +88,15 @@ import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import { registerRuntimeRoutes } from "./runtime-routes.js";
+import {
+  LEGACY_SHIM_FILES,
+  RUNTIME_DIAGNOSTIC_FILE_RE,
+  RUNTIME_STATE_FILE_RE,
+  listBookTruthFiles,
+  listTruthFileHistory,
+  readTruthFileHistory,
+  resolveTruthFilePath,
+} from "./truth-files.js";
 
 // -- Pipeline stage definitions per agent type --
 
@@ -1045,8 +1054,27 @@ async function loadStudioBookListSummary(
   return { ...book, chaptersWritten: nextChapter - 1 };
 }
 
+function decodeRepeatedly(value: string): string {
+  let current = value.trim();
+  for (let i = 0; i < 3; i++) {
+    try {
+      const decoded = decodeURIComponent(current);
+      if (decoded === current) break;
+      current = decoded.trim();
+    } catch {
+      break;
+    }
+  }
+  return current;
+}
+
+function normalizeServiceId(serviceId: string): string {
+  return decodeRepeatedly(serviceId);
+}
+
 function isCustomServiceId(serviceId: string): boolean {
-  return serviceId === "custom" || serviceId.startsWith("custom:");
+  const normalized = normalizeServiceId(serviceId);
+  return normalized === "custom" || normalized.startsWith("custom:");
 }
 
 function serviceConfigKey(entry: ServiceConfigEntry): string {
@@ -1054,10 +1082,11 @@ function serviceConfigKey(entry: ServiceConfigEntry): string {
 }
 
 function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>): ServiceConfigEntry {
-  if (serviceId.startsWith("custom:")) {
+  const normalizedServiceId = normalizeServiceId(serviceId);
+  if (normalizedServiceId.startsWith("custom:")) {
     return {
       service: "custom",
-      name: decodeURIComponent(serviceId.slice("custom:".length)),
+      name: normalizedServiceId.slice("custom:".length),
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
@@ -1065,7 +1094,7 @@ function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>
     };
   }
 
-  if (serviceId === "custom") {
+  if (normalizedServiceId === "custom") {
     return {
       service: "custom",
       ...(typeof value.name === "string" && value.name.length > 0 ? { name: value.name } : {}),
@@ -1077,7 +1106,9 @@ function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>
   }
 
   return {
-    service: serviceId,
+    service: normalizedServiceId,
+    ...(typeof value.name === "string" && value.name.length > 0 ? { name: value.name } : {}),
+    ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
     ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
     ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
     ...(typeof value.stream === "boolean" ? { stream: value.stream } : {}),
@@ -1092,14 +1123,10 @@ function normalizeServiceConfig(raw: unknown): ServiceConfigEntry[] {
   if (Array.isArray(raw)) {
     return raw
       .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
-      .map((entry) => ({
-        service: typeof entry.service === "string" && entry.service.length > 0 ? entry.service : "custom",
-        ...(typeof entry.name === "string" && entry.name.length > 0 ? { name: entry.name } : {}),
-        ...(typeof entry.baseUrl === "string" && entry.baseUrl.length > 0 ? { baseUrl: entry.baseUrl } : {}),
-        ...(typeof entry.temperature === "number" ? { temperature: entry.temperature } : {}),
-        ...(entry.apiFormat === "chat" || entry.apiFormat === "responses" ? { apiFormat: entry.apiFormat } : {}),
-        ...(typeof entry.stream === "boolean" ? { stream: entry.stream } : {}),
-      }));
+      .map((entry) => normalizeServiceEntry(
+        typeof entry.service === "string" && entry.service.length > 0 ? entry.service : "custom",
+        entry,
+      ));
   }
 
   if (raw && typeof raw === "object") {
@@ -1839,7 +1866,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         continue;
       }
 
-      const serviceId = override.service;
+      const serviceId = normalizeServiceId(override.service);
       const baseService = isCustomServiceId(serviceId) ? "custom" : serviceId;
       const entry = await resolveConfiguredServiceEntry(root, serviceId);
       const baseUrl = await resolveConfiguredServiceBaseUrl(root, serviceId, override.baseUrl);
@@ -1855,6 +1882,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     return resolved;
+  }
+
+  function normalizeModelOverrides(overrides: Record<string, unknown>): Record<string, unknown> {
+    const normalized: Record<string, unknown> = {};
+    for (const [agent, override] of Object.entries(overrides)) {
+      if (!override || typeof override !== "object" || Array.isArray(override)) {
+        normalized[agent] = override;
+        continue;
+      }
+      const entry = { ...(override as Record<string, unknown>) };
+      if (typeof entry.service === "string") {
+        entry.service = normalizeServiceId(entry.service);
+      }
+      normalized[agent] = entry;
+    }
+    return normalized;
   }
 
   function emitRuntimeLog(entry: Pick<LogEntry, "level" | "tag" | "message"> & { readonly sessionId?: string }): void {
@@ -2149,151 +2192,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   // --- Truth files ---
 
-  // Flat-file whitelist — the pre-Phase-5 story root files plus dev's legacy
-  // editor targets (author_intent / current_focus / volume_outline).
-  //
-  // Phase 5 cleanup #3 moved the authoritative YAML frontmatter + outline prose
-  // into story/outline/ and character sheets into story/roles/. `story_bible.md`
-  // and `book_rules.md` now exist only as compat pointer shims — we still allow
-  // reading them so legacy books keep rendering, but the server-side writer
-  // (write_truth_file) no longer accepts them as edit targets.
-  const TRUTH_FLAT_FILES = [
-    "author_intent.md", "current_focus.md",
-    "story_bible.md", "book_rules.md", "volume_outline.md", "current_state.md",
-    "particle_ledger.md", "pending_hooks.md", "chapter_summaries.md",
-    "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
-    "style_guide.md", "parent_canon.md", "fanfic_canon.md",
-  ];
-
-  // Authoritative Phase 5 paths — prose outline + role sheets live under
-  // dedicated subdirectories of story/. The full path (relative to story/) is
-  // matched literally here. `节奏原则.md` / `rhythm_principles.md` is optional
-  // after Phase 5 consolidation (rhythm lives in volume_map's closing paragraph);
-  // the entries stay whitelisted for legacy books and manual overrides.
-  const TRUTH_OUTLINE_FILES = [
-    "outline/story_frame.md",
-    "outline/volume_map.md",
-    "outline/节奏原则.md",
-    "outline/rhythm_principles.md",
-  ];
-
-  // Pointer shims that the runtime no longer treats as authoritative. The
-  // GET handler tags them with `legacy: true` so the UI can surface that the
-  // edits won't land where the user expects.
-  const LEGACY_SHIM_FILES = new Set(["story_bible.md", "book_rules.md"]);
-  const RUNTIME_DIAGNOSTIC_FILE_RE = /^runtime\/chapter-\d{4}\.(?:intent\.md|plan\.md|context\.json|rule-stack\.yaml|trace\.json)$/;
-  const RUNTIME_STATE_FILE_RE = /^state\/(?:manifest|current_state|hooks|chapter_summaries)\.json$/;
-
-  /**
-   * Validate a requested truth-file path:
-   *   1. Must be one of the declared flat files, an outline/* allow-listed
-   *      entry, a runtime chapter trace file, a structured runtime state file,
-   *      or a roles/**\/*.md file under 主要角色/ | 次要角色/.
-   *   2. Must resolve to a path inside bookDir/story/ (no `..`, no absolute
-   *      paths, no traversal via the tier-name segment).
-   */
-  function resolveTruthFilePath(bookDir: string, file: string): string | null {
-    // Reject absolute paths, traversal, null bytes outright.
-    if (!file || file.includes("\0") || isAbsolute(file) || file.includes("..")) {
-      return null;
-    }
-
-    // Phase hotfix 3: accept both Chinese and English locale role dirs so
-    // English-layout books (roles/major, roles/minor) are reachable through
-    // Studio. The runtime reader (utils/outline-paths.ts:75) already scans
-    // both — Studio used to drop English books to read-only.
-    const allowed =
-      TRUTH_FLAT_FILES.includes(file)
-      || TRUTH_OUTLINE_FILES.includes(file)
-      || RUNTIME_DIAGNOSTIC_FILE_RE.test(file)
-      || RUNTIME_STATE_FILE_RE.test(file)
-      || /^roles\/(主要角色|次要角色|major|minor)\/[^/]+\.md$/.test(file);
-
-    if (!allowed) return null;
-
-    const storyDir = resolve(bookDir, "story");
-    const resolved = resolve(storyDir, file);
-    const relativePath = relative(storyDir, resolved);
-    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
-      return null;
-    }
-    return resolved;
-  }
-
-  function resolveSnapshotTruthFilePath(bookDir: string, chapter: number, file: string): string | null {
-    if (!Number.isInteger(chapter) || chapter < 0) return null;
-    if (!resolveTruthFilePath(bookDir, file)) return null;
-
-    const snapshotDir = resolve(bookDir, "story", "snapshots", String(chapter));
-    const resolved = resolve(snapshotDir, file);
-    const relativePath = relative(snapshotDir, resolved);
-    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
-      return null;
-    }
-    return resolved;
-  }
-
-  async function listTruthFileHistory(bookDir: string, file: string): Promise<ReadonlyArray<{ chapter: number; size: number; preview: string }>> {
-    if (!resolveTruthFilePath(bookDir, file)) return [];
-    const snapshotsDir = join(bookDir, "story", "snapshots");
-    try {
-      const entries = await readdir(snapshotsDir, { withFileTypes: true });
-      const versions = await Promise.all(entries
-        .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-        .map(async (entry) => {
-          const chapter = Number(entry.name);
-          const snapshotPath = resolveSnapshotTruthFilePath(bookDir, chapter, file);
-          if (!snapshotPath) return null;
-          try {
-            const content = await readFile(snapshotPath, "utf-8");
-            return {
-              chapter,
-              size: content.length,
-              preview: content.slice(0, 200),
-            };
-          } catch {
-            return null;
-          }
-        }));
-      return versions
-        .filter((version): version is { chapter: number; size: number; preview: string } => version !== null)
-        .sort((a, b) => b.chapter - a.chapter);
-    } catch {
-      return [];
-    }
-  }
-
-  async function readTruthFileHistory(bookDir: string, file: string, chapter: number): Promise<{
-    readonly file: string;
-    readonly chapter: number;
-    readonly content: string | null;
-    readonly frontmatter?: unknown;
-    readonly body?: string;
-  }> {
-    const snapshotPath = resolveSnapshotTruthFilePath(bookDir, chapter, file);
-    if (!snapshotPath) {
-      return { file, chapter, content: null };
-    }
-    try {
-      const content = await readFile(snapshotPath, "utf-8");
-      const { tryParseBookRulesFrontmatter } = await import("@actalk/inkos-core");
-      const parsed = tryParseBookRulesFrontmatter(content);
-      const structured = parsed ? { frontmatter: parsed.rules, body: parsed.body } : {};
-      return { file, chapter, content, ...structured };
-    } catch {
-      return { file, chapter, content: null };
-    }
-  }
-
-  async function fileExists(path: string): Promise<boolean> {
-    try {
-      await access(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   // Use `:file{.+}` wildcard so nested paths (outline/..., roles/.../...) match.
   app.get("/api/v1/books/:id/truth/:file{.+}", async (c) => {
     const file = c.req.param("file");
@@ -2381,13 +2279,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const body: { wordCount?: number; mode?: string } = await c.req.json<{ wordCount?: number; mode?: string }>()
+      .catch(() => ({ wordCount: undefined }));
+    const mode = body.mode === "quick" ? "quick" : "full";
 
     broadcast("write:start", { bookId: id });
 
     // Fire and forget — progress/completion/errors pushed via SSE
     const pipeline = new PipelineRunner(await buildPipelineConfig());
-    pipeline.writeNextChapter(id, body.wordCount).then(
+    pipeline.writeNextChapter(id, { wordCount: body.wordCount, mode }).then(
       (result) => {
         broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
       },
@@ -3164,72 +3064,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.get("/api/v1/books/:id/truth", async (c) => {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
-    const storyDir = join(bookDir, "story");
-
-    async function listDir(subdir: string): Promise<string[]> {
-      try {
-        const entries = await readdir(join(storyDir, subdir));
-        return entries.filter((f) => f.endsWith(".md") || f.endsWith(".json") || f.endsWith(".yaml"));
-      } catch {
-        return [];
-      }
-    }
-
-    // Hotfix: only tag shim files as legacy when the book has the new layout.
-    const { isNewLayoutBook } = await import("@actalk/inkos-core");
-    const newLayout = await isNewLayoutBook(bookDir);
-
-    async function describe(relPath: string): Promise<{ readonly name: string; readonly size: number; readonly preview: string; readonly legacy?: true; readonly readonly?: true; readonly readonlyReason?: string } | null> {
-      try {
-        const content = await readFile(join(storyDir, relPath), "utf-8");
-        const isShim = LEGACY_SHIM_FILES.has(relPath) && newLayout;
-        const isRuntimeDiagnostic = RUNTIME_DIAGNOSTIC_FILE_RE.test(relPath);
-        const isRuntimeState = RUNTIME_STATE_FILE_RE.test(relPath);
-        const entry: { readonly name: string; readonly size: number; readonly preview: string; readonly legacy?: true; readonly readonly?: true; readonly readonlyReason?: string } =
-          isShim
-            ? { name: relPath, size: content.length, preview: content.slice(0, 200), legacy: true }
-            : isRuntimeDiagnostic
-              ? { name: relPath, size: content.length, preview: content.slice(0, 200), readonly: true, readonlyReason: "runtime-diagnostic" }
-              : isRuntimeState
-                ? { name: relPath, size: content.length, preview: content.slice(0, 200), readonly: true, readonlyReason: "runtime-state" }
-                : { name: relPath, size: content.length, preview: content.slice(0, 200) };
-        return entry;
-      } catch {
-        return null;
-      }
-    }
 
     try {
-      // Flat story/ files (legacy + runtime logs)
-      const flatFiles = (await listDir(".")).filter((f) => !f.startsWith("outline") && !f.startsWith("roles"));
-      // Phase 5 outline/ files
-      const outlineFiles = (await listDir("outline")).map((f) => `outline/${f}`);
-      // Phase 5 roles/主要角色 + roles/次要角色, plus Phase hotfix 3
-      // English-locale equivalents so en-language books are visible.
-      const majorRolesZh = (await listDir("roles/主要角色")).map((f) => `roles/主要角色/${f}`);
-      const minorRolesZh = (await listDir("roles/次要角色")).map((f) => `roles/次要角色/${f}`);
-      const majorRolesEn = (await listDir("roles/major")).map((f) => `roles/major/${f}`);
-      const minorRolesEn = (await listDir("roles/minor")).map((f) => `roles/minor/${f}`);
-      const runtimeFiles = (await listDir("runtime"))
-        .map((f) => `runtime/${f}`)
-        .filter((f) => RUNTIME_DIAGNOSTIC_FILE_RE.test(f));
-      const stateFiles = (await listDir("state"))
-        .map((f) => `state/${f}`)
-        .filter((f) => RUNTIME_STATE_FILE_RE.test(f));
-
-      const all = [
-        ...flatFiles,
-        ...outlineFiles,
-        ...majorRolesZh,
-        ...minorRolesZh,
-        ...majorRolesEn,
-        ...minorRolesEn,
-        ...stateFiles,
-        ...runtimeFiles,
-      ];
-      const described = await Promise.all(all.map(describe));
-      const result = described.filter((x): x is NonNullable<typeof x> => x !== null);
-      return c.json({ files: result });
+      return c.json({ files: await listBookTruthFiles(bookDir) });
     } catch {
       return c.json({ files: [] });
     }
@@ -4672,14 +4509,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.get("/api/v1/project/model-overrides", async (c) => {
     const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
-    return c.json({ overrides: raw.modelOverrides ?? {} });
+    return c.json({ overrides: normalizeModelOverrides(raw.modelOverrides ?? {}) });
   });
 
   app.put("/api/v1/project/model-overrides", async (c) => {
     const { overrides } = await c.req.json<{ overrides: Record<string, unknown> }>();
     const configPath = join(root, "inkos.json");
     const raw = JSON.parse(await readFile(configPath, "utf-8"));
-    raw.modelOverrides = overrides;
+    raw.modelOverrides = normalizeModelOverrides(overrides);
     const { writeFile: writeFileFs } = await import("node:fs/promises");
     await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
     return c.json({ ok: true });

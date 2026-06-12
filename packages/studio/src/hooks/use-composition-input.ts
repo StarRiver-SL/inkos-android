@@ -49,6 +49,10 @@ export interface UseCompositionInputReturn {
   isComposing: boolean;
   /** 手动设置值 */
   setValue: (value: string) => void;
+  /** 只同步显示态，不向父级提交；用于 IME 组合期间的 DOM 镜像 */
+  setDisplayValue: (value: string) => void;
+  /** 提交 DOM 中已经落定的最终值 */
+  commitValue: (value: string) => void;
 }
 
 /**
@@ -152,6 +156,10 @@ export function useCompositionInput(options: UseCompositionInputOptions): UseCom
     [commitValue]
   );
 
+  const setDisplayValue = useCallback((newValue: string) => {
+    setInternalValue(newValue);
+  }, []);
+
   return {
     value: internalValue,
     handleChange,
@@ -160,5 +168,7 @@ export function useCompositionInput(options: UseCompositionInputOptions): UseCom
     handleCompositionEnd,
     isComposing,
     setValue,
+    setDisplayValue,
+    commitValue,
   };
 }

@@ -99,6 +99,25 @@ function booleanField(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function decodeRepeatedly(value: string): string {
+  let current = value.trim();
+  for (let i = 0; i < 3; i++) {
+    try {
+      const decoded = decodeURIComponent(current);
+      if (decoded === current) break;
+      current = decoded.trim();
+    } catch {
+      break;
+    }
+  }
+  return current;
+}
+
+export function normalizeModelRouteService(service: string | undefined): string | undefined {
+  const normalized = service ? decodeRepeatedly(service) : "";
+  return normalized || undefined;
+}
+
 export function notifyDraftFromChannel(value: unknown): NotifyChannelDraft {
   const raw = asRecord(value);
   const type = raw.type === "telegram" || raw.type === "wechat-work" || raw.type === "feishu" || raw.type === "webhook"
@@ -170,7 +189,7 @@ export function fixedAgentOverrideRows(overrides: Record<string, unknown> | unde
     return {
       agent,
       model: stringField(model) ?? "",
-      service: stringField(service),
+      service: normalizeModelRouteService(stringField(service)),
       ...(Object.keys(rest).length > 0 ? { rest } : {}),
     };
   });
@@ -183,7 +202,7 @@ export function buildAgentModelOverrides(rows: ReadonlyArray<OverrideRow>): Reco
     const agent = row.agent.trim();
     const model = row.model.trim();
     if (!allowed.has(agent) || !model) continue;
-    const service = row.service?.trim();
+    const service = normalizeModelRouteService(row.service);
     overrides[agent] = service || (row.rest && Object.keys(row.rest).length > 0)
       ? { ...(row.rest ?? {}), ...(service ? { service } : {}), model }
       : model;
@@ -199,8 +218,8 @@ export function parseModelRouteValue(value: string): { service: string; model: s
   const separator = value.indexOf("::");
   if (separator < 0) return null;
   try {
-    const service = decodeURIComponent(value.slice(0, separator)).trim();
-    const model = decodeURIComponent(value.slice(separator + 2)).trim();
+    const service = decodeRepeatedly(value.slice(0, separator));
+    const model = decodeRepeatedly(value.slice(separator + 2));
     return service && model ? { service, model } : null;
   } catch {
     return null;

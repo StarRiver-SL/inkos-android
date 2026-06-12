@@ -10,6 +10,7 @@ import {
   setBookCreateSessionId,
   setProjectChatSessionId,
   isChatScrollNearBottom,
+  shouldSyncExternalChatInput,
   shouldShowPlayChoicePanel,
 } from "./chat-page-state";
 
@@ -273,5 +274,34 @@ describe("isChatScrollNearBottom", () => {
 
   it("does not treat a user reading older messages as pinned to the bottom", () => {
     expect(isChatScrollNearBottom({ scrollTop: 500, clientHeight: 300, scrollHeight: 1200 })).toBe(false);
+  });
+});
+
+describe("shouldSyncExternalChatInput", () => {
+  it("does not overwrite active IME input within the same session", () => {
+    expect(shouldSyncExternalChatInput({
+      domValue: "正在输入",
+      storeValue: "旧草稿",
+      sessionChanged: false,
+      focused: true,
+      composing: false,
+    })).toBe(false);
+    expect(shouldSyncExternalChatInput({
+      domValue: "正在组词",
+      storeValue: "旧草稿",
+      sessionChanged: false,
+      focused: false,
+      composing: true,
+    })).toBe(false);
+  });
+
+  it("loads the new session draft even while the textarea remains focused", () => {
+    expect(shouldSyncExternalChatInput({
+      domValue: "会话 A 草稿",
+      storeValue: "会话 B 草稿",
+      sessionChanged: true,
+      focused: true,
+      composing: true,
+    })).toBe(true);
   });
 });

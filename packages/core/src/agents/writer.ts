@@ -51,6 +51,13 @@ import {
 } from "../utils/narrative-control.js";
 import { readFile, writeFile, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { readWriterSettleContext, readWriterTruthContext } from "./writer-context.js";
+import { estimateTextTokens } from "../llm/provider.js";
+import {
+  applyTruthContextBudget,
+  contextTokenBudgetFromWindow,
+  TruthContextCache,
+} from "./truth-context-cache.js";
 
 const LEGACY_WRITER_CONTEXT_BUDGET = {
   storyBible: 8_000,
@@ -64,13 +71,28 @@ const LEGACY_WRITER_CONTEXT_BUDGET = {
   parentCanon: 8_000,
   volumeOutline: 8_000,
 } as const;
-import {
-  readStoryFrame,
-  readVolumeMap,
-  readCharacterContext,
-  readCurrentStateWithFallback,
-} from "../utils/outline-paths.js";
 
+const MISSING_STATE_TEXT = new Set([
+  "(状态卡未更新)",
+  "(state card not updated)",
+  "(state not updated)",
+]);
+
+const MISSING_HOOKS_TEXT = new Set([
+  "(伏笔池未更新)",
+  "(hooks not updated)",
+  "(plot threads not updated)",
+]);
+
+const MISSING_LEDGER_TEXT = new Set([
+  "(账本未更新)",
+  "(ledger not updated)",
+]);
+
+function isPersistableTruthText(value: string | undefined, missingMarkers: ReadonlySet<string>): value is string {
+  const normalized = value?.trim();
+  return Boolean(normalized && !missingMarkers.has(normalized.toLowerCase()));
+}
 export interface WriteChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
@@ -153,30 +175,95 @@ export class WriterAgent extends BaseAgent {
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
     const { book, bookDir, chapterNumber } = input;
 
-    const placeholder = "(文件尚未创建)";
-    const [
-      storyBibleRaw, volumeOutline, styleGuide, currentState, ledger, hooks,
-      chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, styleProfileRaw,
-      parentCanon, fanficCanonRaw,
-    ] = await Promise.all([
-        readStoryFrame(bookDir, placeholder),
-        readVolumeMap(bookDir, placeholder),
-        this.readFileOrDefault(join(bookDir, "story/style_guide.md")),
-        // Phase 5 consolidation: architect no longer emits an initial current_state
-        // section. When the file is only a seed placeholder, derive initial state
-        // from roles/*.Current_State + pending_hooks startChapter=0 rows so the
-        // writer still sees substantive content instead of a runtime-append note.
-        readCurrentStateWithFallback(bookDir, placeholder),
-        this.readFileOrDefault(join(bookDir, "story/particle_ledger.md")),
-        this.readFileOrDefault(join(bookDir, "story/pending_hooks.md")),
-        this.readFileOrDefault(join(bookDir, "story/chapter_summaries.md")),
-        this.readFileOrDefault(join(bookDir, "story/subplot_board.md")),
-        this.readFileOrDefault(join(bookDir, "story/emotional_arcs.md")),
-        readCharacterContext(bookDir, placeholder),
-        this.readFileOrDefault(join(bookDir, "story/style_profile.json")),
-        this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
-        this.readFileOrDefault(join(bookDir, "story/fanfic_canon.md")),
-      ]);
+    const fingerprintChapterContents = await this.loadRecentChapterContents(bookDir, chapterNumber, 5);
+    const recentChapters = this.joinRecentChapters(fingerprintChapterContents.slice(-1));
+    const fingerprintChapters = this.joinRecentChapters(fingerprintChapterContents);
+
+    const { profile: genreProfile, body: genreBody } =
+      await readGenreProfile(this.ctx.projectRoot, book.genre);
+    const parsedBookRules = await readBookRules(bookDir);
+    const bookRules = parsedBookRules?.rules ?? null;
+    const bookRulesBody = parsedBookRules?.body ?? "";
+    const resolvedLanguage = book.language ?? genreProfile.language;
+    const targetWords = input.lengthSpec?.target ?? input.wordCountOverride ?? book.chapterWordCount;
+    const resolvedLengthSpec = input.lengthSpec ?? buildLengthSpec(targetWords, resolvedLanguage);
+    const governedMemoryBlocks = input.contextPackage
+      ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
+      : undefined;
+    const englishVarianceBrief = resolvedLanguage === "en"
+      ? await buildEnglishVarianceBrief({
+          bookDir,
+          chapterNumber,
+        })
+      : null;
+    const fixedCreativeSystemPrompt = buildWriterSystemPrompt(
+      book,
+      genreProfile,
+      bookRules,
+      bookRulesBody,
+      genreBody,
+      "",
+      "",
+      chapterNumber,
+      "creative",
+      undefined,
+      resolvedLanguage,
+      input.chapterMemo ? "governed" : "legacy",
+      resolvedLengthSpec,
+    );
+    const fixedCreativeUserPrompt = input.chapterMemo && input.contextPackage && input.ruleStack
+      ? this.buildGovernedUserPrompt({
+          chapterNumber,
+          chapterMemo: input.chapterMemo,
+          chapterIntentData: input.chapterIntentData,
+          contextPackage: input.contextPackage,
+          ruleStack: input.ruleStack,
+          externalContext: input.externalContext,
+          lengthSpec: resolvedLengthSpec,
+          language: resolvedLanguage,
+          varianceBrief: englishVarianceBrief?.text,
+          selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
+        })
+      : this.buildUserPrompt({
+          chapterNumber,
+          storyBible: "",
+          currentState: "",
+          ledger: "",
+          hooks: "",
+          recentChapters,
+          lengthSpec: resolvedLengthSpec,
+          externalContext: input.externalContext,
+          chapterSummaries: "",
+          subplotBoard: "",
+          emotionalArcs: "",
+          characterMatrix: "",
+          language: resolvedLanguage,
+        });
+    const contextCache = new TruthContextCache();
+    const creativeTruthTokens = contextTokenBudgetFromWindow(
+      this.ctx.client._piModel?.contextWindow,
+      this.ctx.client.defaults.maxTokens,
+      estimateTextTokens(fixedCreativeSystemPrompt) + estimateTextTokens(fixedCreativeUserPrompt) + 512,
+    ) ?? 24_000;
+    const {
+      storyBibleRaw,
+      volumeOutline,
+      styleGuide,
+      currentState,
+      ledger,
+      hooks,
+      chapterSummaries,
+      subplotBoard,
+      emotionalArcs,
+      characterMatrix,
+      styleProfileRaw,
+      parentCanon,
+      fanficCanonRaw,
+    } = await readWriterTruthContext(bookDir, undefined, {
+      cache: contextCache,
+      inputTokenBudget: creativeTruthTokens,
+      cacheFiles: false,
+    });
 
     const storyBible = input.chapterIntent
       ? buildGovernedBibleWorkingSet({
@@ -206,17 +293,6 @@ export class WriterAgent extends BaseAgent {
       };
     }
 
-    const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
-    // Load more chapters for dialogue fingerprint extraction (voice consistency over longer span)
-    const fingerprintChapters = await this.loadRecentChapters(bookDir, chapterNumber, 5);
-
-    // Load genre profile + book rules
-    const { profile: genreProfile, body: genreBody } =
-      await readGenreProfile(this.ctx.projectRoot, book.genre);
-    const parsedBookRules = await readBookRules(bookDir);
-    const bookRules = parsedBookRules?.rules ?? null;
-    const bookRulesBody = parsedBookRules?.body ?? "";
-
     const styleFingerprint = this.buildStyleFingerprint(styleProfileRaw);
 
     const dialogueFingerprints = this.extractDialogueFingerprints(fingerprintChapters, storyBible);
@@ -224,18 +300,9 @@ export class WriterAgent extends BaseAgent {
 
     const hasParentCanon = parentCanon !== "(文件尚未创建)";
     const hasFanficCanon = fanficCanonRaw !== "(文件尚未创建)";
-    const resolvedLanguage = book.language ?? genreProfile.language;
-    const targetWords = input.lengthSpec?.target ?? input.wordCountOverride ?? book.chapterWordCount;
-    const resolvedLengthSpec = input.lengthSpec ?? buildLengthSpec(targetWords, resolvedLanguage);
-    const governedMemoryBlocks = processedContextPackage
+    const processedGovernedMemoryBlocks = processedContextPackage
       ? buildGovernedMemoryEvidenceBlocks(processedContextPackage, resolvedLanguage)
       : undefined;
-    const englishVarianceBrief = resolvedLanguage === "en"
-      ? await buildEnglishVarianceBrief({
-          bookDir,
-          chapterNumber,
-        })
-      : null;
 
     // Build fanfic context if fanfic_canon.md exists
     const fanficContext: FanficContext | undefined = hasFanficCanon && bookRules?.fanficMode
@@ -247,14 +314,14 @@ export class WriterAgent extends BaseAgent {
       : undefined;
 
     // ── Phase 1: Creative writing (temperature 0.7) ──
-    const creativeSystemPrompt = buildWriterSystemPrompt(
+    let creativeSystemPrompt = buildWriterSystemPrompt(
       book, genreProfile, bookRules, bookRulesBody, genreBody, styleGuide, styleFingerprint,
       chapterNumber, "creative", fanficContext, resolvedLanguage,
       input.chapterMemo ? "governed" : "legacy",
       resolvedLengthSpec,
     );
 
-    const creativeUserPrompt = input.chapterMemo && processedContextPackage && input.ruleStack
+    let creativeUserPrompt = input.chapterMemo && processedContextPackage && input.ruleStack
       ? this.buildGovernedUserPrompt({
           chapterNumber,
           chapterMemo: input.chapterMemo,
@@ -265,7 +332,7 @@ export class WriterAgent extends BaseAgent {
           lengthSpec: resolvedLengthSpec,
           language: book.language ?? genreProfile.language,
           varianceBrief: englishVarianceBrief?.text,
-          selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
+          selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(processedGovernedMemoryBlocks),
         })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -303,6 +370,93 @@ export class WriterAgent extends BaseAgent {
             language: book.language ?? genreProfile.language,
           });
         })();
+    const maxCreativeInputTokens = contextTokenBudgetFromWindow(
+      this.ctx.client._piModel?.contextWindow,
+      this.ctx.client.defaults.maxTokens,
+    );
+    const creativeInputTokens = estimateTextTokens(creativeSystemPrompt) + estimateTextTokens(creativeUserPrompt);
+    if (maxCreativeInputTokens !== undefined && creativeInputTokens > maxCreativeInputTokens) {
+      const overflow = creativeInputTokens - maxCreativeInputTokens;
+      const finalBudget = applyTruthContextBudget({
+        storyBibleRaw,
+        volumeOutline,
+        styleGuide,
+        currentState,
+        ledger,
+        hooks,
+        chapterSummaries,
+        subplotBoard,
+        emotionalArcs,
+        characterMatrix,
+        styleProfileRaw,
+        parentCanon,
+        fanficCanonRaw,
+      }, {
+        inputTokenBudget: Math.max(0, creativeTruthTokens - overflow - 128),
+      });
+      contextCache.recordBudget(finalBudget);
+      const finalTruth = finalBudget.context;
+      const finalStoryBible = input.chapterIntent
+        ? buildGovernedBibleWorkingSet({
+            bibleMarkdown: finalTruth.storyBibleRaw,
+            chapterIntent: input.chapterIntent,
+            contextPackage: input.contextPackage,
+          })
+        : finalTruth.storyBibleRaw;
+      const finalStyleFingerprint = this.buildStyleFingerprint(finalTruth.styleProfileRaw);
+      const finalFanficContext: FanficContext | undefined =
+        finalTruth.fanficCanonRaw !== "(文件尚未创建)" && bookRules?.fanficMode
+          ? {
+              fanficCanon: finalTruth.fanficCanonRaw,
+              fanficMode: bookRules.fanficMode,
+              allowedDeviations: bookRules.allowedDeviations ?? [],
+            }
+          : undefined;
+      creativeSystemPrompt = buildWriterSystemPrompt(
+        book, genreProfile, bookRules, bookRulesBody, genreBody,
+        finalTruth.styleGuide, finalStyleFingerprint, chapterNumber, "creative",
+        finalFanficContext, resolvedLanguage, input.chapterMemo ? "governed" : "legacy",
+        resolvedLengthSpec,
+      );
+      if (!(input.chapterMemo && processedContextPackage && input.ruleStack)) {
+        const finalHooks = filterHooks(finalTruth.hooks);
+        const finalSummaries = filterSummaries(finalTruth.chapterSummaries, chapterNumber);
+        const finalSubplots = filterSubplots(finalTruth.subplotBoard);
+        const finalArcs = filterEmotionalArcs(finalTruth.emotionalArcs, chapterNumber);
+        const finalMatrix = filterCharacterMatrix(
+          finalTruth.characterMatrix,
+          finalTruth.volumeOutline,
+          bookRules?.protagonist?.name,
+        );
+        const finalPov = extractPOVFromOutline(finalTruth.volumeOutline, chapterNumber);
+        creativeUserPrompt = this.buildUserPrompt({
+          chapterNumber,
+          storyBible: finalStoryBible,
+          currentState: finalTruth.currentState,
+          ledger: genreProfile.numericalSystem ? finalTruth.ledger : "",
+          hooks: finalPov
+            ? filterHooksByPOV(finalHooks, finalPov, finalTruth.chapterSummaries)
+            : finalHooks,
+          recentChapters,
+          lengthSpec: resolvedLengthSpec,
+          externalContext: input.externalContext,
+          chapterSummaries: finalSummaries,
+          subplotBoard: finalSubplots,
+          emotionalArcs: finalArcs,
+          characterMatrix: finalPov ? filterMatrixByPOV(finalMatrix, finalPov) : finalMatrix,
+          dialogueFingerprints: this.extractDialogueFingerprints(fingerprintChapters, finalStoryBible),
+          relevantSummaries: this.findRelevantSummaries(
+            finalTruth.chapterSummaries,
+            finalTruth.volumeOutline,
+            chapterNumber,
+          ),
+          parentCanon: finalTruth.parentCanon !== "(文件尚未创建)"
+            ? finalTruth.parentCanon
+            : undefined,
+          language: resolvedLanguage,
+        });
+      }
+    }
 
     const creativeTemperature = input.temperatureOverride ?? 0.7;
 
@@ -356,8 +510,9 @@ export class WriterAgent extends BaseAgent {
           chapterIntent: input.chapterIntent ?? volumeOutline,
           contextPackage: processedContextPackage!,
           protagonistName: bookRules?.protagonist?.name,
-        })
+      })
       : characterMatrix;
+    const originalSettlementContext = await readWriterSettleContext(bookDir);
 
     const settleResult = await this.settle({
       book,
@@ -374,17 +529,18 @@ export class WriterAgent extends BaseAgent {
       emotionalArcs: filteredArcsForSettlement,
       characterMatrix: filteredMatrixForSettlement,
       volumeOutline,
-      selectedEvidenceBlock: governedMemoryBlocks
-        ? this.joinGovernedEvidenceBlocks(governedMemoryBlocks)
+      selectedEvidenceBlock: processedGovernedMemoryBlocks
+        ? this.joinGovernedEvidenceBlocks(processedGovernedMemoryBlocks)
         : undefined,
       chapterIntent: input.chapterIntent,
       contextPackage: processedContextPackage,
       ruleStack: input.ruleStack,
       validationFeedback: undefined,
-      originalHooks: hooks,
-      originalSubplots: subplotBoard,
-      originalEmotionalArcs: emotionalArcs,
-      originalCharacterMatrix: characterMatrix,
+      originalHooks: originalSettlementContext.hooks,
+      originalSubplots: originalSettlementContext.subplotBoard,
+      originalEmotionalArcs: originalSettlementContext.emotionalArcs,
+      originalCharacterMatrix: originalSettlementContext.characterMatrix,
+      contextCache,
     });
     const settlement = settleResult.settlement;
     const settleUsage = settleResult.usage;
@@ -395,7 +551,9 @@ export class WriterAgent extends BaseAgent {
       chapterNumber,
     );
     const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
-    const priorHookIds = new Set(parsePendingHooksMarkdown(hooks).map((hook) => hook.hookId));
+    const priorHookIds = new Set(
+      parsePendingHooksMarkdown(originalSettlementContext.hooks).map((hook) => hook.hookId),
+    );
     const hookHealthIssues = resolvedRuntimeStateDelta
       && (runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot)
       ? analyzeHookHealth({
@@ -448,6 +606,7 @@ export class WriterAgent extends BaseAgent {
         this.ctx.logger?.warn(`[${issue.severity}] ${issue.category}: ${issue.description}`);
       }
     }
+    this.ctx.logger?.debug(`[truth-context] writer cache ${contextCache.summary()}`);
 
     // ── Merge into WriteChapterOutput ──
     const tokenUsage: TokenUsage = {
@@ -483,7 +642,20 @@ export class WriterAgent extends BaseAgent {
   }
 
   async settleChapterState(input: SettleChapterStateInput): Promise<WriteChapterOutput> {
-    const [
+    const { profile: genreProfile } = await readGenreProfile(this.ctx.projectRoot, input.book.genre);
+    const parsedBookRules = await readBookRules(input.bookDir);
+    const bookRules = parsedBookRules?.rules ?? null;
+    const resolvedLanguage = input.book.language ?? genreProfile.language;
+    const contextCache = new TruthContextCache();
+    const initialFixedTokens = estimateTextTokens(
+      buildSettlerSystemPrompt(input.book, genreProfile, bookRules, resolvedLanguage),
+    ) + estimateTextTokens(input.content) + this.ctx.client.defaults.maxTokens;
+    const settleTruthTokens = contextTokenBudgetFromWindow(
+      this.ctx.client._piModel?.contextWindow,
+      this.ctx.client.defaults.maxTokens,
+      initialFixedTokens,
+    ) ?? 24_000;
+    const {
       currentState,
       ledger,
       hooks,
@@ -492,25 +664,16 @@ export class WriterAgent extends BaseAgent {
       emotionalArcs,
       characterMatrix,
       volumeOutline,
-    ] = await Promise.all([
-      // Phase 5 consolidation fallback: derive initial state when only seed on disk.
-      readCurrentStateWithFallback(input.bookDir, "(文件尚未创建)"),
-      this.readFileOrDefault(join(input.bookDir, "story/particle_ledger.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/pending_hooks.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/chapter_summaries.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/subplot_board.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/emotional_arcs.md")),
-      readCharacterContext(input.bookDir, "(文件尚未创建)"),
-      readVolumeMap(input.bookDir, "(文件尚未创建)"),
-    ]);
+    } = await readWriterSettleContext(input.bookDir, undefined, {
+      cache: contextCache,
+      inputTokenBudget: settleTruthTokens,
+      cacheFiles: false,
+    });
 
-    const { profile: genreProfile } = await readGenreProfile(this.ctx.projectRoot, input.book.genre);
-    const parsedBookRules = await readBookRules(input.bookDir);
-    const bookRules = parsedBookRules?.rules ?? null;
-    const resolvedLanguage = input.book.language ?? genreProfile.language;
     const governedMemoryBlocks = input.contextPackage
       ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
       : undefined;
+    const originalSettlementContext = await readWriterSettleContext(input.bookDir);
 
     const settleResult = await this.settle({
       book: input.book,
@@ -534,10 +697,11 @@ export class WriterAgent extends BaseAgent {
       contextPackage: input.contextPackage,
       ruleStack: input.ruleStack,
       validationFeedback: input.validationFeedback,
-      originalHooks: hooks,
-      originalSubplots: subplotBoard,
-      originalEmotionalArcs: emotionalArcs,
-      originalCharacterMatrix: characterMatrix,
+      originalHooks: originalSettlementContext.hooks,
+      originalSubplots: originalSettlementContext.subplotBoard,
+      originalEmotionalArcs: originalSettlementContext.emotionalArcs,
+      originalCharacterMatrix: originalSettlementContext.characterMatrix,
+      contextCache,
     });
     const settlement = settleResult.settlement;
     const runtimeStateArtifacts = await this.buildRuntimeStateArtifactsIfPresent(
@@ -547,6 +711,7 @@ export class WriterAgent extends BaseAgent {
       input.chapterNumber,
       input.allowReapply,
     );
+    this.ctx.logger?.debug(`[truth-context] writer settle cache ${contextCache.summary()}`);
 
     return {
       chapterNumber: input.chapterNumber,
@@ -600,6 +765,7 @@ export class WriterAgent extends BaseAgent {
     readonly originalSubplots: string;
     readonly originalEmotionalArcs: string;
     readonly originalCharacterMatrix: string;
+    readonly contextCache?: TruthContextCache;
   }): Promise<{
     settlement: ReturnType<typeof parseSettlementOutput> & {
       runtimeStateDelta?: RuntimeStateDelta;
@@ -641,27 +807,71 @@ export class WriterAgent extends BaseAgent {
           resolvedLang,
         )
       : undefined;
+    const fixedSettlerUser = buildSettlerUserPrompt({
+      chapterNumber: params.chapterNumber,
+      title: params.title,
+      content: params.content,
+      currentState: "",
+      ledger: "",
+      hooks: "",
+      chapterSummaries: "",
+      subplotBoard: "",
+      emotionalArcs: "",
+      characterMatrix: "",
+      volumeOutline: "",
+      observations,
+      selectedEvidenceBlock: params.selectedEvidenceBlock,
+      governedControlBlock,
+      validationFeedback: params.validationFeedback,
+    });
+    const truthTokenBudget = contextTokenBudgetFromWindow(
+      this.ctx.client._piModel?.contextWindow,
+      this.ctx.client.defaults.maxTokens,
+      estimateTextTokens(settlerSystem) + estimateTextTokens(fixedSettlerUser),
+    );
+    const budgetedTruth = applyTruthContextBudget({
+      currentState: params.currentState,
+      ledger: params.ledger,
+      hooks: params.hooks,
+      chapterSummaries: params.chapterSummaries,
+      subplotBoard: params.subplotBoard,
+      emotionalArcs: params.emotionalArcs,
+      characterMatrix: params.characterMatrix,
+      volumeOutline: params.volumeOutline,
+    }, { inputTokenBudget: truthTokenBudget }, {
+      weights: {
+        currentState: 4,
+        ledger: 2,
+        hooks: 4,
+        chapterSummaries: 3,
+        subplotBoard: 2,
+        emotionalArcs: 2,
+        characterMatrix: 3,
+        volumeOutline: 3,
+      },
+    });
+    params.contextCache?.recordBudget(budgetedTruth);
 
     const settlerUser = buildSettlerUserPrompt({
       chapterNumber: params.chapterNumber,
       title: params.title,
       content: params.content,
-      currentState: this.capLegacyContext("current_state", params.currentState, LEGACY_WRITER_CONTEXT_BUDGET.currentState),
-      ledger: this.capLegacyContext("particle_ledger", params.ledger, LEGACY_WRITER_CONTEXT_BUDGET.ledger),
-      hooks: this.capLegacyContext("pending_hooks", params.hooks, LEGACY_WRITER_CONTEXT_BUDGET.hooks),
+      currentState: this.capLegacyContext("current_state", budgetedTruth.context.currentState, LEGACY_WRITER_CONTEXT_BUDGET.currentState),
+      ledger: this.capLegacyContext("particle_ledger", budgetedTruth.context.ledger, LEGACY_WRITER_CONTEXT_BUDGET.ledger),
+      hooks: this.capLegacyContext("pending_hooks", budgetedTruth.context.hooks, LEGACY_WRITER_CONTEXT_BUDGET.hooks),
       chapterSummaries: this.capLegacyContext(
         "chapter_summaries",
-        params.chapterSummaries,
+        budgetedTruth.context.chapterSummaries,
         LEGACY_WRITER_CONTEXT_BUDGET.chapterSummaries,
       ),
-      subplotBoard: this.capLegacyContext("subplot_board", params.subplotBoard, LEGACY_WRITER_CONTEXT_BUDGET.subplotBoard),
-      emotionalArcs: this.capLegacyContext("emotional_arcs", params.emotionalArcs, LEGACY_WRITER_CONTEXT_BUDGET.emotionalArcs),
+      subplotBoard: this.capLegacyContext("subplot_board", budgetedTruth.context.subplotBoard, LEGACY_WRITER_CONTEXT_BUDGET.subplotBoard),
+      emotionalArcs: this.capLegacyContext("emotional_arcs", budgetedTruth.context.emotionalArcs, LEGACY_WRITER_CONTEXT_BUDGET.emotionalArcs),
       characterMatrix: this.capLegacyContext(
         "character_matrix",
-        params.characterMatrix,
+        budgetedTruth.context.characterMatrix,
         LEGACY_WRITER_CONTEXT_BUDGET.characterMatrix,
       ),
-      volumeOutline: this.capLegacyContext("volume_outline", params.volumeOutline, LEGACY_WRITER_CONTEXT_BUDGET.volumeOutline),
+      volumeOutline: this.capLegacyContext("volume_outline", budgetedTruth.context.volumeOutline, LEGACY_WRITER_CONTEXT_BUDGET.volumeOutline),
       observations,
       selectedEvidenceBlock: params.selectedEvidenceBlock,
       governedControlBlock,
@@ -750,12 +960,19 @@ export class WriterAgent extends BaseAgent {
       output,
       language,
     );
+    const currentStateMarkdown = runtimeStateArtifacts?.currentStateMarkdown ?? output.updatedState;
+    const hooksMarkdown = runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks;
 
     const writes: Array<Promise<void>> = [
       writeFile(join(chaptersDir, filename), chapterContent, "utf-8"),
-      writeFile(join(storyDir, "current_state.md"), runtimeStateArtifacts?.currentStateMarkdown ?? output.updatedState, "utf-8"),
-      writeFile(join(storyDir, "pending_hooks.md"), runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks, "utf-8"),
     ];
+
+    if (isPersistableTruthText(currentStateMarkdown, MISSING_STATE_TEXT)) {
+      writes.push(writeFile(join(storyDir, "current_state.md"), currentStateMarkdown, "utf-8"));
+    }
+    if (isPersistableTruthText(hooksMarkdown, MISSING_HOOKS_TEXT)) {
+      writes.push(writeFile(join(storyDir, "pending_hooks.md"), hooksMarkdown, "utf-8"));
+    }
 
     if (runtimeStateArtifacts?.chapterSummariesMarkdown) {
       writes.push(
@@ -767,7 +984,7 @@ export class WriterAgent extends BaseAgent {
       writes.push(saveRuntimeStateSnapshot(bookDir, runtimeStateArtifacts?.snapshot ?? output.runtimeStateSnapshot!));
     }
 
-    if (numericalSystem) {
+    if (numericalSystem && isPersistableTruthText(output.updatedLedger, MISSING_LEDGER_TEXT)) {
       writes.push(
         writeFile(join(storyDir, "particle_ledger.md"), output.updatedLedger, "utf-8"),
       );
@@ -1119,11 +1336,11 @@ ${overrides}\n`;
 - 允许区间：${lengthSpec.softMin}-${lengthSpec.softMax}字`;
   }
 
-  private async loadRecentChapters(
+  private async loadRecentChapterContents(
     bookDir: string,
-    currentChapter: number,
+    _currentChapter: number,
     count = 1,
-  ): Promise<string> {
+  ): Promise<ReadonlyArray<string>> {
     const chaptersDir = join(bookDir, "chapters");
     try {
       const files = await readdir(chaptersDir);
@@ -1132,27 +1349,16 @@ ${overrides}\n`;
         .sort()
         .slice(-count);
 
-      if (mdFiles.length === 0) return "";
+      if (mdFiles.length === 0) return [];
 
-      const contents = await Promise.all(
-        mdFiles.map(async (f) => {
-          const content = await readFile(join(chaptersDir, f), "utf-8");
-          return content;
-        }),
-      );
-
-      return contents.join("\n\n---\n\n");
+      return Promise.all(mdFiles.map((file) => readFile(join(chaptersDir, file), "utf-8")));
     } catch {
-      return "";
+      return [];
     }
   }
 
-  private async readFileOrDefault(path: string): Promise<string> {
-    try {
-      return await readFile(path, "utf-8");
-    } catch {
-      return "(文件尚未创建)";
-    }
+  private joinRecentChapters(chapters: ReadonlyArray<string>): string {
+    return chapters.join("\n\n---\n\n");
   }
 
   /** Save new truth files (summaries, subplots, emotional arcs, character matrix). */

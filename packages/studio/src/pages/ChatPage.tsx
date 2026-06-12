@@ -56,6 +56,7 @@ import {
   setBookCreateSessionId,
   setProjectChatSessionId,
   isChatScrollNearBottom,
+  shouldSyncExternalChatInput,
   shouldShowPlayChoicePanel,
 } from "./chat-page-state";
 
@@ -143,6 +144,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaSessionIdRef = useRef(activeSessionId);
   const autoScrollPinnedRef = useRef(true);
   const [followingLatest, setFollowingLatest] = useState(true);
   const [degradedChapter, setDegradedChapter] = useState<number | null>(null);
@@ -391,12 +393,15 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   // restores or clears a draft.
   useEffect(() => {
     const el = textareaRef.current;
-    if (
-      !el
-      || el.value === input
-      || compositionInput.isComposing
-      || document.activeElement === el
-    ) return;
+    const sessionChanged = textareaSessionIdRef.current !== activeSessionId;
+    textareaSessionIdRef.current = activeSessionId;
+    if (!el || !shouldSyncExternalChatInput({
+      domValue: el.value,
+      storeValue: input,
+      sessionChanged,
+      focused: document.activeElement === el,
+      composing: compositionInput.isComposing,
+    })) return;
     el.value = input;
     compositionInput.setValue(input);
     el.style.height = "auto";
@@ -406,7 +411,8 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   useAndroidImeBridge({
     textareaRef,
     sessionId: activeSessionId,
-    setValue: compositionInput.setValue,
+    setDisplayValue: compositionInput.setDisplayValue,
+    commitValue: compositionInput.commitValue,
   });
 
   const scrollToLatest = (behavior: ScrollBehavior = "smooth") => {

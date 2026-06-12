@@ -20,14 +20,11 @@ import {
   renderNarrativeSelectedContext,
   sanitizeNarrativeEvidenceBlock,
 } from "../utils/narrative-control.js";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readRevisionTruthContext } from "./review-context.js";
 import {
-  readStoryFrame,
-  readVolumeMap,
-  readCharacterContext,
-  readCurrentStateWithFallback,
-} from "../utils/outline-paths.js";
+  contextTokenBudgetFromWindow,
+  type TruthContextCache,
+} from "./truth-context-cache.js";
 
 export type ReviseMode = "auto" | "polish" | "rewrite" | "rework" | "anti-detect" | "spot-fix";
 
@@ -127,22 +124,28 @@ export class ReviserAgent extends BaseAgent {
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
       lengthSpec?: LengthSpec;
+      contextCache?: TruthContextCache;
     },
   ): Promise<ReviseOutput> {
-    const [currentState, ledger, hooks, styleGuideRaw, volumeOutline, storyBible, characterMatrix, chapterSummaries, parentCanon, fanficCanon] = await Promise.all([
-      // Phase 5 consolidation: derive initial state from roles + seed hooks
-      // when current_state.md is still the architect seed placeholder.
-      readCurrentStateWithFallback(bookDir, "(文件不存在)"),
-      this.readFileSafe(join(bookDir, "story/particle_ledger.md")),
-      this.readFileSafe(join(bookDir, "story/pending_hooks.md")),
-      this.readFileSafe(join(bookDir, "story/style_guide.md")),
-      readVolumeMap(bookDir, "(文件不存在)"),
-      readStoryFrame(bookDir, "(文件不存在)"),
-      readCharacterContext(bookDir, "(文件不存在)"),
-      this.readFileSafe(join(bookDir, "story/chapter_summaries.md")),
-      this.readFileSafe(join(bookDir, "story/parent_canon.md")),
-      this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
-    ]);
+    const {
+      currentState,
+      ledger,
+      hooks,
+      styleGuideRaw,
+      volumeOutline,
+      storyBible,
+      characterMatrix,
+      chapterSummaries,
+      parentCanon,
+      fanficCanon,
+    } = await readRevisionTruthContext(bookDir, undefined, {
+      cache: options?.contextCache,
+      inputTokenBudget: contextTokenBudgetFromWindow(
+        this.ctx.client._piModel?.contextWindow,
+        this.ctx.client.defaults.maxTokens,
+      ) ?? 24_000,
+      cacheFiles: false,
+    });
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
@@ -581,14 +584,6 @@ ${mode === "spot-fix" ? "\n9. spot-fix 只能输出局部补丁，禁止输出�
 输出格式：
 
 ${outputFormat}`;
-  }
-
-  private async readFileSafe(path: string): Promise<string> {
-    try {
-      return await readFile(path, "utf-8");
-    } catch {
-      return "(文件不存在)";
-    }
   }
 
   private buildReducedControlBlock(

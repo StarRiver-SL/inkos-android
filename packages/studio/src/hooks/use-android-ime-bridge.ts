@@ -3,13 +3,53 @@ import { useEffect, type RefObject } from "react";
 interface AndroidImeBridgeOptions {
   readonly textareaRef: RefObject<HTMLTextAreaElement | null>;
   readonly sessionId: string | null;
-  readonly setValue: (value: string) => void;
+  readonly setDisplayValue: (value: string) => void;
+  readonly commitValue: (value: string) => void;
+}
+
+interface ImeCommitScheduler {
+  queueMicrotask(callback: () => void): void;
+  setTimeout(callback: () => void, delay: number): number;
+  clearTimeout(timer: number): void;
+}
+
+export function createImeCommitScheduler(
+  sync: () => void,
+  scheduler: ImeCommitScheduler,
+): { syncAfterCommit: () => void; dispose: () => void } {
+  let disposed = false;
+  const timers = new Set<number>();
+  const run = () => {
+    if (!disposed) sync();
+  };
+  const schedule = (delay: number) => {
+    const timer = scheduler.setTimeout(() => {
+      timers.delete(timer);
+      run();
+    }, delay);
+    timers.add(timer);
+  };
+
+  return {
+    syncAfterCommit: () => {
+      run();
+      scheduler.queueMicrotask(run);
+      schedule(0);
+      schedule(32);
+    },
+    dispose: () => {
+      disposed = true;
+      for (const timer of timers) scheduler.clearTimeout(timer);
+      timers.clear();
+    },
+  };
 }
 
 export function useAndroidImeBridge({
   textareaRef,
   sessionId,
-  setValue,
+  setDisplayValue,
+  commitValue,
 }: AndroidImeBridgeOptions): void {
   useEffect(() => {
     const element = textareaRef.current;
@@ -17,37 +57,51 @@ export function useAndroidImeBridge({
     let focused = document.activeElement === element;
     let composing = false;
     let timer: number | null = null;
-    let lastValue = element.value;
+    let lastSeenValue = element.value;
+    let lastCommittedValue = element.value;
 
-    const syncFromDom = () => {
-      const next = element.value;
-      if (next === lastValue) return;
-      lastValue = next;
-      setValue(next);
+    const resize = () => {
       element.style.height = "auto";
       element.style.height = `${Math.min(element.scrollHeight, 200)}px`;
     };
-    const syncAfterImeCommit = () => {
-      syncFromDom();
-      queueMicrotask(syncFromDom);
-      window.setTimeout(syncFromDom, 0);
-      window.setTimeout(syncFromDom, 32);
+    const syncFromDom = (mode: "display" | "commit") => {
+      const next = element.value;
+      if (mode === "display") {
+        if (next === lastSeenValue) return;
+        lastSeenValue = next;
+        setDisplayValue(next);
+      } else {
+        lastSeenValue = next;
+        if (next === lastCommittedValue) return;
+        lastCommittedValue = next;
+        commitValue(next);
+      }
+      resize();
     };
+    const imeCommitScheduler = createImeCommitScheduler(
+      () => syncFromDom("commit"),
+      {
+        queueMicrotask,
+        setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+        clearTimeout: (pendingTimer) => window.clearTimeout(pendingTimer),
+      },
+    );
     const poll = () => {
       if (!focused) {
         timer = null;
         return;
       }
-      syncFromDom();
+      syncFromDom(composing ? "display" : "commit");
       timer = window.setTimeout(poll, composing ? 80 : 160);
     };
     const onFocus = () => {
       focused = true;
-      lastValue = element.value;
+      lastSeenValue = element.value;
+      lastCommittedValue = element.value;
       if (timer === null) timer = window.setTimeout(poll, 80);
     };
     const onBlur = () => {
-      syncAfterImeCommit();
+      imeCommitScheduler.syncAfterCommit();
       focused = false;
       if (timer !== null) window.clearTimeout(timer);
       timer = null;
@@ -55,31 +109,33 @@ export function useAndroidImeBridge({
     const onCompositionStart = () => {
       composing = true;
     };
+    const onInput = () => {
+      if (composing) {
+        syncFromDom("display");
+        return;
+      }
+      imeCommitScheduler.syncAfterCommit();
+    };
     const onCompositionEnd = () => {
       composing = false;
-      syncAfterImeCommit();
+      imeCommitScheduler.syncAfterCommit();
     };
 
     element.addEventListener("focus", onFocus);
     element.addEventListener("blur", onBlur);
     element.addEventListener("compositionstart", onCompositionStart);
-    element.addEventListener("beforeinput", syncAfterImeCommit);
-    element.addEventListener("input", syncAfterImeCommit);
-    element.addEventListener("compositionupdate", syncAfterImeCommit);
+    element.addEventListener("input", onInput);
     element.addEventListener("compositionend", onCompositionEnd);
-    element.addEventListener("textInput", syncAfterImeCommit);
     if (focused) timer = window.setTimeout(poll, 80);
 
     return () => {
       if (timer !== null) window.clearTimeout(timer);
+      imeCommitScheduler.dispose();
       element.removeEventListener("focus", onFocus);
       element.removeEventListener("blur", onBlur);
       element.removeEventListener("compositionstart", onCompositionStart);
-      element.removeEventListener("beforeinput", syncAfterImeCommit);
-      element.removeEventListener("input", syncAfterImeCommit);
-      element.removeEventListener("compositionupdate", syncAfterImeCommit);
+      element.removeEventListener("input", onInput);
       element.removeEventListener("compositionend", onCompositionEnd);
-      element.removeEventListener("textInput", syncAfterImeCommit);
     };
-  }, [sessionId, setValue, textareaRef]);
+  }, [commitValue, sessionId, setDisplayValue, textareaRef]);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSpinoffFoundationContext } from "../pipeline/runner.js";
+import { buildSpinoffFoundationContext } from "../pipeline/import-foundation-source.js";
 
 const PARENT_CANON = "## 角色\n林深：记忆债诊所的医生。\n## 世界\n触碰濒死者能读到其记忆。";
 
