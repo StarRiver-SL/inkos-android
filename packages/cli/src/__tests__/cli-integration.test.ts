@@ -9,7 +9,8 @@ import { StateManager } from "@actalk/inkos-core";
 const testDir = dirname(fileURLToPath(import.meta.url));
 const cliDir = resolve(testDir, "..", "..");
 const cliEntry = resolve(cliDir, "dist", "index.js");
-const CLI_PROCESS_TIMEOUT_MS = 10_000;
+const CLI_PROCESS_TIMEOUT_MS = process.platform === "win32" ? 20_000 : 10_000;
+const CLI_TEST_TIMEOUT_MS = CLI_PROCESS_TIMEOUT_MS + 5_000;
 const DOUBLE_CLI_INVOCATION_TEST_TIMEOUT_MS = CLI_PROCESS_TIMEOUT_MS * 2;
 
 let projectDir: string;
@@ -63,7 +64,7 @@ const failingLlmEnv = {
   INKOS_LLM_API_KEY: "test-key",
 };
 
-describe("CLI integration", () => {
+describe("CLI integration", { timeout: CLI_TEST_TIMEOUT_MS }, () => {
   beforeAll(async () => {
     projectDir = await mkdtemp(join(tmpdir(), "inkos-cli-test-"));
   });
