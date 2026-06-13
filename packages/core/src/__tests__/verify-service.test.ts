@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { verifyService } from "../llm/providers/verify.js";
 
+vi.setConfig({ testTimeout: 20_000 });
+
 describe("verifyService (B9)", () => {
   const originalFetch = global.fetch;
 

@@ -62,6 +62,14 @@ Given the chapter text and the CHANGES made to truth files (state card + hooks p
 5. Retroactive edit — truth file change implies something happened in a PREVIOUS chapter, not the current one
 6. Cross-truth key-setting conflict — numbered rules, named laws, ranks, identities, locations, or relationship labels in the new truth files contradict the chapter text or the authority context
 
+## End-of-Chapter Snapshot Semantics
+
+- The new State Card is a snapshot taken at the END of the chapter, not a claim that its values were true throughout the entire chapter.
+- Read the chapter in chronological order. A later explicit transition supersedes an earlier condition.
+- Earlier events are historical evidence, not contradictions, when the chapter later changes that state.
+- Example: receiving messages earlier does not contradict an end-state of "phone physically isolated" if the character later powers it off and removes the battery.
+- Report a contradiction only when the final explicit chapter state conflicts with the new State Card, or when no narrative transition supports the new end-state.
+
 Output format (simple, NOT JSON):
 - Include one standalone verdict line: exactly PASS or FAIL (nothing else on that line)
 - Following lines: one warning per line, optionally prefixed with [category]
@@ -96,7 +104,7 @@ ${stateDiff || "(no changes)"}
 ## Hooks Pool Changes
 ${hooksDiff || "(no changes)"}
 
-## Chapter Text (for reference)
+## Chapter Text (chronological; later explicit state changes override earlier conditions)
 ${chapterContent}`;
 
     try {

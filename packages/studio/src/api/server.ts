@@ -711,6 +711,25 @@ function manualToolAssistantMessage(
   };
 }
 
+function resolveManualToolRoute(config: ProjectConfig, exec: CollectedToolExec): {
+  readonly provider: string;
+  readonly model: string;
+} {
+  const fallbackProvider = config.llm.service ?? config.llm.provider;
+  const fallback = { provider: fallbackProvider, model: config.llm.model };
+  const agent = exec.agent === "state-repair" ? "writer" : exec.agent;
+  if (!agent) return fallback;
+  const override = config.modelOverrides?.[agent];
+  if (!override) return fallback;
+  if (typeof override === "string") {
+    return { provider: fallbackProvider, model: override };
+  }
+  return {
+    provider: override.service ?? override.provider ?? fallbackProvider,
+    model: override.model,
+  };
+}
+
 function manualToolAppendOptions(sessionKind: SessionKind, exec: CollectedToolExec): {
   readonly sessionKind: SessionKind;
   readonly legacyDisplay: { readonly toolExecutions: readonly CollectedToolExec[] };
@@ -1876,6 +1895,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         provider: override.provider ?? resolveServiceProviderFamily(baseService) ?? "openai",
         ...(baseUrl ? { baseUrl } : {}),
         apiKey: secrets.services[serviceId]?.apiKey ?? "",
+        proxyUrl: override.proxyUrl ?? currentConfig.llm.proxyUrl,
         apiFormat: override.apiFormat ?? entry?.apiFormat ?? currentConfig.llm.apiFormat,
         stream: override.stream ?? entry?.stream ?? currentConfig.llm.stream,
       };
@@ -1930,12 +1950,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const level = diagnostics.promptChars >= HUGE_MODEL_PROMPT_WARN_CHARS ? "warn" : "info";
     const endpoint = "endpoint" in diagnostics ? diagnostics.endpoint : diagnostics.api;
     const service = "service" in diagnostics && diagnostics.service ? `${diagnostics.service}/` : "";
+    const agent = "agent" in diagnostics && diagnostics.agent ? `agent=${diagnostics.agent}` : "";
     emitRuntimeLog({
       level,
       tag: "context",
       ...(sessionId ? { sessionId } : {}),
       message: [
         diagnostics.promptChars >= HUGE_MODEL_PROMPT_WARN_CHARS ? "极大上下文请求" : "大上下文请求",
+        agent,
         `模型 ${service}${diagnostics.model}`,
         `接口 ${endpoint}`,
         `stream=${diagnostics.stream}`,
@@ -1943,7 +1965,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         `prompt=${diagnostics.promptChars.toLocaleString()} 字符`,
         `约 ${estimatedTokens.toLocaleString()} tokens`,
         "可能导致首字等待较久或上游超时",
-      ].join(" · "),
+      ].filter(Boolean).join(" · "),
     });
   }
 
@@ -1991,6 +2013,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       modelOverrides: await resolvePipelineModelOverrides(currentConfig),
       notifyChannels: currentConfig.notify,
       logger,
+      onRequestDiagnostics: (diagnostics) =>
+        emitModelRequestDiagnostics(diagnostics, overrides?.sessionIdForSSE),
       onContextCompression: (event) => {
         broadcast("context:compression", {
           ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
@@ -3677,25 +3701,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       const model = resolvedModel!;
       const agentApiKey = resolvedApiKey;
-      const configuredEntry = reqService ? await resolveConfiguredServiceEntry(root, reqService) : undefined;
-
-      // Create pipeline with resolved model (so sub_agent tools use the frontend-selected model)
-      // Don't spread config.llm — its baseUrl/provider belong to the old service.
-      // Let createLLMClient resolve baseUrl from the service preset.
-      const pipelineClient = (reqService && reqModel && resolvedModel)
-        ? createStudioLLMClient({
-            ...config.llm,
-            service: configuredEntry?.service ?? reqService,
-            model: reqModel,
-            apiKey: resolvedApiKey ?? "",
-            ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
-            ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
-            baseUrl: configuredEntry?.baseUrl ?? "",
-          } as any, { sessionId: bookSession.sessionId })
-        : client;
+      // Chat replies use the composer-selected model above. Production writing,
+      // audit, revision, and state repair use the project's Agent routing table.
       const pipeline = new PipelineRunner(await buildPipelineConfig({
-        client: pipelineClient,
-        model: reqModel ?? config.llm.model,
         currentConfig: config,
         sessionIdForSSE: bookSession.sessionId,
       }));
@@ -3754,8 +3762,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             manualToolAssistantMessage(
               responseText,
               exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
+              resolveManualToolRoute(config, exec).provider,
+              resolveManualToolRoute(config, exec).model,
             ),
           ], instruction, manualToolAppendOptions(sessionKind, exec));
           await refreshBookSessionFromTranscript();
@@ -3779,8 +3787,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               manualToolAssistantMessage(
                 message,
                 error.exec,
-                configuredEntry?.service ?? reqService ?? config.llm.provider,
-                reqModel ?? config.llm.model,
+                resolveManualToolRoute(config, error.exec).provider,
+                resolveManualToolRoute(config, error.exec).model,
               ),
             ], instruction, manualToolAppendOptions(sessionKind, error.exec)).catch(() => undefined);
             await refreshBookSessionFromTranscript().catch(() => undefined);
@@ -3815,60 +3823,83 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
         try {
           const repairResult = await pipeline.repairChapterState(repairBookId, repairChapter);
-          const responseText = `第 ${repairChapter} 章的 truth/state 已重新整理，章节状态已恢复为 ${repairResult.status ?? "可继续写作"}。`;
-          const details = {
-            kind: "chapter_state_repaired",
-            bookId: repairBookId,
-            chapterNumber: repairChapter,
-            status: repairResult.status,
-          };
-          const toolResult = {
-            content: [{ type: "text", text: responseText }],
-            details,
-          };
-          broadcast("tool:end", {
-            sessionId: streamSessionId,
-            id: toolCallId,
-            tool: "sub_agent",
-            result: toolResult,
-            details,
-            isError: false,
-          });
-          const exec: CollectedToolExec = {
-            id: toolCallId,
-            tool: "sub_agent",
-            agent: "state-repair",
-            label: resolveToolLabel("sub_agent", "state-repair"),
-            status: "completed",
-            args: toolArgs,
-            result: responseText,
-            details,
-            startedAt: Date.now(),
-            completedAt: Date.now(),
-          };
-          await appendManualSessionMessages(root, bookSession.sessionId, [
-            manualToolAssistantMessage(
-              responseText,
-              exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
-            ),
-          ], instruction, manualToolAppendOptions(sessionKind, exec));
-          await refreshBookSessionFromTranscript();
-          broadcast("agent:complete", {
-            instruction,
-            activeBookId: repairBookId,
-            sessionId: bookSession.sessionId,
-            sessionKind,
-          });
-          return c.json({
-            response: responseText,
-            session: {
-              sessionId: bookSession.sessionId,
-              sessionKind,
-              activeBookId: repairBookId,
-            },
-          });
+          {
+            const repairIssue = repairResult.auditResult?.issues?.[0];
+            const repairStatus = repairResult.status ?? "ready-for-review";
+            const repairIncomplete = repairStatus === "state-degraded" || repairResult.auditResult?.passed === false;
+            const repairReason = repairIssue?.description ? `\n原因：${repairIssue.description}` : "";
+            const repairSuggestion = repairIssue?.suggestion ? `\n建议：${repairIssue.suggestion}` : "";
+            const responseText = repairIncomplete
+              ? `第 ${repairChapter} 章状态恢复未完成，仍处于 ${repairStatus}。${repairReason}${repairSuggestion}`
+              : `第 ${repairChapter} 章的 truth/state 已重新整理，章节状态已恢复为 ${repairStatus}。`;
+            const details = {
+              kind: repairIncomplete ? "chapter_state_repair_failed" : "chapter_state_repaired",
+              bookId: repairBookId,
+              chapterNumber: repairChapter,
+              status: repairStatus,
+              auditPassed: repairResult.auditResult?.passed,
+              issueCount: repairResult.auditResult?.issues?.length ?? 0,
+              firstIssue: repairIssue,
+            };
+            const toolResult = {
+              content: [{ type: "text", text: responseText }],
+              details,
+            };
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: toolResult,
+              details,
+              isError: repairIncomplete,
+            });
+            const exec: CollectedToolExec = {
+              id: toolCallId,
+              tool: "sub_agent",
+              agent: "state-repair",
+              label: resolveToolLabel("sub_agent", "state-repair"),
+              status: repairIncomplete ? "error" : "completed",
+              args: toolArgs,
+              result: responseText,
+              details,
+              startedAt: Date.now(),
+              completedAt: Date.now(),
+            };
+            const route = resolveManualToolRoute(config, exec);
+            await appendManualSessionMessages(root, bookSession.sessionId, [
+              manualToolAssistantMessage(
+                responseText,
+                exec,
+                route.provider,
+                route.model,
+              ),
+            ], instruction, manualToolAppendOptions(sessionKind, exec));
+            await refreshBookSessionFromTranscript();
+            if (repairIncomplete) {
+              broadcast("agent:error", {
+                instruction,
+                activeBookId: repairBookId,
+                sessionId: bookSession.sessionId,
+                sessionKind,
+                error: responseText,
+              });
+            } else {
+              broadcast("agent:complete", {
+                instruction,
+                activeBookId: repairBookId,
+                sessionId: bookSession.sessionId,
+                sessionKind,
+              });
+            }
+            return c.json({
+              response: responseText,
+              session: {
+                sessionId: bookSession.sessionId,
+                sessionKind,
+                activeBookId: repairBookId,
+              },
+            });
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const toolResult = { content: [{ type: "text", text: message }] };
@@ -3894,8 +3925,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             manualToolAssistantMessage(
               message,
               exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
+              resolveManualToolRoute(config, exec).provider,
+              resolveManualToolRoute(config, exec).model,
             ),
           ], instruction, manualToolAppendOptions(sessionKind, exec)).catch(() => undefined);
           await refreshBookSessionFromTranscript().catch(() => undefined);
@@ -3977,8 +4008,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             manualToolAssistantMessage(
               responseText,
               exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
+              resolveManualToolRoute(config, exec).provider,
+              resolveManualToolRoute(config, exec).model,
             ),
           ], instruction, manualToolAppendOptions(sessionKind, exec));
           await refreshBookSessionFromTranscript();
@@ -4016,8 +4047,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             manualToolAssistantMessage(
               message,
               exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
+              resolveManualToolRoute(config, exec).provider,
+              resolveManualToolRoute(config, exec).model,
             ),
           ], instruction, manualToolAppendOptions(sessionKind, exec)).catch(() => undefined);
           await refreshBookSessionFromTranscript().catch(() => undefined);
@@ -4352,23 +4383,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     broadcast("audit:start", { bookId: id, chapter: chapterNum });
     try {
-      const book = await state.loadBookConfig(id);
       const chaptersDir = join(bookDir, "chapters");
       const files = await readdir(chaptersDir);
       const paddedNum = String(chapterNum).padStart(4, "0");
       const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
       if (!match) return c.json({ error: "Chapter not found" }, 404);
 
-      const content = await readFile(join(chaptersDir, match), "utf-8");
-      const currentConfig = await loadCurrentProjectConfig();
-      const { ContinuityAuditor } = await import("@actalk/inkos-core");
-      const auditor = new ContinuityAuditor({
-        client: createStudioLLMClient(currentConfig.llm),
-        model: currentConfig.llm.model,
-        projectRoot: root,
-        bookId: id,
-      });
-      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      const result = await pipeline.auditDraft(id, chapterNum);
       broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: result.passed });
       return c.json(result);
     } catch (e) {

@@ -1,4 +1,4 @@
-import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
+import type { LLMClient, LLMRequestDiagnosticsSink, OnStreamProgress } from "../llm/provider.js";
 import { chatCompletion, createLLMClient } from "../llm/provider.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
@@ -41,11 +41,14 @@ import {
 import { readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  buildStateDegradedPersistenceOutput,
   buildStateDegradedReviewNote,
+  buildIncompleteSettlementIssues,
   parseStateDegradedReviewNote,
   resolveStateDegradedBaseStatus,
   retrySettlementAfterValidationFailure,
 } from "./chapter-state-recovery.js";
+import { isIncompleteSettlementOutputError } from "../agents/settler-parser.js";
 import {
   clearChapterPersistenceJournal,
   loadChapterPersistenceJournal,
@@ -81,6 +84,16 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Ending Pattern Repetition", "结尾同构",
 ]);
 
+const INTERNAL_AGENT_ROUTE_FALLBACKS: Readonly<Record<string, readonly string[]>> = {
+  "state-validator": ["auditor"],
+  "chapter-analyzer": ["writer"],
+  "length-normalizer": ["reviser", "writer"],
+  planner: ["writer"],
+  composer: ["writer"],
+  "foundation-reviewer": ["architect"],
+  "fanfic-canon-importer": ["architect"],
+};
+
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
 }
@@ -104,6 +117,7 @@ export interface PipelineConfig {
   readonly modelOverrides?: Record<string, string | RuntimeAgentLLMOverride>;
   readonly inputGovernanceMode?: InputGovernanceMode;
   readonly logger?: Logger;
+  readonly onRequestDiagnostics?: LLMRequestDiagnosticsSink;
   readonly onStreamProgress?: OnStreamProgress;
   readonly onTextDelta?: (text: string, agent?: string) => void;
   readonly onContextCompression?: ContextCompressionCallback;
@@ -418,7 +432,13 @@ export class PipelineRunner {
   }
 
   private resolveOverride(agentName: string): { model: string; client: LLMClient } {
-    const override = this.config.modelOverrides?.[agentName];
+    const configuredAgent = [
+      agentName,
+      ...(INTERNAL_AGENT_ROUTE_FALLBACKS[agentName] ?? []),
+    ].find((candidate) => this.config.modelOverrides?.[candidate] !== undefined);
+    const override = configuredAgent
+      ? this.config.modelOverrides?.[configuredAgent]
+      : undefined;
     if (!override) {
       return { model: this.config.model, client: this.config.client };
     }
@@ -431,6 +451,7 @@ export class PipelineRunner {
       override.baseUrl !== undefined ||
       override.apiKeyEnv !== undefined ||
       override.apiKey !== undefined ||
+      override.proxyUrl !== undefined ||
       override.apiFormat !== undefined ||
       override.stream !== undefined;
     if (!hasClientOverride) {
@@ -448,11 +469,13 @@ export class PipelineRunner {
         : `base:${base?.apiKey ?? ""}`;
     const stream = override.stream ?? base?.stream ?? true;
     const apiFormat = override.apiFormat ?? base?.apiFormat ?? "chat";
+    const proxyUrl = override.proxyUrl ?? base?.proxyUrl;
     const cacheKey = [
       provider,
       service,
       baseUrl,
       apiKeySource,
+      `proxy:${proxyUrl ?? ""}`,
       `stream:${stream}`,
       `format:${apiFormat}`,
     ].join("|");
@@ -470,8 +493,12 @@ export class PipelineRunner {
         model: override.model,
         temperature: base?.temperature ?? 0.7,
         thinkingBudget: base?.thinkingBudget ?? 0,
+        proxyUrl,
         apiFormat,
         stream,
+        onRequestDiagnostics: this.config.onRequestDiagnostics
+          ? (diagnostics) => this.config.onRequestDiagnostics?.({ ...diagnostics, agent: agentName })
+          : undefined,
       });
       this.agentClients.set(cacheKey, client);
     }
@@ -480,8 +507,15 @@ export class PipelineRunner {
 
   private agentCtxFor(agent: string, bookId?: string): AgentContext {
     const { model, client } = this.resolveOverride(agent);
+    const scopedClient = this.config.onRequestDiagnostics
+      ? {
+          ...client,
+          onRequestDiagnostics: (diagnostics: Parameters<LLMRequestDiagnosticsSink>[0]) =>
+            this.config.onRequestDiagnostics?.({ ...diagnostics, agent }),
+        }
+      : client;
     return {
-      client,
+      client: scopedClient,
       model,
       projectRoot: this.config.projectRoot,
       bookId,
@@ -1781,7 +1815,30 @@ export class PipelineRunner {
     ]);
     let chapterStatus: ChapterPipelineResult["status"] | null = null;
     let degradedIssues: ReadonlyArray<AuditIssue> = [];
-    if (!quickMode) {
+    if (persistenceOutput.settlementFailure) {
+      const settlementIssue: AuditIssue = {
+        severity: "warning",
+        category: "state-settlement",
+        description: pipelineLang === "en"
+          ? `State settlement failed after the chapter body was generated: ${persistenceOutput.settlementFailure}`
+          : `正文已生成，但状态结算失败：${persistenceOutput.settlementFailure}`,
+        suggestion: pipelineLang === "en"
+          ? "Repair chapter state after network/model service recovers; truth files were not advanced."
+          : "网络或模型服务恢复后运行章节状态修复；本次不会推进真相文件。",
+      };
+      chapterStatus = "state-degraded";
+      degradedIssues = [settlementIssue];
+      persistenceOutput = buildStateDegradedPersistenceOutput({
+        output: persistenceOutput,
+        oldState,
+        oldHooks,
+        oldLedger,
+      });
+      auditResult = {
+        ...auditResult,
+        issues: [...auditResult.issues, settlementIssue],
+      };
+    } else if (!quickMode) {
       const validator = new StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
       const truthValidation = await validateChapterTruthPersistence({
         writer,
@@ -1957,10 +2014,18 @@ export class PipelineRunner {
     const pipelineLang = book.language ?? gp.language;
     const content = await this.readChapterContent(bookDir, targetChapter);
     const storyDir = join(bookDir, "story");
-    const [oldState, oldHooks] = await Promise.all([
+    const [oldState, oldHooks, authorityStoryFrame, authorityBookRules, authorityChapterSummaries] = await Promise.all([
       readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
+      readStoryFrame(bookDir).catch(() => ""),
+      readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
     ]);
+    const authorityContext = {
+      storyFrame: authorityStoryFrame,
+      bookRules: authorityBookRules,
+      chapterSummaries: authorityChapterSummaries,
+    };
 
     // A degraded chapter never persisted its settlement, so the Markdown truth
     // files remain the last authoritative state. Rebuild structured state first
@@ -1971,14 +2036,40 @@ export class PipelineRunner {
     });
 
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
-    let repairedOutput = await writer.settleChapterState({
-      book,
-      bookDir,
-      chapterNumber: targetChapter,
-      title: targetMeta.title,
-      content,
-      allowReapply: true,
-    });
+    let repairedOutput: WriteChapterOutput;
+    try {
+      repairedOutput = await writer.settleChapterState({
+        book,
+        bookDir,
+        chapterNumber: targetChapter,
+        title: targetMeta.title,
+        content,
+        allowReapply: true,
+      });
+    } catch (error) {
+      if (!isIncompleteSettlementOutputError(error)) {
+        throw error;
+      }
+      const issues = buildIncompleteSettlementIssues(targetChapter, pipelineLang);
+      this.config.logger?.warn(
+        `State repair returned incomplete truth blocks for chapter ${targetChapter}: ${String(error)}`,
+      );
+      return {
+        chapterNumber: targetChapter,
+        title: targetMeta.title,
+        wordCount: targetMeta.wordCount,
+        auditResult: {
+          passed: false,
+          issues,
+          summary: issues[0]?.description ?? "state repair returned incomplete settlement output",
+        },
+        revised: false,
+        status: "state-degraded",
+        lengthWarnings: targetMeta.lengthWarnings,
+        lengthTelemetry: targetMeta.lengthTelemetry,
+        tokenUsage: targetMeta.tokenUsage,
+      };
+    }
     const validator = new StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
     let validation = await validator.validate(
       content,
@@ -1988,6 +2079,7 @@ export class PipelineRunner {
       oldHooks,
       repairedOutput.updatedHooks,
       pipelineLang,
+      authorityContext,
     );
 
     if (!validation.passed) {
@@ -2002,6 +2094,7 @@ export class PipelineRunner {
         oldState,
         oldHooks,
         originalValidation: validation,
+        authorityContext,
         language: pipelineLang,
         logWarn: (message) => this.logWarn(pipelineLang, message),
         logger: this.config.logger,
@@ -2753,6 +2846,15 @@ ${matrix}`,
       ruleStack: RuleStack;
     },
   ): Promise<WriteChapterOutput> {
+    if (output.settlementFailure) {
+      return {
+        ...output,
+        content: finalContent,
+        wordCount: countChapterLength(finalContent, countingMode),
+        postWriteErrors: [],
+        postWriteWarnings: [],
+      };
+    }
     if (finalContent === output.content) {
       return output;
     }

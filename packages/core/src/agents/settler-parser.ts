@@ -11,6 +11,21 @@ export interface SettlementOutput {
   readonly updatedCharacterMatrix: string;
 }
 
+export class IncompleteSettlementOutputError extends Error {
+  constructor(message = "legacy settlement output is incomplete: expected UPDATED_STATE and UPDATED_HOOKS") {
+    super(message);
+    this.name = "IncompleteSettlementOutputError";
+  }
+}
+
+export function isIncompleteSettlementOutputError(error: unknown): boolean {
+  return error instanceof IncompleteSettlementOutputError
+    || (
+      error instanceof Error
+      && /legacy settlement output is incomplete/i.test(error.message)
+    );
+}
+
 export function parseSettlementOutput(
   content: string,
   genreProfile: GenreProfile,
@@ -27,9 +42,7 @@ export function parseSettlementOutput(
   const updatedLedger = extract("UPDATED_LEDGER");
   const updatedHooks = extract("UPDATED_HOOKS");
   if (!updatedState || !updatedHooks) {
-    throw new Error(
-      "legacy settlement output is incomplete: expected UPDATED_STATE and UPDATED_HOOKS",
-    );
+    throw new IncompleteSettlementOutputError();
   }
 
   return {

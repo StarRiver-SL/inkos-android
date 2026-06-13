@@ -115,6 +115,7 @@ export interface LLMMessage {
 }
 
 export interface LLMRequestDiagnostics {
+  readonly agent?: string;
   readonly service?: string;
   readonly model: string;
   readonly apiFormat: "chat" | "responses";
@@ -461,7 +462,7 @@ export function assertWithinContextWindow(params: {
 function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; readonly model?: string; readonly service?: string }): Error {
   const msg = String(error);
   const ctxLine = context
-    ? `\n  (baseUrl: ${context.baseUrl}, model: ${context.model})`
+    ? `\n  (service: ${context.service ?? "unknown"}, baseUrl: ${context.baseUrl}, model: ${context.model})`
     : "";
 
   if (msg.includes("400")) {
@@ -521,7 +522,7 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `  1. baseUrl 地址不正确（当前：${context?.baseUrl ?? "未知"}）\n` +
       `  2. 网络不通或被防火墙拦截\n` +
       `  3. API 服务暂时不可用\n` +
-      `  建议：检查 INKOS_LLM_BASE_URL 是否包含完整路径（如 /v1）`,
+      `  建议：检查该 Agent 的模型服务配置，并确认当前网络可访问此地址。${ctxLine}`,
     );
   }
   // R4 Bug 2: 5xx "status code (no body)" — 尝试从 OpenAI SDK APIError 里抽 body 给用户看具体原因
@@ -568,6 +569,12 @@ function collectErrorText(error: unknown, depth = 0): string {
 function isTransientLLMTransportError(error: unknown): boolean {
   const text = collectErrorText(error);
   return [
+    "Connection error",
+    "connection failed",
+    "fetch failed",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "ECONNREFUSED",
     "terminated",
     "UND_ERR_SOCKET",
     "ECONNRESET",
@@ -953,7 +960,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
   onTextDelta?: (text: string) => void,
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
-  const errorCtx = { baseUrl, model, service: client.service };
+  const errorCtx = { baseUrl, model, service: client.service ?? client.provider };
   const extra = stripReservedKeys(resolved.extra);
   const payload: Record<string, unknown> = {
     model,
@@ -1042,6 +1049,8 @@ async function chatCompletionViaCustomAnthropicCompatible(
         }
       }
     }
+  } catch (error) {
+    throw wrapLLMError(error, errorCtx);
   } finally {
     monitor.stop();
   }
@@ -1082,7 +1091,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   }
   const baseUrl = client._piModel?.baseUrl ?? "";
   const headers = buildCustomHeaders(client);
-  const errorCtx = { baseUrl, model, service: client.service };
+  const errorCtx = { baseUrl, model, service: client.service ?? client.provider };
   const extra = stripReservedKeys(resolved.extra);
   const effectiveMaxTokens = compatibility.maxTokensOverride ?? resolved.maxTokens;
   const maxTokensCappedFrom = compatibility.maxTokensOverride !== undefined && compatibility.maxTokensOverride < resolved.maxTokens
@@ -1115,11 +1124,23 @@ async function chatCompletionViaCustomOpenAICompatible(
         maxTokensCappedFrom,
       },
     });
-    const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/responses`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    }, client.proxyUrl);
+    let response: Response;
+    try {
+      response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      }, client.proxyUrl);
+    } catch (error) {
+      if (client.stream && !compatibility.forceNonStream && isTransientLLMTransportError(error)) {
+        return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+          ...compatibility,
+          forceNonStream: true,
+          maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+        });
+      }
+      throw wrapLLMError(error, errorCtx);
+    }
     if (!response.ok) {
       const detail = await readErrorResponse(response);
       if ((response.status === 400 || response.status === 403) && effectiveMaxTokens > CUSTOM_COMPAT_SAFE_MAX_TOKENS && isTokenLimitRejectedErrorText(detail)) {
@@ -1193,6 +1214,15 @@ async function chatCompletionViaCustomOpenAICompatible(
           }
         }
       }
+    } catch (error) {
+      if (!content && client.stream && !compatibility.forceNonStream && isTransientLLMTransportError(error)) {
+        return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+          ...compatibility,
+          forceNonStream: true,
+          maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+        });
+      }
+      throw wrapLLMError(error, errorCtx);
     } finally {
       monitor.stop();
     }
@@ -1235,11 +1265,23 @@ async function chatCompletionViaCustomOpenAICompatible(
       maxTokensCappedFrom,
     },
   });
-  const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  }, client.proxyUrl);
+  let response: Response;
+  try {
+    response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }, client.proxyUrl);
+  } catch (error) {
+    if (client.stream && !compatibility.forceNonStream && isTransientLLMTransportError(error)) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        forceNonStream: true,
+        maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+      });
+    }
+    throw wrapLLMError(error, errorCtx);
+  }
   if (!response.ok) {
     const detail = await readErrorResponse(response);
     if (response.status === 400 && !compatibility.omitTemperature && isUnsupportedParameterErrorText(detail, "temperature")) {
@@ -1354,6 +1396,15 @@ async function chatCompletionViaCustomOpenAICompatible(
         }
       }
     }
+  } catch (error) {
+    if (!content && !reasoningContent && client.stream && !compatibility.forceNonStream && isTransientLLMTransportError(error)) {
+      return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, {
+        ...compatibility,
+        forceNonStream: true,
+        maxTokensOverride: capCustomCompatMaxTokens(effectiveMaxTokens),
+      });
+    }
+    throw wrapLLMError(error, errorCtx);
   } finally {
     monitor.stop();
   }
@@ -1394,7 +1445,11 @@ export async function chatCompletion(
   };
   const onStreamProgress = options?.onStreamProgress;
   const onTextDelta = options?.onTextDelta;
-  const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
+  const errorCtx = {
+    baseUrl: client._piModel?.baseUrl ?? "(unknown)",
+    model,
+    service: client.service ?? client.provider,
+  };
 
   try {
     return await withTransientLLMRetry(

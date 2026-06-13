@@ -152,6 +152,7 @@ export interface WriteChapterOutput {
     readonly description: string;
     readonly suggestion: string;
   }>;
+  readonly settlementFailure?: string;
   readonly tokenUsage?: TokenUsage;
 }
 
@@ -514,53 +515,73 @@ export class WriterAgent extends BaseAgent {
       : characterMatrix;
     const originalSettlementContext = await readWriterSettleContext(bookDir);
 
-    const settleResult = await this.settle({
-      book,
-      genreProfile,
-      bookRules,
-      chapterNumber,
-      title: creative.title,
-      content: creative.content,
-      currentState,
-      ledger: genreProfile.numericalSystem ? ledger : "",
-      hooks: filteredHooksForSettlement,
-      chapterSummaries: processedContextPackage ? filterSummaries(chapterSummaries, chapterNumber) : chapterSummaries,
-      subplotBoard: filteredSubplotsForSettlement,
-      emotionalArcs: filteredArcsForSettlement,
-      characterMatrix: filteredMatrixForSettlement,
-      volumeOutline,
-      selectedEvidenceBlock: processedGovernedMemoryBlocks
-        ? this.joinGovernedEvidenceBlocks(processedGovernedMemoryBlocks)
-        : undefined,
-      chapterIntent: input.chapterIntent,
-      contextPackage: processedContextPackage,
-      ruleStack: input.ruleStack,
-      validationFeedback: undefined,
-      originalHooks: originalSettlementContext.hooks,
-      originalSubplots: originalSettlementContext.subplotBoard,
-      originalEmotionalArcs: originalSettlementContext.emotionalArcs,
-      originalCharacterMatrix: originalSettlementContext.characterMatrix,
-      contextCache,
-    });
-    const settlement = settleResult.settlement;
-    const settleUsage = settleResult.usage;
-    const runtimeStateArtifacts = await this.buildRuntimeStateArtifactsIfPresent(
-      bookDir,
-      settlement.runtimeStateDelta,
-      resolvedLanguage,
-      chapterNumber,
-    );
-    const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
+    let settleResult: {
+      settlement: ReturnType<typeof parseSettlementOutput> & {
+        runtimeStateDelta?: RuntimeStateDelta;
+        runtimeStateSnapshot?: RuntimeStateSnapshot;
+      };
+      usage: TokenUsage;
+    } | undefined;
+    let settlementFailure: string | undefined;
+    try {
+      settleResult = await this.settle({
+        book,
+        genreProfile,
+        bookRules,
+        chapterNumber,
+        title: creative.title,
+        content: creative.content,
+        currentState,
+        ledger: genreProfile.numericalSystem ? ledger : "",
+        hooks: filteredHooksForSettlement,
+        chapterSummaries: processedContextPackage ? filterSummaries(chapterSummaries, chapterNumber) : chapterSummaries,
+        subplotBoard: filteredSubplotsForSettlement,
+        emotionalArcs: filteredArcsForSettlement,
+        characterMatrix: filteredMatrixForSettlement,
+        volumeOutline,
+        selectedEvidenceBlock: processedGovernedMemoryBlocks
+          ? this.joinGovernedEvidenceBlocks(processedGovernedMemoryBlocks)
+          : undefined,
+        chapterIntent: input.chapterIntent,
+        contextPackage: processedContextPackage,
+        ruleStack: input.ruleStack,
+        validationFeedback: undefined,
+        originalHooks: originalSettlementContext.hooks,
+        originalSubplots: originalSettlementContext.subplotBoard,
+        originalEmotionalArcs: originalSettlementContext.emotionalArcs,
+        originalCharacterMatrix: originalSettlementContext.characterMatrix,
+        contextCache,
+      });
+    } catch (error) {
+      settlementFailure = error instanceof Error ? error.message : String(error);
+      this.logWarn(resolvedLanguage, {
+        zh: `状态结算失败：正文已保留，章节将标记为状态降级。${settlementFailure}`,
+        en: `State settlement failed: chapter body is preserved and will be marked state-degraded. ${settlementFailure}`,
+      });
+    }
+    const settlement = settleResult?.settlement;
+    const settleUsage = settleResult?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    const runtimeStateArtifacts = settlement
+      ? await this.buildRuntimeStateArtifactsIfPresent(
+          bookDir,
+          settlement.runtimeStateDelta,
+          resolvedLanguage,
+          chapterNumber,
+        )
+      : undefined;
+    const resolvedRuntimeStateDelta = settlement
+      ? runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta
+      : undefined;
     const priorHookIds = new Set(
       parsePendingHooksMarkdown(originalSettlementContext.hooks).map((hook) => hook.hookId),
     );
     const hookHealthIssues = resolvedRuntimeStateDelta
-      && (runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot)
+      && (runtimeStateArtifacts?.snapshot ?? settlement?.runtimeStateSnapshot)
       ? analyzeHookHealth({
           language: resolvedLanguage,
           chapterNumber,
           targetChapters: book.targetChapters,
-          hooks: (runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot)!.hooks.hooks,
+          hooks: (runtimeStateArtifacts?.snapshot ?? settlement?.runtimeStateSnapshot)!.hooks.hooks,
           delta: resolvedRuntimeStateDelta,
           existingHookIds: [...priorHookIds],
         })
@@ -621,22 +642,23 @@ export class WriterAgent extends BaseAgent {
       content: surfaceNormalizedContent,
       wordCount: surfaceNormalizedWordCount,
       preWriteCheck: creative.preWriteCheck,
-      postSettlement: settlement.postSettlement,
+      postSettlement: settlement?.postSettlement ?? "",
       runtimeStateDelta: resolvedRuntimeStateDelta,
-      runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
-      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedLedger: settlement.updatedLedger,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement?.runtimeStateSnapshot,
+      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement?.updatedState ?? originalSettlementContext.currentState,
+      updatedLedger: settlement?.updatedLedger ?? originalSettlementContext.ledger,
+      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement?.updatedHooks ?? originalSettlementContext.hooks,
       chapterSummary: resolvedRuntimeStateDelta
         ? this.renderDeltaSummaryRow(resolvedRuntimeStateDelta)
-        : settlement.chapterSummary,
+        : settlement?.chapterSummary ?? "",
       updatedChapterSummaries: runtimeStateArtifacts?.chapterSummariesMarkdown,
-      updatedSubplots: settlement.updatedSubplots,
-      updatedEmotionalArcs: settlement.updatedEmotionalArcs,
-      updatedCharacterMatrix: settlement.updatedCharacterMatrix,
+      updatedSubplots: settlement?.updatedSubplots ?? originalSettlementContext.subplotBoard,
+      updatedEmotionalArcs: settlement?.updatedEmotionalArcs ?? originalSettlementContext.emotionalArcs,
+      updatedCharacterMatrix: settlement?.updatedCharacterMatrix ?? originalSettlementContext.characterMatrix,
       postWriteErrors,
       postWriteWarnings,
       hookHealthIssues,
+      settlementFailure,
       tokenUsage,
     };
   }

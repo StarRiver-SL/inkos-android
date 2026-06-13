@@ -28,11 +28,24 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    return chatCompletion(this.ctx.client, this.ctx.model, messages, {
-      ...options,
-      onStreamProgress: this.ctx.onStreamProgress,
-      onTextDelta: this.ctx.onTextDelta,
-    });
+    const service = this.ctx.client.service ?? this.ctx.client.provider;
+    const baseUrl = this.ctx.client._piModel?.baseUrl ?? "(unknown)";
+    this.log?.info(
+      `LLM request agent=${this.name} service=${service} model=${this.ctx.model} baseUrl=${baseUrl}`,
+    );
+    try {
+      return await chatCompletion(this.ctx.client, this.ctx.model, messages, {
+        ...options,
+        onStreamProgress: this.ctx.onStreamProgress,
+        onTextDelta: this.ctx.onTextDelta,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Agent "${this.name}" request failed (service=${service}, model=${this.ctx.model}, baseUrl=${baseUrl}).\n${detail}`,
+        { cause: error },
+      );
+    }
   }
 
   /**

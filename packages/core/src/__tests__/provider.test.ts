@@ -204,7 +204,22 @@ describe("chatCompletion via pi-ai", () => {
     );
 
     expect(error.message).toContain("无法连接到 API 服务");
+    expect(error.message).toContain("service: openai");
+    expect(error.message).toContain("baseUrl: https://api.openai.com/v1");
+    expect(error.message).toContain("model: test-model");
     expect(error.message).not.toMatch(/kkaiapi/i);
+  });
+
+  it("retries generic fetch failures before failing the chapter pipeline", async () => {
+    mockStreamSimple
+      .mockReturnValueOnce(makeErrorStream("TypeError: fetch failed; cause: EAI_AGAIN"))
+      .mockReturnValueOnce(makeTextStream("recovered"));
+
+    const client = makeClient();
+    const result = await chatCompletion(client, "test-model", [{ role: "user", content: "ping" }]);
+
+    expect(result.content).toBe("recovered");
+    expect(mockStreamSimple).toHaveBeenCalledTimes(2);
   });
 
   it("retries transient socket termination errors before failing the chapter pipeline", async () => {
@@ -467,6 +482,41 @@ describe("chatCompletion via pi-ai", () => {
       method: "POST",
       dispatcher: expect.any(Object),
     });
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to non-stream custom chat when the streaming connection fails", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "non-stream fallback" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = makeClient(0.7, {
+      service: "custom",
+      stream: true,
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "openai",
+        baseUrl: "https://gateway.example/v1",
+      },
+    });
+    const result = await chatCompletion(client, "agnes-2.0-flash", [{ role: "user", content: "revise" }], {
+      retry: false,
+    });
+
+    expect(result.content).toBe("non-stream fallback");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const secondPayload = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(firstPayload.stream).toBe(true);
+    expect(secondPayload.stream).toBe(false);
 
     vi.unstubAllGlobals();
   });

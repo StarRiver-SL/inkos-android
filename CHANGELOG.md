@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.5.3
+
+### Release Focus
+
+Improve long-form writing reliability across multi-Agent routing, provider transport, chapter audit, and degraded state recovery.
+
+### Bug Fixes
+
+- Route writing, audit, revision, and state-repair tasks through the models configured in Project Settings instead of the chat composer model.
+- Make hidden pipeline agents inherit their matching visible Agent route, including `state-validator` inheriting the Auditor connection rather than an unrelated global fallback.
+- Retry compatible custom providers without streaming when a streaming connection fails before returning content.
+- Keep a generated chapter when the reviser transport fails, and report the audit failure without discarding the draft.
+- Preserve degraded chapter status when settlement output is incomplete instead of writing partial truth files.
+- Stop presenting `state-degraded` repair results as successful recovery, and include the underlying validation issue in the UI.
+- Improve end-of-chapter state validation so transient events are not mistaken for final state contradictions.
+
+### Diagnostics
+
+- Add Agent names, service, model, and base URL to LLM request diagnostics.
+- Preserve per-Agent proxy and connection settings when switching between pipeline roles.
+
 ## v1.4.1
 
 ### Release Focus

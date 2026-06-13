@@ -111,6 +111,7 @@ export const AgentLLMOverrideSchema = z.object({
   provider: z.enum(["anthropic", "openai", "custom"]).optional(),
   baseUrl: z.string().url().optional(),
   apiKeyEnv: z.string().optional(),
+  proxyUrl: z.string().url().optional(),
   apiFormat: z.enum(["chat", "responses"]).optional(),
   stream: z.boolean().optional(),
 });

@@ -10,10 +10,12 @@ import type { ChapterMeta } from "../models/chapter.js";
 import {
   buildStateDegradedPersistenceOutput,
   buildStateDegradedReviewNote,
+  buildIncompleteSettlementIssues,
   parseStateDegradedReviewNote,
   resolveStateDegradedBaseStatus,
   retrySettlementAfterValidationFailure,
 } from "../pipeline/chapter-state-recovery.js";
+import { IncompleteSettlementOutputError } from "../agents/settler-parser.js";
 
 function createBook(): BookConfig {
   return {
@@ -125,6 +127,7 @@ describe("chapter-state-recovery", () => {
 
     expect(result.kind).toBe("recovered");
     expect(capturedFeedback).toContain("上一次状态结算未通过校验");
+    expect(capturedFeedback).toContain("State Card 表示章末快照");
     expect(capturedFeedback).toContain("铜牌位置与正文矛盾");
     expect(writer.settleChapterState).toHaveBeenCalledWith(expect.objectContaining({
       allowReapply: true,
@@ -133,6 +136,48 @@ describe("chapter-state-recovery", () => {
       zh: expect.stringContaining("仅重试结算层"),
     }));
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("preserves authority context when validating a settlement retry", async () => {
+    const validator = {
+      validate: vi.fn(async () => createValidationResult({
+        passed: true,
+        warnings: [],
+      })),
+    };
+    const authorityContext = {
+      storyFrame: "# Story Frame\n\n手机最后被拆电池隔离。",
+      bookRules: "# Rules\n\nState Card is end-of-chapter snapshot.",
+      chapterSummaries: "| 2 | 收到短信后关机拆电池 |",
+    };
+
+    await retrySettlementAfterValidationFailure({
+      writer: {
+        settleChapterState: vi.fn(async () => createWriteChapterOutput()),
+      } as never,
+      validator: validator as never,
+      book: createBook(),
+      bookDir: "/tmp/test-book",
+      chapterNumber: 3,
+      title: "第三章",
+      content: "手机先收到短信，随后关机并拆下电池。",
+      oldState: "old state",
+      oldHooks: "old hooks",
+      originalValidation: createValidationResult(),
+      authorityContext,
+      language: "zh",
+    });
+
+    expect(validator.validate).toHaveBeenCalledWith(
+      "手机先收到短信，随后关机并拆下电池。",
+      3,
+      "old state",
+      "new state",
+      "old hooks",
+      "new hooks",
+      "zh",
+      authorityContext,
+    );
   });
 
   it("returns localized degraded issues when settlement retry still fails", async () => {
@@ -175,6 +220,36 @@ describe("chapter-state-recovery", () => {
         }),
       ]);
     }
+  });
+
+  it("degrades instead of throwing when settlement retry returns incomplete legacy output", async () => {
+    const warn = vi.fn();
+    const result = await retrySettlementAfterValidationFailure({
+      writer: {
+        settleChapterState: vi.fn(async () => {
+          throw new IncompleteSettlementOutputError();
+        }),
+      } as never,
+      validator: {
+        validate: vi.fn(),
+      } as never,
+      book: createBook(),
+      bookDir: "/tmp/test-book",
+      chapterNumber: 3,
+      title: "Chapter 3",
+      content: "Body",
+      oldState: "old state",
+      oldHooks: "old hooks",
+      originalValidation: createValidationResult(),
+      language: "en",
+      logger: { warn } as never,
+    });
+
+    expect(result.kind).toBe("degraded");
+    if (result.kind === "degraded") {
+      expect(result.issues).toEqual(buildIncompleteSettlementIssues(3, "en"));
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("incomplete truth blocks"));
   });
 
   it("freezes truth outputs when degrading persisted settlement", () => {

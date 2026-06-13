@@ -24,6 +24,8 @@ import { MemoryDB } from "../state/memory-db.js";
 import * as memoryDbModule from "../state/memory-db.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 
+vi.setConfig({ testTimeout: 20_000 });
+
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
   try {
@@ -324,6 +326,94 @@ describe("PipelineRunner", () => {
     expect(onTextDelta).toHaveBeenCalledWith("正文片段", "writer");
   });
 
+  it("routes state validation through the configured auditor model", () => {
+    const baseClient = {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: false,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"];
+    const runner = new PipelineRunner({
+      client: baseClient,
+      model: "unselected-global-model",
+      projectRoot: process.cwd(),
+      defaultLLMConfig: {
+        provider: "custom",
+        service: "custom",
+        configSource: "env",
+        baseUrl: "https://legacy.example/v1",
+        apiKey: "legacy-key",
+        model: "unselected-global-model",
+        temperature: 0.7,
+        thinkingBudget: 0,
+        apiFormat: "chat",
+        stream: false,
+      },
+      modelOverrides: {
+        auditor: {
+          model: "auditor-model",
+          provider: "custom",
+          service: "custom:auditor",
+          baseUrl: "https://auditor.example/v1",
+          apiKey: "auditor-key",
+        },
+      },
+    });
+
+    const resolved = (
+      runner as unknown as {
+        resolveOverride: (agent: string) => {
+          model: string;
+          client: {
+            service?: string;
+            _piModel?: { baseUrl?: string };
+            _apiKey?: string;
+          };
+        };
+      }
+    ).resolveOverride("state-validator");
+
+    expect(resolved.model).toBe("auditor-model");
+    expect(resolved.client.service).toBe("custom:auditor");
+    expect(resolved.client._piModel?.baseUrl).toBe("https://auditor.example/v1");
+    expect(resolved.client._apiKey).toBe("auditor-key");
+  });
+
+  it("prefers an explicit state-validator override over the auditor route", () => {
+    const baseClient = {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: false,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"];
+    const runner = new PipelineRunner({
+      client: baseClient,
+      model: "base-model",
+      projectRoot: process.cwd(),
+      modelOverrides: {
+        auditor: "auditor-model",
+        "state-validator": "validator-model",
+      },
+    });
+
+    const resolved = (
+      runner as unknown as {
+        resolveOverride: (agent: string) => { model: string; client: unknown };
+      }
+    ).resolveOverride("state-validator");
+
+    expect(resolved.model).toBe("validator-model");
+    expect(resolved.client).toBe(baseClient);
+  });
+
   it("does not reuse override clients when credential sources differ", () => {
     const previousKeyA = process.env.TEST_KEY_A;
     const previousKeyB = process.env.TEST_KEY_B;
@@ -448,6 +538,7 @@ describe("PipelineRunner", () => {
           model: "base-model",
           temperature: 0.7,
           thinkingBudget: 0,
+          proxyUrl: "http://127.0.0.1:7890",
           apiFormat: "chat",
           stream: true,
         },
@@ -460,6 +551,7 @@ describe("PipelineRunner", () => {
             stream: false,
           },
         },
+        onRequestDiagnostics: vi.fn(),
       });
 
       const resolved = (
@@ -470,8 +562,10 @@ describe("PipelineRunner", () => {
               service?: string;
               _piModel?: { baseUrl?: string };
               _apiKey?: string;
+              proxyUrl?: string;
               apiFormat: string;
               stream: boolean;
+              onRequestDiagnostics?: unknown;
             };
           };
         }
@@ -482,8 +576,10 @@ describe("PipelineRunner", () => {
       expect(resolved.client.service).toBe("deepseek");
       expect(resolved.client._piModel?.baseUrl).toContain("deepseek.com");
       expect(resolved.client._apiKey).toBe("agent-service-key");
+      expect(resolved.client.proxyUrl).toBe("http://127.0.0.1:7890");
       expect(resolved.client.apiFormat).toBe("chat");
       expect(resolved.client.stream).toBe(false);
+      expect(resolved.client.onRequestDiagnostics).toEqual(expect.any(Function));
     } finally {
       if (previousKey === undefined) delete process.env.TEST_AGENT_SERVICE_KEY;
       else process.env.TEST_AGENT_SERVICE_KEY = previousKey;
@@ -3079,6 +3175,59 @@ describe("PipelineRunner", () => {
     await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe("stable hooks");
     await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8")).resolves.toBe("stable ledger");
     await expect(readdir(chaptersDir)).resolves.toContain("0001_Test_Chapter.md");
+    await expect(stat(join(storyDir, "snapshots", "1"))).rejects.toThrow();
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("preserves generated chapter body as state-degraded when settlement API fails", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "stable ledger", "utf-8"),
+    ]);
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        title: "Network Kept Body",
+        content: "正文已经写完，但状态结算阶段网络断开。",
+        wordCount: "正文已经写完，但状态结算阶段网络断开。".length,
+        updatedState: "unstable generated state",
+        updatedHooks: "unstable generated hooks",
+        updatedLedger: "unstable generated ledger",
+        settlementFailure: "Agent \"writer\" request failed (service=custom:mimo, model=mimo-v2-omni, baseUrl=https://token-plan-cn.xiaomimimo.com/v1).",
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    const validateSpy = vi.spyOn(StateValidatorAgent.prototype, "validate");
+
+    const result = await runner.writeNextChapter(bookId);
+    const savedIndex = await state.loadChapterIndex(bookId);
+
+    expect(result.status).toBe("state-degraded");
+    expect(savedIndex[0]?.status).toBe("state-degraded");
+    expect(savedIndex[0]?.auditIssues).toEqual([
+      expect.stringContaining("正文已生成，但状态结算失败"),
+    ]);
+    expect(validateSpy).not.toHaveBeenCalled();
+    await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe("stable state");
+    await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe("stable hooks");
+    await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8")).resolves.toBe("stable ledger");
+    await expect(readdir(chaptersDir)).resolves.toContain("0001_Network_Kept_Body.md");
+    await expect(readFile(join(chaptersDir, "0001_Network_Kept_Body.md"), "utf-8")).resolves.toContain("正文已经写完");
     await expect(stat(join(storyDir, "snapshots", "1"))).rejects.toThrow();
 
     await rm(root, { recursive: true, force: true });

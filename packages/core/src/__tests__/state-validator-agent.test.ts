@@ -219,6 +219,44 @@ describe("StateValidatorAgent", () => {
     expect(messages[1]?.content).toContain("第1章：发现第五条规则的漏洞");
   });
 
+  it("instructs validation to compare the state card with the final chronological state", async () => {
+    const agent = new StateValidatorAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 8192,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const chatSpy = vi.spyOn(
+      agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> },
+      "chat",
+    ).mockResolvedValue({ content: "PASS", usage: ZERO_USAGE });
+
+    await agent.validate(
+      "The phone received two messages. Later, he powered it off and removed the battery.",
+      5,
+      "| Device | Phone active |",
+      "| Device | Phone physically isolated |",
+      "old hooks",
+      "new hooks",
+      "en",
+    );
+
+    const messages = chatSpy.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+    expect(messages[0]?.content).toContain("snapshot taken at the END of the chapter");
+    expect(messages[0]?.content).toContain("receiving messages earlier does not contradict");
+    expect(messages[1]?.content).toContain("later explicit state changes override earlier conditions");
+  });
+
   it("does not silently truncate chapter or authority context before validation", async () => {
     const agent = new StateValidatorAgent({
       client: {

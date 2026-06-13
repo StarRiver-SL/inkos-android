@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseSettlementOutput } from "../agents/settler-parser.js";
+import {
+  IncompleteSettlementOutputError,
+  parseSettlementOutput,
+} from "../agents/settler-parser.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 
 function genreProfile(numericalSystem: boolean): GenreProfile {
@@ -16,6 +19,15 @@ describe("parseSettlementOutput", () => {
         genreProfile(false),
       ),
     ).toThrow(/legacy settlement output is incomplete/i);
+  });
+
+  it("marks incomplete legacy output with a typed error", () => {
+    expect(() =>
+      parseSettlementOutput(
+        "=== UPDATED_STATE ===\n# Current State",
+        genreProfile(false),
+      ),
+    ).toThrow(IncompleteSettlementOutputError);
   });
 
   it("keeps legacy numerical output compatible when only the ledger is omitted", () => {

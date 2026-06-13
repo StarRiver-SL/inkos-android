@@ -15,6 +15,7 @@ const initImitationBookMock = vi.fn();
 const consolidateMock = vi.fn();
 const evaluateBookQualityMock = vi.fn();
 const reviseDraftMock = vi.fn();
+const auditDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
@@ -197,6 +198,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     initSpinoffBook = initSpinoffBookMock;
     initImitationBook = initImitationBookMock;
     reviseDraft = reviseDraftMock;
+    auditDraft = auditDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
   }
@@ -382,6 +384,7 @@ describe("createStudioServer daemon lifecycle", () => {
     consolidateMock.mockReset();
     evaluateBookQualityMock.mockReset();
     reviseDraftMock.mockReset();
+    auditDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
@@ -428,6 +431,12 @@ describe("createStudioServer daemon lifecycle", () => {
       fixedIssues: ["focus restored"],
       applied: true,
       status: "ready-for-review",
+    });
+    auditDraftMock.mockResolvedValue({
+      chapterNumber: 3,
+      passed: true,
+      issues: [],
+      summary: "ok",
     });
     resyncChapterArtifactsMock.mockResolvedValue({
       chapterNumber: 3,
@@ -3051,6 +3060,68 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   }, 10_000);
 
+  it("keeps chat-selected models out of production write pipelines", async () => {
+    await writeFile(
+      join(root, "inkos.json"),
+      JSON.stringify({
+        ...cloneProjectConfig(),
+        llm: {
+          ...cloneProjectConfig().llm,
+          model: "project-default-model",
+        },
+        modelOverrides: {
+          writer: "writer-route-model",
+          auditor: "auditor-route-model",
+        },
+      }, null, 2),
+      "utf-8",
+    );
+    resolveServiceModelMock.mockResolvedValueOnce({
+      model: { id: "chat-selected-model", provider: "openai", api: "openai-chat" },
+      apiKey: "sk-chat",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "缁х画",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        sessionKind: "book",
+        actionSource: "quick-action",
+        requestedIntent: "write_next",
+        service: "openai",
+        model: "chat-selected-model",
+      }),
+    });
+
+    const body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
+    expect(pipelineConfigs.at(-1)).toMatchObject({
+      model: "project-default-model",
+      onRequestDiagnostics: expect.any(Function),
+      modelOverrides: {
+        writer: "writer-route-model",
+        auditor: "auditor-route-model",
+      },
+    });
+    expect(appendManualSessionMessagesMock).toHaveBeenCalledWith(
+      root,
+      "agent-session-1",
+      [expect.objectContaining({
+        provider: projectConfig.llm.provider,
+        model: "writer-route-model",
+      })],
+      expect.any(String),
+      expect.any(Object),
+    );
+  }, 10_000);
+
   it("does not present audit-failed direct write-next as completed", async () => {
     writeNextChapterMock.mockResolvedValueOnce({
       chapterNumber: 3,
@@ -3099,6 +3170,77 @@ describe("createStudioServer daemon lifecycle", () => {
               status: "error",
               result: expect.stringContaining("审稿未通过"),
               details: expect.objectContaining({ kind: "chapter_written", bookId: "demo-book", status: "audit-failed" }),
+            }),
+          ],
+        },
+      }),
+    );
+  }, 10_000);
+
+  it("does not present state-degraded repair results as completed", async () => {
+    repairChapterStateMock.mockResolvedValueOnce({
+      chapterNumber: 21,
+      title: "Chapter 21",
+      wordCount: 1800,
+      revised: false,
+      status: "state-degraded",
+      auditResult: {
+        passed: false,
+        issues: [{
+          severity: "critical",
+          category: "state-settlement",
+          description: "missing UPDATED_STATE and UPDATED_HOOKS",
+          suggestion: "retry with complete settlement blocks",
+        }],
+        summary: "state repair incomplete",
+      },
+    });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "恢复第21章状态",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        sessionKind: "book",
+        actionSource: "quick-action",
+        requestedIntent: "repair_state",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: expect.stringContaining("missing UPDATED_STATE and UPDATED_HOOKS"),
+      session: {
+        sessionId: "agent-session-1",
+        activeBookId: "demo-book",
+      },
+    });
+    expect(repairChapterStateMock).toHaveBeenCalledWith("demo-book", 21);
+    expect(appendManualSessionMessagesMock).toHaveBeenCalledWith(
+      root,
+      "agent-session-1",
+      expect.any(Array),
+      "恢复第21章状态",
+      expect.objectContaining({
+        sessionKind: "book",
+        legacyDisplay: {
+          toolExecutions: [
+            expect.objectContaining({
+              tool: "sub_agent",
+              agent: "state-repair",
+              status: "error",
+              result: expect.stringContaining("state-degraded"),
+              details: expect.objectContaining({
+                kind: "chapter_state_repair_failed",
+                bookId: "demo-book",
+                chapterNumber: 21,
+                status: "state-degraded",
+                auditPassed: false,
+              }),
             }),
           ],
         },
@@ -3269,6 +3411,40 @@ describe("createStudioServer daemon lifecycle", () => {
           apiFormat: "responses",
           stream: false,
         }),
+      },
+    });
+  });
+
+  it("routes manual chapter audits through the configured auditor agent", async () => {
+    await writeFile(
+      join(root, "inkos.json"),
+      JSON.stringify({
+        ...cloneProjectConfig(),
+        llm: {
+          ...cloneProjectConfig().llm,
+          model: "project-default-model",
+        },
+        modelOverrides: {
+          auditor: "auditor-route-model",
+        },
+      }, null, 2),
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/audit/3", {
+      method: "POST",
+    });
+
+    const body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(auditDraftMock).toHaveBeenCalledWith("demo-book", 3);
+    expect(pipelineConfigs.at(-1)).toMatchObject({
+      model: "project-default-model",
+      modelOverrides: {
+        auditor: "auditor-route-model",
       },
     });
   });

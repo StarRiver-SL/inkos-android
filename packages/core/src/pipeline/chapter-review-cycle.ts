@@ -247,15 +247,41 @@ export async function runChapterReviewCycle(params: {
       });
 
       const reviser = params.createReviser();
-      const reviseOutput = await reviser.reviseChapter(
-        params.bookDir,
-        finalContent,
-        params.chapterNumber,
-        currentAudit.auditResult.issues,
-        "auto",
-        params.book.genre,
-        { ...params.reducedControlInput, lengthSpec: params.lengthSpec, contextCache: params.contextCache },
-      );
+      let reviseOutput: ReviseOutput;
+      try {
+        reviseOutput = await reviser.reviseChapter(
+          params.bookDir,
+          finalContent,
+          params.chapterNumber,
+          currentAudit.auditResult.issues,
+          "auto",
+          params.book.genre,
+          { ...params.reducedControlInput, lengthSpec: params.lengthSpec, contextCache: params.contextCache },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        params.logWarn({
+          zh: `修订 Agent 请求失败，保留原草稿并标记为需人工/稍后修订：${message}`,
+          en: `Reviser request failed; keeping the draft and marking it for manual/later revision: ${message}`,
+        });
+        currentAudit = {
+          ...currentAudit,
+          auditResult: {
+            ...currentAudit.auditResult,
+            passed: false,
+            issues: [
+              ...currentAudit.auditResult.issues,
+              {
+                severity: "warning",
+                category: "reviser-transport",
+                description: `Automatic revision failed: ${message}`,
+                suggestion: "Check the reviser Agent model service or retry revision later. The original draft was preserved.",
+              },
+            ],
+          },
+        };
+        break;
+      }
       totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);
 
       if (reviseOutput.revisedContent.length === 0 || reviseOutput.revisedContent === finalContent) {

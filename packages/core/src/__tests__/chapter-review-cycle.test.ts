@@ -151,6 +151,54 @@ describe("runChapterReviewCycle v9", () => {
     expect(result.auditResult.parseFailed).toBe(true);
   });
 
+  it("keeps the draft and returns audit-failed when the reviser service is unreachable", async () => {
+    const originalContent = "b".repeat(200);
+    const auditChapter = vi.fn().mockResolvedValue(createAuditResult({
+      passed: false,
+      overallScore: 70,
+      issues: [{ severity: "critical", category: "continuity", description: "broken", suggestion: "fix" }],
+    }));
+    const reviseChapter = vi.fn().mockRejectedValue(
+      new Error('Agent "reviser" request failed (service=custom, model=agnes-2.0-flash, baseUrl=https://apihub.agnes-ai.com/v1).'),
+    );
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockImplementation(async (content: string) => ({
+        content,
+        wordCount: content.length,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      }));
+    const logWarn = vi.fn();
+
+    const result = await runChapterReviewCycle({
+      ...baseParams,
+      initialOutput: {
+        content: originalContent,
+        wordCount: originalContent.length,
+        postWriteErrors: [],
+      },
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      logWarn,
+      maxReviewIterations: 1,
+    });
+
+    expect(result.finalContent).toBe(originalContent);
+    expect(result.revised).toBe(false);
+    expect(result.auditResult.passed).toBe(false);
+    expect(result.auditResult.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: "reviser-transport",
+        severity: "warning",
+        description: expect.stringContaining("reviser"),
+      }),
+    ]));
+    expect(logWarn).toHaveBeenCalledWith(expect.objectContaining({
+      en: expect.stringContaining("Reviser request failed"),
+    }));
+  });
+
   it("runs repair loop when score is below threshold, picks best version", async () => {
     const auditChapter = vi.fn()
       .mockResolvedValueOnce(createAuditResult({

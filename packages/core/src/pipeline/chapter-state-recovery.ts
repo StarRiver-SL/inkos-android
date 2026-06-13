@@ -1,5 +1,6 @@
 import type { AuditIssue } from "../agents/continuity.js";
 import type {
+  StateValidationAuthorityContext,
   ValidationResult,
   ValidationWarning,
 } from "../agents/state-validator.js";
@@ -11,6 +12,7 @@ import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthLanguage } from "../utils/length-metrics.js";
+import { isIncompleteSettlementOutputError } from "../agents/settler-parser.js";
 
 export interface SettlementRetryParams {
   readonly writer: Pick<WriterAgent, "settleChapterState">;
@@ -28,6 +30,7 @@ export interface SettlementRetryParams {
   readonly oldState: string;
   readonly oldHooks: string;
   readonly originalValidation: ValidationResult;
+  readonly authorityContext?: StateValidationAuthorityContext;
   readonly language: LengthLanguage;
   readonly logWarn?: (message: { zh: string; en: string }) => void;
   readonly logger?: Pick<Logger, "warn">;
@@ -52,21 +55,35 @@ export async function retrySettlementAfterValidationFailure(
     en: `State validation failed; retrying settlement only for chapter ${params.chapterNumber}`,
   });
 
-  const retryOutput = await params.writer.settleChapterState({
-    book: params.book,
-    bookDir: params.bookDir,
-    chapterNumber: params.chapterNumber,
-    title: params.title,
-    content: params.content,
-    allowReapply: true,
-    chapterIntent: params.reducedControlInput?.chapterIntent,
-    contextPackage: params.reducedControlInput?.contextPackage,
-    ruleStack: params.reducedControlInput?.ruleStack,
-    validationFeedback: buildStateValidationFeedback(
-      params.originalValidation.warnings,
-      params.language,
-    ),
-  });
+  let retryOutput: WriteChapterOutput;
+  try {
+    retryOutput = await params.writer.settleChapterState({
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      title: params.title,
+      content: params.content,
+      allowReapply: true,
+      chapterIntent: params.reducedControlInput?.chapterIntent,
+      contextPackage: params.reducedControlInput?.contextPackage,
+      ruleStack: params.reducedControlInput?.ruleStack,
+      validationFeedback: buildStateValidationFeedback(
+        params.originalValidation.warnings,
+        params.language,
+      ),
+    });
+  } catch (error) {
+    if (isIncompleteSettlementOutputError(error)) {
+      params.logger?.warn(
+        `State settlement retry returned incomplete truth blocks for chapter ${params.chapterNumber}: ${String(error)}`,
+      );
+      return {
+        kind: "degraded",
+        issues: buildIncompleteSettlementIssues(params.chapterNumber, params.language),
+      };
+    }
+    throw error;
+  }
 
   let retryValidation: ValidationResult;
   try {
@@ -78,6 +95,7 @@ export async function retrySettlementAfterValidationFailure(
       params.oldHooks,
       retryOutput.updatedHooks,
       params.language,
+      params.authorityContext,
     );
   } catch (error) {
     throw new Error(`State validation retry failed for chapter ${params.chapterNumber}: ${String(error)}`);
@@ -124,21 +142,39 @@ export function buildStateValidationFeedback(
 ): string {
   if (warnings.length === 0) {
     return language === "en"
-      ? "The previous settlement contradicted the chapter text. Reconcile truth files strictly to the body."
-      : "上一次状态结算与正文矛盾。请严格以正文为准修正 truth files。";
+      ? "The previous settlement contradicted the chapter text. Reconcile truth files strictly to the body. Treat the State Card as an end-of-chapter snapshot and preserve later explicit state transitions."
+      : "上一次状态结算与正文矛盾。请严格以正文为准修正 truth files。State Card 表示章末快照，按时间顺序保留后发生的明确状态变化。";
   }
 
   if (language === "en") {
     return [
       "The previous settlement failed validation. Fix these contradictions against the chapter body:",
+      "Treat the State Card as an end-of-chapter snapshot. Preserve a later explicit state transition even when an earlier scene shows the previous state.",
       ...warnings.map((warning) => `- [${warning.category}] ${warning.description}`),
     ].join("\n");
   }
 
   return [
     "上一次状态结算未通过校验。请对照正文修正以下矛盾：",
+    "State Card 表示章末快照。请按正文时间顺序判断：后发生的明确状态变化覆盖前面的旧状态，不得因前文出现过旧状态而撤销章末新状态。",
     ...warnings.map((warning) => `- [${warning.category}] ${warning.description}`),
   ].join("\n");
+}
+
+export function buildIncompleteSettlementIssues(
+  chapterNumber: number,
+  language: LengthLanguage,
+): ReadonlyArray<AuditIssue> {
+  return [{
+    severity: "warning",
+    category: "state-settlement",
+    description: language === "en"
+      ? `State repair for chapter ${chapterNumber} returned incomplete settlement output: UPDATED_STATE and UPDATED_HOOKS were required.`
+      : `第 ${chapterNumber} 章状态修复返回了不完整的结算输出：缺少必需的 UPDATED_STATE 或 UPDATED_HOOKS。`,
+    suggestion: language === "en"
+      ? "Retry state repair after checking the configured writer/state-repair model. The existing truth files were not overwritten."
+      : "请检查 writer/state-repair Agent 使用的模型后重试状态修复；现有 truth files 不会被残缺输出覆盖。",
+  }];
 }
 
 const BLOCKING_STATE_VALIDATION_CATEGORIES = [
