@@ -83,11 +83,6 @@ export async function probeServiceForDetail(
 
 export async function rehydrateServiceConnectionStatus(args: {
   readonly effectiveServiceId: string;
-  readonly shouldVerify: boolean;
-  readonly isCustom: boolean;
-  readonly baseUrl: string;
-  readonly apiFormat: "chat" | "responses";
-  readonly stream: boolean;
   readonly fetchJsonImpl?: JsonFetcher;
 }): Promise<{
   readonly apiKey: string;

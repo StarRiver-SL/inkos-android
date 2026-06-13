@@ -17,11 +17,6 @@ describe("rehydrateServiceConnectionStatus", () => {
 
     const result = await rehydrateServiceConnectionStatus({
       effectiveServiceId: "openai",
-      shouldVerify: true,
-      isCustom: false,
-      baseUrl: "",
-      apiFormat: "chat",
-      stream: true,
       fetchJsonImpl: fetchJsonImpl as never,
     });
 

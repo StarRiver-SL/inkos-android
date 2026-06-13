@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.4
+
+### Bug Fixes
+
+- Prevent model service configuration forms from being reset while editing Base URL, protocol, streaming, or custom service names.
+- Restrict saved-secret hydration to stable route service IDs so asynchronous initialization cannot follow mutable form values.
+
 ## v1.5.3
 
 ### Release Focus

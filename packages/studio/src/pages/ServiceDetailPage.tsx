@@ -87,18 +87,14 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
 
   const resolvedCustomName = persistedCustomName || customName.trim() || "Custom";
   const effectiveServiceId = isCustom ? `custom:${resolvedCustomName}` : serviceId;
+  const hydrationServiceId = persistedCustomName ? `custom:${persistedCustomName}` : serviceId;
   const label = isCustom ? (customName || persistedCustomName || "自定义服务") : (svc?.label ?? serviceId);
   const storeModels = useServiceStore((s) => s.modelsByService[effectiveServiceId]);
 
   useEffect(() => {
     let cancelled = false;
     void rehydrateServiceConnectionStatus({
-      effectiveServiceId,
-      shouldVerify: Boolean(svc?.connected),
-      isCustom,
-      baseUrl,
-      apiFormat,
-      stream,
+      effectiveServiceId: hydrationServiceId,
     })
       .then((result) => {
         if (cancelled) return;
@@ -107,24 +103,13 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
         setTestModel(result.detectedModel);
         setDetectedConfig(result.detectedConfig);
         setStatus(result.status);
-        if (result.status.state === "connected") {
-          setStoreModels(effectiveServiceId, result.status.models);
-        }
       })
       .catch(() => {
         if (cancelled) return;
         setStatus({ state: "idle" });
       });
     return () => { cancelled = true; };
-  }, [
-    apiFormat,
-    baseUrl,
-    effectiveServiceId,
-    isCustom,
-    setStoreModels,
-    stream,
-    svc?.connected,
-  ]);
+  }, [hydrationServiceId]);
 
   if (loading) return <DetailSkeleton />;
 
