@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ToolExecution } from "../../../store/chat/types";
-import { ToolExecutionSteps, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
+import { ToolExecutionSteps, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically, isPlaySceneTool } from "../ToolExecutionSteps";
 
 const makeExec = (overrides: Partial<ToolExecution> & { id: string; tool: string }): ToolExecution => ({
   label: "test",
@@ -30,6 +30,24 @@ describe("groupChronologically", () => {
     expect(html).toContain("互动场景 · 实时生成");
     expect(html).toContain("雨水顺着旧招牌往下淌");
     expect(html).not.toContain("{&quot;sceneText&quot;");
+  });
+
+  it("shows pure prose Play deltas without requiring a JSON sceneText wrapper", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ToolExecutionSteps, {
+        executions: [
+          makeExec({
+            id: "play-live-prose",
+            tool: "play_step",
+            label: "推进互动世界",
+            status: "running",
+            streamingText: "雨水顺着旧招牌往下淌，门内传来脚步声",
+          }),
+        ],
+      }),
+    );
+
+    expect(html).toContain("雨水顺着旧招牌往下淌");
   });
 
   it("keeps read before pipeline when read happened first", () => {
@@ -129,6 +147,13 @@ describe("groupChronologically", () => {
     expect(groups[2].type === "pipeline" ? groups[2].exec.tool : "").toBe("play_edit");
     expect(groups[3].type === "pipeline" ? groups[3].exec.tool : "").toBe("play_revise");
     expect(groups[4].type === "pipeline" ? groups[4].exec.tool : "").toBe("play_step");
+  });
+
+  it("identifies only scene-producing play tools", () => {
+    expect(isPlaySceneTool("play_start")).toBe(true);
+    expect(isPlaySceneTool("play_step")).toBe(true);
+    expect(isPlaySceneTool("play_revise")).toBe(true);
+    expect(isPlaySceneTool("play_edit")).toBe(false);
   });
 
   it("renders proposed actions as visible pipeline cards", () => {

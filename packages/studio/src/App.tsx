@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Directory, Filesystem } from "@capacitor/filesystem";
+import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
@@ -98,11 +98,27 @@ interface AndroidRuntimeFileStatus {
   readonly nativeLibSha256?: string;
 }
 
-function parseAndroidRuntimeStatus(text: string): AndroidRuntimeFileStatus {
+export function normalizeAndroidFileText(data: string): string {
+  const text = data.trim();
+  if (!text) return data;
+  if (text.startsWith("{") || text.startsWith("[") || /\s/.test(text)) return data;
+  if (text.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text)) return data;
+
   try {
-    return JSON.parse(text) as AndroidRuntimeFileStatus;
+    const binary = atob(text);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch {
-    const jsonBlocks = text.match(/\{[\s\S]*\}/g) ?? [];
+    return data;
+  }
+}
+
+export function parseAndroidRuntimeStatus(text: string): AndroidRuntimeFileStatus {
+  try {
+    return JSON.parse(normalizeAndroidFileText(text)) as AndroidRuntimeFileStatus;
+  } catch {
+    const normalizedText = normalizeAndroidFileText(text);
+    const jsonBlocks = normalizedText.match(/\{[\s\S]*\}/g) ?? [];
     for (const block of jsonBlocks.reverse()) {
       try {
         return JSON.parse(block) as AndroidRuntimeFileStatus;
@@ -192,9 +208,10 @@ async function readAndroidTextFile(path: string): Promise<string | null> {
     const result = await Filesystem.readFile({
       path,
       directory: Directory.Data,
+      encoding: Encoding.UTF8,
     });
-    if (typeof result.data === "string") return result.data;
-    return await result.data.text();
+    if (typeof result.data === "string") return normalizeAndroidFileText(result.data);
+    return normalizeAndroidFileText(await result.data.text());
   } catch {
     return null;
   }

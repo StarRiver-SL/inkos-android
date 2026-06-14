@@ -5,7 +5,14 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   bumpBookDataVersion: () => set((s) => ({ bookDataVersion: s.bookDataVersion + 1 })),
   openArtifact: (file) => set({ sidebarView: "artifact", artifactFile: file, artifactChapter: null }),
   openChapterArtifact: (chapterNum) => set({ sidebarView: "artifact", artifactFile: null, artifactChapter: chapterNum }),
+  openRelationshipGraph: () => set({ sidebarView: "graph", artifactFile: null, artifactChapter: null }),
   closeArtifact: () => set({ sidebarView: "panel", artifactFile: null, artifactChapter: null }),
+  setRoleOverviewExpanded: (bookId, expanded) => set((state) => ({
+    roleOverviewExpandedByBook: {
+      ...state.roleOverviewExpandedByBook,
+      [bookId]: expanded,
+    },
+  })),
   setBookSummary: (summary) => set({ bookSummary: summary }),
   markProposalResolved: (execId, resolution) =>
     set((s) => ({ resolvedProposals: { ...s.resolvedProposals, [execId]: resolution } })),

@@ -186,9 +186,10 @@ export interface MessageState {
 
 export interface CreateState {
   bookDataVersion: number;
-  sidebarView: "panel" | "artifact";
+  sidebarView: "panel" | "artifact" | "graph";
   artifactFile: string | null;         // foundation file name, e.g. "story_bible.md"
   artifactChapter: number | null;      // chapter number, e.g. 1
+  roleOverviewExpandedByBook: Record<string, boolean>;
   bookSummary: BookSummary | null;
   // Proposed-action cards (propose_action) are one-shot: once confirmed or
   // rejected, the card locks so the user can't re-fire the production action.
@@ -226,7 +227,9 @@ export interface CreateActions {
   bumpBookDataVersion: () => void;
   openArtifact: (file: string) => void;
   openChapterArtifact: (chapterNum: number) => void;
+  openRelationshipGraph: () => void;
   closeArtifact: () => void;
+  setRoleOverviewExpanded: (bookId: string, expanded: boolean) => void;
   setBookSummary: (summary: BookSummary | null) => void;
   markProposalResolved: (execId: string, resolution: "confirmed" | "rejected") => void;
 }

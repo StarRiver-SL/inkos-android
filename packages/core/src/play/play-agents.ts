@@ -194,7 +194,7 @@ export class PlaySceneRendererAgent extends BaseAgent {
     // to the raw prose as the scene. (Bigger token budget so long literary scenes
     // don't get truncated mid-JSON, which is itself a common parse failure.)
     let lastContent = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       let content = "";
       try {
         const response = await chatWithRetry(() => this.chat(messages, { temperature: 0.45, maxTokens: 4096 }));
@@ -209,25 +209,65 @@ export class PlaySceneRendererAgent extends BaseAgent {
           ? { ...parsed, suggestedActions: guidedFallbackActions(language) }
           : parsed;
       }
-      messages.push(
-        { role: "assistant", content },
-        {
-          role: "user",
-          content: language === "en"
-            ? 'That was not strict JSON. Output ONLY one JSON object {"sceneText": "...", "suggestedActions": ["..."]} and nothing else.'
-            : '上面不是严格 JSON。只输出一个 JSON 对象 {"sceneText": "...", "suggestedActions": ["..."]}，不要任何其他文字。',
-        },
-      );
+      break;
     }
-    const proseFallback = lastContent
-      .trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
+    const proseFallback = normalizeSceneProse(lastContent);
+    const suggestedActions = proseFallback
+      ? await this.extractSuggestedActions(input, proseFallback, language)
+      : [];
     return {
       sceneText: proseFallback || (language === "en" ? "(The moment holds, unresolved.)" : "（这一拍悬着，没有落定。）"),
-      suggestedActions: input.mode === "guided" ? guidedFallbackActions(language) : [],
+      suggestedActions: input.mode === "guided" && suggestedActions.length === 0
+        ? guidedFallbackActions(language)
+        : suggestedActions,
     };
+  }
+
+  private async extractSuggestedActions(
+    input: PlaySceneRenderInput & { readonly mode?: "open" | "guided" },
+    sceneText: string,
+    language: "zh" | "en",
+  ): Promise<string[]> {
+    try {
+      const response = await chatWithRetry(() => this.chat([
+        { role: "system", content: language === "en"
+          ? "Extract concise optional next actions for an interactive-fiction scene. Output strict JSON only."
+          : "为互动小说场景提炼简短的可选下一步行动。只输出严格 JSON。" },
+        { role: "user", content: buildSuggestedActionsPrompt(input, sceneText, language) },
+      ], { temperature: 0.2, maxTokens: 512, suppressTextDelta: true }));
+      return parseSuggestedActions(response.content, input.mode ?? "open");
+    } catch {
+      return [];
+    }
+  }
+}
+
+function normalizeSceneProse(content: string): string {
+  const trimmed = content
+    .trim()
+    .replace(/^```(?:json|markdown|md)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  const parsed = trySceneParse(trimmed);
+  if (parsed) return parsed.sceneText.trim();
+  return trimmed
+    .replace(/^sceneText\s*[:：]\s*/i, "")
+    .trim();
+}
+
+function parseSuggestedActions(raw: string, mode: "open" | "guided"): string[] {
+  try {
+    const json = parseJson(raw);
+    const record = json && typeof json === "object" ? json as { suggestedActions?: unknown } : {};
+    const actions = Array.isArray(record.suggestedActions)
+      ? record.suggestedActions
+      : Array.isArray(json) ? json : [];
+    return actions
+      .filter((action): action is string => typeof action === "string" && action.trim().length > 0)
+      .map((action) => action.trim())
+      .slice(0, mode === "guided" ? 4 : 3);
+  } catch {
+    return [];
   }
 }
 
@@ -507,7 +547,7 @@ export function buildSceneRendererSystemPrompt(mode: "open" | "guided" = "open",
     const actionsRule = mode === "guided"
       ? "suggestedActions: ALWAYS give 2-4 concise, distinct actions that fit the current scene. They are clickable branches and optional springboards, not the only way forward; the player can still type freely."
       : "suggestedActions: 0-3 short hints, optional, never restricting the player's input; omit them when there is no real decision point.";
-    return [...base, actionsRule, "Output strict JSON: sceneText, suggestedActions."].join("\n");
+    return [...base, actionsRule, "Output ONLY the sceneText prose. Do not wrap it in JSON, Markdown fences, headings, labels, or menus."].join("\n");
   }
   const base = [
     "你是互动小说场景回应作者。",
@@ -531,7 +571,7 @@ export function buildSceneRendererSystemPrompt(mode: "open" | "guided" = "open",
   const actionsRule = mode === "guided"
     ? "suggestedActions：每一回合都必须给出 2-4 个简短、互有区别且符合当前场景的可点击行动。它们是分支入口和行动跳板，不是唯一前进方式；玩家仍然可以自由输入。"
     : "suggestedActions：0-3 个短句，可选，只是参考、不限制玩家输入；没有明显抉择点时就不给。";
-  return [...base, actionsRule, "输出严格 JSON：sceneText, suggestedActions。"].join("\n");
+  return [...base, actionsRule, "只输出 sceneText 正文。不要包成 JSON，不要代码块，不要标题、字段名或菜单。"].join("\n");
 }
 
 function buildSceneRendererUserPrompt(input: PlaySceneRenderInput, language: "zh" | "en"): string {
@@ -567,6 +607,40 @@ function buildSceneRendererUserPrompt(input: PlaySceneRenderInput, language: "zh
     "当前状态摘要：",
     input.stateBrief,
     input.replayContext ? ["", "重写约束：", input.replayContext].join("\n") : "",
+  ].join("\n");
+}
+
+function buildSuggestedActionsPrompt(
+  input: PlaySceneRenderInput & { readonly mode?: "open" | "guided" },
+  sceneText: string,
+  language: "zh" | "en",
+): string {
+  const mode = input.mode ?? "open";
+  const maxActions = mode === "guided" ? 4 : 3;
+  const minActions = mode === "guided" ? 2 : 0;
+  if (language === "en") {
+    return [
+      `Mode: ${mode}`,
+      `Return ${minActions}-${maxActions} optional next actions that naturally fit this scene.`,
+      "They are springboards, not a menu; keep each action short and distinct.",
+      "Do not repeat prose from the scene. Do not force options when no real decision point exists in open mode.",
+      "",
+      "Scene:",
+      sceneText,
+      "",
+      'Output strict JSON only: {"suggestedActions":["..."]}',
+    ].join("\n");
+  }
+  return [
+    `模式：${mode}`,
+    `返回 ${minActions}-${maxActions} 个自然贴合当前场景的可选下一步行动。`,
+    "它们只是跳板，不是菜单；每条要简短、彼此有区别。",
+    "不要复述正文；open 模式下没有真实抉择点时可以不给。",
+    "",
+    "场景：",
+    sceneText,
+    "",
+    '只输出严格 JSON：{"suggestedActions":["..."]}',
   ].join("\n");
 }
 

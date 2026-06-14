@@ -110,6 +110,17 @@ export function roleFromPath(path: string): RoleRef | null {
   return { path, name: m[2], tier };
 }
 
+// Role cards describe the character's starting point. Runtime progress is
+// tracked in current_state.md after each chapter, so display the role-card
+// heading as "initial state" to avoid implying that the character is still at
+// chapter 0 forever.
+export function normalizeRoleCardForDisplay(path: string | null | undefined, markdown: string): string {
+  if (!path || !roleFromPath(path)) return markdown;
+  return markdown
+    .replace(/^##\s*当前现状(?:（第\s*0\s*章初始状态）|\(第\s*0\s*章初始状态\))?\s*$/gm, "## 初始状态")
+    .replace(/^##\s*Current[_\s]State\s*(?:\(initial state at chapter 0\))?\s*$/gim, "## Initial_State");
+}
+
 // Friendly labels + display order for foundation truth files, covering both the
 // Phase 5 outline/* layout and the pre-Phase-5 flat layout. Character files
 // (roles/*, character_matrix.md) are intentionally absent — they belong to the
@@ -132,7 +143,7 @@ export const FOUNDATION_FILE_LABELS: Record<string, string> = {
 // --- current_state.md ---------------------------------------------------
 
 // At book creation current_state.md holds only an engineering seed note
-// (referencing the consolidator / roles/*.当前现状 / pending_hooks startChapter=0)
+// (referencing the consolidator / roles initial state / pending_hooks startChapter=0)
 // that means nothing to a reader. The consolidator later APPENDS real state
 // after each chapter, so we strip the seed note and report whether any real
 // runtime state exists yet.

@@ -4,19 +4,22 @@ import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
-import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X } from "lucide-react";
+import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X, Network } from "lucide-react";
 import { MarkdownView } from "../ai-elements/markdown-view";
 import { ProgressSection } from "../sidebar/ProgressSection";
 import { FoundationSection } from "../sidebar/FoundationSection";
 import { SummarySection } from "../sidebar/SummarySection";
 import { ChaptersSection } from "../sidebar/ChaptersSection";
 import { CharacterSection } from "../sidebar/CharacterSection";
+import { RelationshipGraph } from "../sidebar/RelationshipGraph";
+import { SidebarCard } from "../sidebar/SidebarCard";
 import { FrontmatterCards } from "../sidebar/FrontmatterCards";
 import { PendingHooksView } from "../sidebar/PendingHooksView";
 import {
   FOUNDATION_FILE_LABELS,
   frontmatterToCards,
   hasTableRows,
+  normalizeRoleCardForDisplay,
   presentCurrentState,
   relabelOkrJargon,
   roleFromPath,
@@ -72,7 +75,7 @@ function renderTruthBody(
     <>
       <FrontmatterCards cards={frontmatterToCards(frontmatter)} />
       <MarkdownView mode="static" preset="cjk">
-        {relabelOkrJargon(stripStructuralMarkers(body ?? content))}
+        {normalizeRoleCardForDisplay(file, relabelOkrJargon(stripStructuralMarkers(body ?? content)))}
       </MarkdownView>
     </>
   );
@@ -210,6 +213,7 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
 
 function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
   const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
+  const openRelationshipGraph = useChatStore((s) => s.openRelationshipGraph);
 
   // Show writing indicator only during pipeline operations (write/audit/revise)
   const [activeOp, setActiveOp] = useState<string | null>(null);
@@ -247,6 +251,18 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
           </span>
         </div>
       )}
+      <SidebarCard title="关系">
+        <button
+          onClick={openRelationshipGraph}
+          className="flex w-full items-center gap-2 rounded-lg bg-secondary/30 px-2.5 py-2 text-left transition-colors hover:bg-secondary/50"
+        >
+          <Network size={16} className="shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-[15px] font-medium leading-6 text-foreground">
+            关系图谱
+          </span>
+          <span className="text-[12px] leading-4 text-muted-foreground/60">Graph</span>
+        </button>
+      </SidebarCard>
       <ProgressSection sse={sse} />
       <ChaptersSection bookId={bookId} isZh={isZh} />
       <CharacterSection bookId={bookId} />
@@ -266,6 +282,7 @@ function defaultSidebarWidth(): number {
 
 export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
   const sidebarView = useChatStore((s) => s.sidebarView);
+  const closeArtifact = useChatStore((s) => s.closeArtifact);
   const [width, setWidth] = useState(defaultSidebarWidth);
   const dragging = useRef(false);
 
@@ -300,6 +317,8 @@ export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
       />
       {sidebarView === "artifact" ? (
         <ArtifactView bookId={bookId} />
+      ) : sidebarView === "graph" ? (
+        <RelationshipGraph source="book" bookId={bookId} sessionId={null} onClose={closeArtifact} />
       ) : (
         <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
       )}
@@ -310,6 +329,7 @@ export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
 export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
   const [open, setOpen] = useState(false);
   const sidebarView = useChatStore((s) => s.sidebarView);
+  const closeArtifact = useChatStore((s) => s.closeArtifact);
 
   return (
     <>
@@ -340,6 +360,8 @@ export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
             </div>
             {sidebarView === "artifact" ? (
               <ArtifactView bookId={bookId} />
+            ) : sidebarView === "graph" ? (
+              <RelationshipGraph source="book" bookId={bookId} sessionId={null} onClose={closeArtifact} />
             ) : (
               <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
             )}

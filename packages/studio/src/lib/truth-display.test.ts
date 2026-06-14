@@ -4,6 +4,7 @@ import {
   firstParagraph,
   frontmatterToCards,
   hasTableRows,
+  normalizeRoleCardForDisplay,
   parsePendingHooks,
   presentCurrentState,
   relabelOkrJargon,
@@ -107,6 +108,31 @@ describe("roleFromPath", () => {
     expect(roleFromPath("outline/story_frame.md")).toBeNull();
     expect(roleFromPath("roles/其他/x.md")).toBeNull();
     expect(roleFromPath("story_bible.md")).toBeNull();
+  });
+});
+
+describe("normalizeRoleCardForDisplay", () => {
+  it("renames role-card chapter-0 current-state headings as initial state", () => {
+    const input = [
+      "## 当前现状（第 0 章初始状态）",
+      "",
+      "陈烬刚从噩梦中醒来。",
+      "",
+      "## Current_State (initial state at chapter 0)",
+      "",
+      "Mara is still hiding.",
+    ].join("\n");
+
+    const out = normalizeRoleCardForDisplay("roles/主要角色/陈烬.md", input);
+    expect(out).toContain("## 初始状态");
+    expect(out).toContain("## Initial_State");
+    expect(out).not.toContain("第 0 章初始状态");
+    expect(out).not.toContain("initial state at chapter 0");
+  });
+
+  it("leaves non-role files untouched", () => {
+    const input = "## 当前现状（第 0 章初始状态）\n\n世界设定。";
+    expect(normalizeRoleCardForDisplay("outline/story_frame.md", input)).toBe(input);
   });
 });
 

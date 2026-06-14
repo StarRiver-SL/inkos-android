@@ -19,7 +19,8 @@ const children = [
       env: {
         ...process.env,
         INKOS_DEV: "1",
-        INKOS_STUDIO_PORT: "4569",`n        INKOS_PROJECT_ROOT: projectRoot,
+        INKOS_STUDIO_PORT: "4569",
+        INKOS_PROJECT_ROOT: projectRoot,
       },
       stdio: "inherit",
     },

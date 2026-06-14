@@ -257,8 +257,9 @@ export function isCurrentStateSeedPlaceholder(raw: string): boolean {
 }
 
 function extractCurrentStateFromRole(content: string): string | null {
-  // Accept both zh (`## 当前现状`) and en (`## Current_State` / `## Current State`).
-  const pattern = /^##\s*(?:当前现状|Current[_\s]?State)[^\n]*$/im;
+  // Accept both legacy "current state" headings and the newer clearer
+  // "initial state" role-card heading.
+  const pattern = /^##\s*(?:当前现状|初始状态|Current[_\s]?State|Initial[_\s]?State)[^\n]*$/im;
   const match = content.match(pattern);
   if (!match || match.index === undefined) return null;
   const after = content.slice(match.index + match[0].length);
@@ -292,7 +293,7 @@ function extractSeedHooksFromPendingHooks(raw: string): string[] {
 /**
  * Read current_state.md; when the file is only a seed placeholder (chapter 0,
  * before consolidator has appended anything), derive an initial-state block
- * from roles/*.Current_State + pending_hooks startChapter=0 rows so callers
+ * from roles initial-state cards + pending_hooks startChapter=0 rows so callers
  * still have substantive content to feed into writer / analyzer prompts.
  */
 export async function readCurrentStateWithFallback(

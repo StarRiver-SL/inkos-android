@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Users, ChevronDown } from "lucide-react";
+import { ArrowRight, GitBranch, Sparkles, Users, ChevronDown } from "lucide-react";
 import { useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
@@ -57,6 +57,46 @@ const TIER_BADGE: Record<RoleRef["tier"], { label: string; color: string }> = {
   minor: { label: "次要", color: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
 };
 
+interface RoleRuntimeSummary {
+  readonly chapter: number | null;
+  readonly stateLines: ReadonlyArray<string>;
+  readonly relationLines: ReadonlyArray<string>;
+}
+
+interface RoleDisplayInfo {
+  readonly ref: RoleRef;
+  readonly runtime: RoleRuntimeSummary | null;
+}
+
+const ROLE_STATE_START = "<!-- INKOS:ROLE_RUNTIME_STATE_START -->";
+const ROLE_STATE_END = "<!-- INKOS:ROLE_RUNTIME_STATE_END -->";
+const RELATION_PATTERN = /关系|敌我|盟友|同盟|对手|怀疑|信任|背叛|合作|冲突|alliance|relationship|trust|doubt|ally|enemy|opposes|supports/i;
+
+export function parseRoleRuntimeSummary(markdown: string): RoleRuntimeSummary | null {
+  const start = markdown.indexOf(ROLE_STATE_START);
+  const end = markdown.indexOf(ROLE_STATE_END);
+  if (start < 0 || end <= start) return null;
+  const block = markdown.slice(start + ROLE_STATE_START.length, end);
+  const lines = block
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("-"))
+    .map((line) => line.replace(/^-\s*/, "").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const chapterLine = lines[0] ?? "";
+  const chapter = Number.parseInt(chapterLine.match(/\d+/)?.[0] ?? "", 10);
+  const details = lines.slice(1);
+  const relationLines = details.filter((line) => RELATION_PATTERN.test(line));
+  const stateLines = details.filter((line) => !RELATION_PATTERN.test(line));
+  return {
+    chapter: Number.isFinite(chapter) ? chapter : null,
+    stateLines,
+    relationLines,
+  };
+}
+
 // Phase 5 layout: one file per character under roles/. Each entry opens the
 // full (humanized) character sheet — no raw matrix parsing needed.
 function RoleEntry({ role }: { readonly role: RoleRef }) {
@@ -74,6 +114,119 @@ function RoleEntry({ role }: { readonly role: RoleRef }) {
       <span className={cn("text-[12px] px-1.5 py-0.5 rounded-full shrink-0", badge.color)}>
         {badge.label}
       </span>
+    </button>
+  );
+}
+
+function RoleOverview({ bookId, roles }: {
+  readonly bookId: string;
+  readonly roles: ReadonlyArray<RoleDisplayInfo>;
+}) {
+  const expanded = useChatStore((state) => state.roleOverviewExpandedByBook[bookId] ?? false);
+  const setRoleOverviewExpanded = useChatStore((state) => state.setRoleOverviewExpanded);
+  const major = roles.filter((role) => role.ref.tier === "major");
+  const minor = roles.filter((role) => role.ref.tier === "minor");
+
+  return (
+    <div className="rounded-lg border border-border/25 bg-secondary/20">
+      <button
+        onClick={() => setRoleOverviewExpanded(bookId, !expanded)}
+        className="flex w-full items-center gap-2 px-2.5 py-2.5 text-left transition-colors hover:bg-secondary/30"
+      >
+        <Users size={16} className="shrink-0 text-primary" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[15px] font-medium leading-5 text-foreground">角色总览</p>
+          <p className="truncate text-[12px] leading-4 text-muted-foreground/70">
+            主要 {major.length} · 次要 {minor.length}
+          </p>
+        </div>
+        <ArrowRight size={14} className={cn("text-muted-foreground/60 transition-transform", expanded && "rotate-90")} />
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-border/20 px-2.5 py-2.5">
+          <RoleGroup title="主要角色" roles={major} />
+          <RoleGroup title="次要角色" roles={minor} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RoleGroup({ title, roles }: {
+  readonly title: string;
+  readonly roles: ReadonlyArray<RoleDisplayInfo>;
+}) {
+  if (roles.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="px-1 text-[12px] font-medium leading-4 text-muted-foreground/70">{title}</div>
+      {roles.map((role) => <RoleEntry key={role.ref.path} role={role.ref} />)}
+    </div>
+  );
+}
+
+function ChapterSettlement({ roles }: { readonly roles: ReadonlyArray<RoleDisplayInfo> }) {
+  const settled = selectLatestChapterSettlementRoles(roles);
+  if (settled.length === 0) {
+    return (
+      <div className="rounded-lg bg-secondary/20 px-2.5 py-2 text-[13px] leading-5 text-muted-foreground/65">
+        写完章节后，这里会显示本章涉及角色的状态和关系变化。
+      </div>
+    );
+  }
+
+  const chapter = settled[0].runtime?.chapter;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5 px-1 text-[12px] font-medium leading-4 text-muted-foreground/70">
+        <Sparkles size={12} className="text-primary" />
+        <span>{chapter ? `第 ${chapter} 章结算` : "最近角色结算"}</span>
+      </div>
+      {settled.slice(0, 5).map((role) => (
+        <SettlementEntry key={role.ref.path} role={role} />
+      ))}
+    </div>
+  );
+}
+
+export function selectLatestChapterSettlementRoles(
+  roles: ReadonlyArray<RoleDisplayInfo>,
+): ReadonlyArray<RoleDisplayInfo> {
+  const settled = roles
+    .filter((role) => role.runtime && (role.runtime.stateLines.length > 0 || role.runtime.relationLines.length > 0));
+  const latestChapter = Math.max(...settled.map((role) => role.runtime?.chapter ?? 0));
+  return settled
+    .filter((role) => latestChapter <= 0 || role.runtime?.chapter === latestChapter)
+    .sort((a, b) => a.ref.name.localeCompare(b.ref.name));
+}
+
+function SettlementEntry({ role }: { readonly role: RoleDisplayInfo }) {
+  const openArtifact = useChatStore((s) => s.openArtifact);
+  const badge = TIER_BADGE[role.ref.tier];
+  const stateLines = role.runtime?.stateLines ?? [];
+  const relationLines = role.runtime?.relationLines ?? [];
+  return (
+    <button
+      onClick={() => openArtifact(role.ref.path)}
+      className="w-full rounded-lg bg-secondary/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/45"
+    >
+      <div className="mb-1.5 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-foreground">
+          {role.ref.name}
+        </span>
+        <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[11px]", badge.color)}>{badge.label}</span>
+      </div>
+      {stateLines.slice(0, 2).map((line) => (
+        <p key={line} className="line-clamp-2 text-[13px] leading-5 text-muted-foreground">
+          {line}
+        </p>
+      ))}
+      {relationLines.slice(0, 2).map((line) => (
+        <p key={line} className="mt-1 flex gap-1.5 text-[13px] leading-5 text-muted-foreground">
+          <GitBranch size={12} className="mt-1 shrink-0 text-primary/80" />
+          <span className="line-clamp-2">{line}</span>
+        </p>
+      ))}
     </button>
   );
 }
@@ -127,7 +280,7 @@ interface CharacterSectionProps {
 }
 
 export function CharacterSection({ bookId }: CharacterSectionProps) {
-  const [roles, setRoles] = useState<ReadonlyArray<RoleRef>>([]);
+  const [roles, setRoles] = useState<ReadonlyArray<RoleDisplayInfo>>([]);
   const [legacyChars, setLegacyChars] = useState<CharacterInfo[]>([]);
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
 
@@ -148,7 +301,13 @@ export function CharacterSection({ bookId }: CharacterSectionProps) {
 
         // Phase 5 books expose one file per character under roles/.
         if (roleRefs.length > 0) {
-          setRoles(roleRefs);
+          const roleDetails = await Promise.all(roleRefs.map(async (role) => {
+            const detail = await fetchJson<{ content: string | null }>(
+              `/books/${bookId}/truth/${role.path}`,
+            ).catch(() => ({ content: null }));
+            return { ref: role, runtime: parseRoleRuntimeSummary(detail.content ?? "") };
+          }));
+          if (!cancelled) setRoles(roleDetails);
           return;
         }
 
@@ -177,8 +336,14 @@ export function CharacterSection({ bookId }: CharacterSectionProps) {
   return (
     <SidebarCard title="角色">
       <div className="space-y-1.5">
+        {roles.length > 0 && (
+          <>
+            <RoleOverview bookId={bookId} roles={roles} />
+            <ChapterSettlement roles={roles} />
+          </>
+        )}
         {roles.length > 0
-          ? roles.map((role) => <RoleEntry key={role.path} role={role} />)
+          ? null
           : legacyChars.map((char) => <CharacterCard key={char.name} char={char} />)}
       </div>
     </SidebarCard>

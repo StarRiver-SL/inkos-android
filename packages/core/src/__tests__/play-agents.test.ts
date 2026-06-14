@@ -218,6 +218,30 @@ describe("play agents", () => {
     expect(result.suggestedActions).toEqual([]);
   });
 
+  it("streams prose first and suppresses text deltas while extracting suggested actions", async () => {
+    const agent = new PlaySceneRendererAgent(ctx);
+    const chat = vi.spyOn(agent as unknown as { chat: PlaySceneRendererAgent["chat"] }, "chat")
+      .mockResolvedValueOnce({
+        content: "雨还在下，她把账本推到灯下。",
+      } as never)
+      .mockResolvedValueOnce({
+        content: JSON.stringify({ suggestedActions: ["翻看账本夹层", "追问她的来意"] }),
+      } as never);
+
+    const result = await agent.render({
+      input: "我看账本",
+      action: { actionKind: "look", intent: "查看账本" },
+      mutationSummary: "账本被放到灯下。",
+      stateBrief: "账本：已发现。",
+      mode: "guided",
+    });
+
+    expect(result.sceneText).toBe("雨还在下，她把账本推到灯下。");
+    expect(result.suggestedActions).toEqual(["翻看账本夹层", "追问她的来意"]);
+    expect(chat).toHaveBeenNthCalledWith(1, expect.any(Array), expect.not.objectContaining({ suppressTextDelta: true }));
+    expect(chat).toHaveBeenNthCalledWith(2, expect.any(Array), expect.objectContaining({ suppressTextDelta: true }));
+  });
+
   it("renderer fails open on a transient upstream error instead of crashing the turn", async () => {
     const agent = new PlaySceneRendererAgent(ctx);
     vi.spyOn(agent as unknown as { chat: PlaySceneRendererAgent["chat"] }, "chat").mockRejectedValue(

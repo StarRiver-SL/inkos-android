@@ -314,7 +314,7 @@ function ChapterArtifactPreview({ exec }: { exec: ToolExecution }) {
 
 function extractStreamingSceneText(value: string): string {
   const marker = /"sceneText"\s*:\s*"/u.exec(value);
-  if (!marker || marker.index === undefined) return "";
+  if (!marker || marker.index === undefined) return value;
   const source = value.slice(marker.index + marker[0].length);
   let output = "";
   let escaped = false;
@@ -334,11 +334,15 @@ function extractStreamingSceneText(value: string): string {
   return output;
 }
 
+export function isPlaySceneTool(tool: string): boolean {
+  return tool === "play_start" || tool === "play_step" || tool === "play_revise";
+}
+
 function LiveGenerationPreview({ exec, active }: { exec: ToolExecution; active: boolean }) {
   if (!active) return null;
   const isWriter = exec.tool === "sub_agent" && exec.agent === "writer";
   const isStateRepair = exec.tool === "sub_agent" && exec.agent === "state-repair";
-  const isPlay = ["play_start", "play_step", "play_revise"].includes(exec.tool);
+  const isPlay = isPlaySceneTool(exec.tool);
   if (!isWriter && !isStateRepair && !isPlay) return null;
   const previewText = isPlay
     ? extractStreamingSceneText(exec.streamingText ?? "")
@@ -657,7 +661,7 @@ function ProposedActionPreview({
 }
 
 function PlayResultPreview({ exec }: { exec: ToolExecution }) {
-  if (!["play_start", "play_step", "play_revise"].includes(exec.tool) || exec.status !== "completed") return null;
+  if (!isPlaySceneTool(exec.tool) || exec.status !== "completed") return null;
   const details = getPlayToolDetails(exec);
   if (!details?.sceneText) return null;
   const label = details.kind === "play_world_started"

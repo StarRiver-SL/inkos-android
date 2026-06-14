@@ -991,6 +991,7 @@ export function createPlayStartTool(
       const sceneText = (initialScene?.trim() || (world.language === "en"
         ? [`You enter "${world.title}".`, world.premise || "The scene is set. Make your first move."].join("\n")
         : [`你进入「${world.title}」。`, world.premise || "场景已经就位，等待你的第一个动作。"].join("\n"))).trim();
+      onUpdate?.(textResult(sceneText, { kind: "play_scene_preview" }));
       if (existingTranscript.length === 0) {
         await store.writeProjection(world.id, runId, "projections/scene.md", `${sceneText}\n`);
         await store.saveCurrentState(world.id, runId, {

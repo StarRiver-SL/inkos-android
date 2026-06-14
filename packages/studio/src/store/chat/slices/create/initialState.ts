@@ -5,6 +5,7 @@ export const initialCreateState: CreateState = {
   sidebarView: "panel",
   artifactFile: null,
   artifactChapter: null,
+  roleOverviewExpandedByBook: {},
   bookSummary: null,
   resolvedProposals: {},
 };

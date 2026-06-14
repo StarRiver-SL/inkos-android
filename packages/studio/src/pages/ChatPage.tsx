@@ -22,10 +22,15 @@ import {
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
-import { ToolExecutionSteps, type ProposedActionDetails } from "../components/chat/ToolExecutionSteps";
+import {
+  isPlaySceneTool,
+  ToolExecutionSteps,
+  type ProposedActionDetails,
+} from "../components/chat/ToolExecutionSteps";
 import { PlayHud } from "../components/chat/PlayHud";
 import { PlayChoicePanel } from "../components/chat/PlayChoicePanel";
 import { latestPlayChoiceSet } from "../components/chat/play-choices";
+import { RelationshipGraph } from "../components/sidebar/RelationshipGraph";
 import {
   BotMessageSquare,
   ArrowUp,
@@ -34,6 +39,7 @@ import {
   Check,
   Gamepad2,
   GitBranch,
+  Network,
   Palette,
   MoreHorizontal,
   Trash2,
@@ -240,6 +246,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   // World panel (holdings / state / relations) defaults collapsed; the scene
   // image and choices live in the chat center now, opened on demand.
   const [worldPanelOpen, setWorldPanelOpen] = useState(false);
+  const [playGraphOpen, setPlayGraphOpen] = useState(false);
   const [playImageError, setPlayImageError] = useState<string | null>(null);
   const [playImageMenuOpen, setPlayImageMenuOpen] = useState(false);
   const [playImageSettings, setPlayImageSettings] = useState<PlayImageSettings>({ actors: false, moments: false, inventory: false });
@@ -249,6 +256,10 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const [playImageRefreshToken, setPlayImageRefreshToken] = useState(0);
   const [tokenSavingsLabel, setTokenSavingsLabel] = useState<string | null>(null);
   const worldPanelInsetClass = currentSessionKind === "play" && worldPanelOpen ? "lg:pr-[380px]" : "";
+
+  useEffect(() => {
+    setPlayGraphOpen(false);
+  }, [activeSessionId, currentSessionKind]);
 
   // Derived: is the assistant currently streaming/thinking/executing tools?
   const isStreaming = useMemo(() => {
@@ -878,12 +889,15 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                         | { kind: "text"; pi: number; part: Extract<typeof msg.parts[0], { type: "text" }> }
                         | { kind: "tools"; parts: Array<Extract<typeof msg.parts[0], { type: "tool" }>>; startIdx: number };
 
+                      const hasPlaySceneTool = msg.parts!.some(
+                        (part) => part.type === "tool" && isPlaySceneTool(part.execution.tool),
+                      );
                       const items: RenderItem[] = [];
                       for (let pi = 0; pi < msg.parts!.length; pi++) {
                         const part = msg.parts![pi];
                         if (part.type === "thinking") {
                           items.push({ kind: "thinking", pi, part });
-                        } else if (part.type === "text") {
+                        } else if (part.type === "text" && !hasPlaySceneTool) {
                           items.push({ kind: "text", pi, part });
                         } else if (part.type === "tool") {
                           // Merge consecutive tool parts into one group
@@ -1154,14 +1168,25 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     </span>
                   )}
                   {currentSessionKind === "play" && (
-                    <button
-                      type="button"
-                      onClick={() => setWorldPanelOpen((v) => !v)}
-                      className={`flex items-center justify-center h-8 w-8 shrink-0 rounded-full transition-all shadow-sm ${worldPanelOpen ? "bg-primary text-primary-foreground scale-105" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
-                      title={isZh ? "查看世界：持有 / 状态 / 关系" : "View world: holdings / state / relations"}
-                    >
-                      <Gamepad2 size={15} />
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setPlayGraphOpen(true)}
+                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-all ${playGraphOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                        title={isZh ? "查看当前互动关系图谱" : "View relationship graph"}
+                        aria-label={isZh ? "查看关系图谱" : "View relationship graph"}
+                      >
+                        <Network size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWorldPanelOpen((v) => !v)}
+                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-all ${worldPanelOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                        title={isZh ? "查看世界状态与持有物" : "View world state and holdings"}
+                      >
+                        <Gamepad2 size={15} />
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -1244,16 +1269,35 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       )}
 
       {currentSessionKind === "play" && activeSessionId && (
-        <PlayHud
-          sessionId={activeSessionId}
-          isStreaming={loading}
-          isZh={isZh}
-          open={worldPanelOpen}
-          onClose={() => setWorldPanelOpen(false)}
-          imageSettings={playImageSettings}
-          imageRefreshToken={playImageRefreshToken}
-          sessionTitle={activeSession?.title ?? null}
-        />
+        <>
+          {playGraphOpen && (
+            <div
+              className="fixed inset-0 z-50 flex justify-end bg-background/65 backdrop-blur-sm"
+              onClick={() => setPlayGraphOpen(false)}
+            >
+              <aside
+                className="h-full w-full border-l border-border/30 bg-background shadow-2xl sm:max-w-[480px]"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <RelationshipGraph
+                  source="play"
+                  sessionId={activeSessionId}
+                  onClose={() => setPlayGraphOpen(false)}
+                />
+              </aside>
+            </div>
+          )}
+          <PlayHud
+            sessionId={activeSessionId}
+            isStreaming={loading}
+            isZh={isZh}
+            open={worldPanelOpen}
+            onClose={() => setWorldPanelOpen(false)}
+            imageSettings={playImageSettings}
+            imageRefreshToken={playImageRefreshToken}
+            sessionTitle={activeSession?.title ?? null}
+          />
+        </>
       )}
     </div>
   );

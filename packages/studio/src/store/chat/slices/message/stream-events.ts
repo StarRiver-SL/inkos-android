@@ -552,6 +552,13 @@ export function attachSessionStreamListeners({
       flushTextBatches();
       const updateText = summarizeResult(data.partialResult);
       if (!updateText) return;
+      const partialDetails = extractToolDetails(data.partialResult);
+      const isPlayScenePreview = (
+        data.tool === "play_start"
+        || data.tool === "play_step"
+        || data.tool === "play_revise"
+      ) && partialDetails && typeof partialDetails === "object"
+        && (partialDetails as Record<string, unknown>).kind === "play_scene_preview";
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -566,7 +573,9 @@ export function attachSessionStreamListeners({
               execution: {
                 ...part.execution,
                 status: "processing" as const,
-                logs: [...(part.execution.logs ?? []), updateText].slice(-40),
+                ...(isPlayScenePreview
+                  ? { streamingText: updateText }
+                  : { logs: [...(part.execution.logs ?? []), updateText].slice(-40) }),
                 stages: advanceStagesFromLog(part.execution.stages, updateText),
               },
             };

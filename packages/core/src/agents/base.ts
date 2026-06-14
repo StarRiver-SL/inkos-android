@@ -26,7 +26,7 @@ export abstract class BaseAgent {
 
   protected async chat(
     messages: ReadonlyArray<LLMMessage>,
-    options?: { readonly temperature?: number; readonly maxTokens?: number },
+    options?: { readonly temperature?: number; readonly maxTokens?: number; readonly suppressTextDelta?: boolean },
   ): Promise<LLMResponse> {
     const service = this.ctx.client.service ?? this.ctx.client.provider;
     const baseUrl = this.ctx.client._piModel?.baseUrl ?? "(unknown)";
@@ -35,7 +35,7 @@ export abstract class BaseAgent {
       return await chatCompletion(this.ctx.client, this.ctx.model, messages, {
         ...options,
         onStreamProgress: this.ctx.onStreamProgress,
-        onTextDelta: this.ctx.onTextDelta,
+        onTextDelta: options?.suppressTextDelta ? undefined : this.ctx.onTextDelta,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

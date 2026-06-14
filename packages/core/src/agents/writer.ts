@@ -40,6 +40,7 @@ import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../u
 import { parseCreativeOutput } from "./writer-parser.js";
 import { buildRuntimeStateArtifacts, saveRuntimeStateSnapshot, type RuntimeStateArtifacts } from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
+import { syncRoleRuntimeStates } from "../utils/role-state-sync.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
@@ -1002,8 +1003,10 @@ export class WriterAgent extends BaseAgent {
       );
     }
 
-    if (runtimeStateArtifacts?.snapshot ?? output.runtimeStateSnapshot) {
-      writes.push(saveRuntimeStateSnapshot(bookDir, runtimeStateArtifacts?.snapshot ?? output.runtimeStateSnapshot!));
+    const runtimeSnapshot = runtimeStateArtifacts?.snapshot ?? output.runtimeStateSnapshot;
+    if (runtimeSnapshot) {
+      writes.push(saveRuntimeStateSnapshot(bookDir, runtimeSnapshot));
+      writes.push(syncRoleRuntimeStates({ bookDir, snapshot: runtimeSnapshot, language }).then(() => undefined));
     }
 
     if (numericalSystem && isPersistableTruthText(output.updatedLedger, MISSING_LEDGER_TEXT)) {
