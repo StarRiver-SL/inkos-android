@@ -156,9 +156,15 @@ importers:
       '@fontsource-variable/geist':
         specifier: ^5.2.8
         version: 5.2.9
+      '@fontsource-variable/noto-sans-sc':
+        specifier: ^5.2.10
+        version: 5.2.10
       '@hono/node-server':
         specifier: 1.19.13
         version: 1.19.13(hono@4.12.25)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
       '@radix-ui/react-use-controllable-state':
         specifier: ^1.2.2
         version: 1.2.2(@types/react@19.2.14)(react@19.2.4)
@@ -186,6 +192,9 @@ importers:
       cmdk:
         specifier: ^1.1.1
         version: 1.1.1(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      headroom-ai:
+        specifier: ^0.22.4
+        version: 0.22.4(@ai-sdk/provider@3.0.8)(@anthropic-ai/sdk@0.73.0(zod@3.25.76))(ai@6.0.159(zod@3.25.76))(openai@6.26.0(ws@8.21.0)(zod@3.25.76))
       hono:
         specifier: 4.12.25
         version: 4.12.25
@@ -1016,6 +1025,9 @@ packages:
 
   '@fontsource-variable/geist@5.2.9':
     resolution: {integrity: sha512-TP+QSBG3wxKGPE33CbMy/L0Nu3qvJ6Fy81Yc4LnQ95xH+i+cfEp8fyU8/kfV14YwszxIFPhnoMTbjL71waVpyQ==}
+
+  '@fontsource-variable/noto-sans-sc@5.2.10':
+    resolution: {integrity: sha512-zdk10i5HrDQTXI7ldD61zToX1fsgig8vDTsu7zB48SXOitWfuX0e5viZAwnkHuhwh096PU6X6i1AyAsbBCISpA==}
 
   '@google/genai@1.50.0':
     resolution: {integrity: sha512-oHv7JfdI6SLUitERptYoHqpn4Y2wWyPOBfWtpw8kfKTqqEiMJpUC6SEtiQPogb55Ip8fymj4bxGnGBTVV/Z9Ew==}
@@ -3636,6 +3648,24 @@ packages:
 
   headers-polyfill@4.0.3:
     resolution: {integrity: sha512-IScLbePpkvO846sIwOtOTDjutRMWdXdJmXdMvk6gCBHxFO8d+QKOQedyZSxFTTFYRSmlgSTDtXqqq4pcenBXLQ==}
+
+  headroom-ai@0.22.4:
+    resolution: {integrity: sha512-9a0rgB/jsWe8gs/ggyUwe6E8DYwKAuBvlUml2ApwlUjb5EfJ611X6X+WG0SiXw3nO6sdyV1/+Ah5uw9P7ecnjw==}
+    engines: {node: '>=18.0.0'}
+    peerDependencies:
+      '@ai-sdk/provider': '>=1.0.0'
+      '@anthropic-ai/sdk': '>=0.30.0'
+      ai: '>=6.0.0'
+      openai: '>=4.0.0'
+    peerDependenciesMeta:
+      '@ai-sdk/provider':
+        optional: true
+      '@anthropic-ai/sdk':
+        optional: true
+      ai:
+        optional: true
+      openai:
+        optional: true
 
   highlight.js@10.7.3:
     resolution: {integrity: sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A==}
@@ -6944,6 +6974,8 @@ snapshots:
 
   '@fontsource-variable/geist@5.2.9': {}
 
+  '@fontsource-variable/noto-sans-sc@5.2.10': {}
+
   '@google/genai@1.50.0(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))':
     dependencies:
       google-auth-library: 10.6.2
@@ -10018,6 +10050,13 @@ snapshots:
       space-separated-tokens: 2.0.2
 
   headers-polyfill@4.0.3: {}
+
+  headroom-ai@0.22.4(@ai-sdk/provider@3.0.8)(@anthropic-ai/sdk@0.73.0(zod@3.25.76))(ai@6.0.159(zod@3.25.76))(openai@6.26.0(ws@8.21.0)(zod@3.25.76)):
+    optionalDependencies:
+      '@ai-sdk/provider': 3.0.8
+      '@anthropic-ai/sdk': 0.73.0(zod@3.25.76)
+      ai: 6.0.159(zod@3.25.76)
+      openai: 6.26.0(ws@8.21.0)(zod@3.25.76)
 
   highlight.js@10.7.3: {}
 

@@ -75,6 +75,24 @@ export class PlayStore {
     await mkdir(this.worldDir(worldId), { recursive: true });
   }
 
+  async deleteWorld(worldId: string): Promise<void> {
+    await rm(this.worldDir(worldId), { recursive: true, force: true });
+  }
+
+  async pruneOrphanWorlds(activeWorldIds: ReadonlySet<string>): Promise<string[]> {
+    const worldsRoot = join(this.projectRoot, WORLDS_DIR);
+    const entries = await readdir(worldsRoot, { withFileTypes: true }).catch(() => []);
+    const removed: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || activeWorldIds.has(entry.name)) continue;
+      const world = await this.loadWorld(entry.name);
+      if (!world) continue;
+      await this.deleteWorld(entry.name);
+      removed.push(entry.name);
+    }
+    return removed;
+  }
+
   async createWorld(input: PlayWorldInput): Promise<PlayWorld> {
     const now = new Date().toISOString();
     const world = PlayWorldSchema.parse({

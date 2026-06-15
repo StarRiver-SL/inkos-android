@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -34,6 +34,48 @@ interface Nav {
   toDashboard: () => void;
 }
 
+const READER_FONTS = [
+  { id: "song", label: "宋体", stack: '"Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", SimSun, serif', weight: 450, spacing: "0" },
+  { id: "hei", label: "黑体", stack: '"Noto Sans SC Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif', weight: 400, spacing: "0" },
+  { id: "kai", label: "楷体", stack: 'KaiTi, "Kaiti SC", STKaiti, "Noto Serif CJK SC", serif', weight: 500, spacing: "0.025em" },
+  { id: "fangsong", label: "仿宋", stack: 'FangSong, STFangsong, "FangSong_GB2312", "Noto Serif CJK SC", serif', weight: 400, spacing: "0.04em" },
+  { id: "serif", label: "雅致衬线", stack: 'var(--font-serif)', weight: 550, spacing: "0.012em" },
+] as const;
+
+type ReaderFontId = (typeof READER_FONTS)[number]["id"];
+
+interface ReaderPreferences {
+  readonly font: ReaderFontId;
+  readonly size: number;
+  readonly lineHeight: number;
+}
+
+const READER_PREFERENCES_KEY = "inkos:reader:preferences";
+const DEFAULT_READER_PREFERENCES: ReaderPreferences = {
+  font: "song",
+  size: 20,
+  lineHeight: 1.95,
+};
+
+function readReaderPreferences(): ReaderPreferences {
+  if (typeof window === "undefined") return DEFAULT_READER_PREFERENCES;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(READER_PREFERENCES_KEY) ?? "{}") as Partial<ReaderPreferences>;
+    const font = READER_FONTS.some((item) => item.id === stored.font)
+      ? stored.font as ReaderFontId
+      : DEFAULT_READER_PREFERENCES.font;
+    const size = typeof stored.size === "number" && Number.isFinite(stored.size)
+      ? Math.min(26, Math.max(16, stored.size))
+      : DEFAULT_READER_PREFERENCES.size;
+    const lineHeight = typeof stored.lineHeight === "number" && Number.isFinite(stored.lineHeight)
+      ? Math.min(2.35, Math.max(1.55, stored.lineHeight))
+      : DEFAULT_READER_PREFERENCES.lineHeight;
+    return { font, size, lineHeight };
+  } catch {
+    return DEFAULT_READER_PREFERENCES;
+  }
+}
+
 function stripChapterHeadingPrefix(heading: string, chapterNumber: number): string {
   return heading
     .replace(new RegExp(`^第\\s*${chapterNumber}\\s*章[\\s:：、.-]*`), "")
@@ -56,6 +98,18 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [readerPreferences, setReaderPreferences] = useState<ReaderPreferences>(readReaderPreferences);
+  const readerFont = readerPreferences.font;
+  const readerSize = readerPreferences.size;
+  const readerLineHeight = readerPreferences.lineHeight;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(READER_PREFERENCES_KEY, JSON.stringify(readerPreferences));
+    } catch {
+      // Keep the in-memory choice when WebView storage is unavailable.
+    }
+  }, [readerPreferences]);
 
   const handleStartEdit = () => {
     if (!data) return;
@@ -155,9 +209,10 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
 
   const paragraphs = body.split(/\n\n+/).filter(Boolean);
   const actionClass = "flex min-h-16 min-w-0 flex-col items-center justify-center gap-1 rounded-xl border px-2 py-2 text-center text-[11px] font-bold leading-4 transition-all sm:min-h-0 sm:flex-row sm:gap-2 sm:px-4 sm:text-xs";
+  const selectedFont = READER_FONTS.find((font) => font.id === readerFont) ?? READER_FONTS[0];
 
   return (
-    <div className="max-w-4xl mx-auto space-y-10 fade-in">
+    <div className="mx-auto max-w-5xl space-y-8 fade-in">
       {/* Navigation & Actions */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
         <nav className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
@@ -250,8 +305,40 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
         </div>
       </div>
 
+      <div className="paper-sheet rounded-2xl border border-border/40 px-4 py-3 shadow-lg shadow-primary/5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <Type size={16} className="text-primary" />
+            阅读设置
+          </div>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {READER_FONTS.map((font) => (
+              <button
+                key={font.id}
+                type="button"
+                onClick={() => setReaderPreferences((current) => ({ ...current, font: font.id }))}
+                className={`min-h-9 rounded-xl border px-3 text-sm transition-all ${readerFont === font.id ? "border-primary/45 bg-primary/10 text-primary shadow-sm" : "border-border/45 bg-background/45 text-muted-foreground hover:text-foreground"}`}
+                style={{ fontFamily: font.stack, fontWeight: font.weight, letterSpacing: font.spacing }}
+              >
+                {font.label}
+              </button>
+            ))}
+          </div>
+          <label className="flex min-w-[10rem] items-center gap-2 text-xs text-muted-foreground">
+            字号
+            <input type="range" min="16" max="26" step="1" value={readerSize} onChange={(event) => setReaderPreferences((current) => ({ ...current, size: Number(event.target.value) }))} className="min-w-0 flex-1 accent-primary" />
+            <span className="w-8 text-right font-mono">{readerSize}</span>
+          </label>
+          <label className="flex min-w-[10rem] items-center gap-2 text-xs text-muted-foreground">
+            行距
+            <input type="range" min="1.55" max="2.35" step="0.05" value={readerLineHeight} onChange={(event) => setReaderPreferences((current) => ({ ...current, lineHeight: Number(event.target.value) }))} className="min-w-0 flex-1 accent-primary" />
+            <span className="w-10 text-right font-mono">{readerLineHeight.toFixed(2)}</span>
+          </label>
+        </div>
+      </div>
+
       {/* Manuscript Sheet */}
-      <div className="paper-sheet rounded-2xl p-8 md:p-16 lg:p-24 shadow-2xl shadow-primary/5 min-h-[80vh] relative overflow-hidden">
+      <div className="paper-sheet relative min-h-[80vh] overflow-hidden rounded-2xl p-6 shadow-2xl shadow-primary/5 md:p-14 lg:p-20">
         {/* Physical Paper Details */}
         <div className="absolute top-0 left-8 w-px h-full bg-primary/5 hidden md:block" />
         <div className="absolute top-0 right-8 w-px h-full bg-primary/5 hidden md:block" />
@@ -270,12 +357,13 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
               <input
                 value={editTitle}
                 onChange={(e) => setEditTitle(e.target.value)}
-                className="block w-full rounded-xl border border-border/40 bg-background/60 px-4 py-3 text-center font-serif text-2xl font-medium text-foreground shadow-sm outline-none transition-all focus:border-primary/50 focus:ring-2 focus:ring-primary/10 md:text-4xl"
+                className="block w-full rounded-xl border border-border/40 bg-background/60 px-4 py-3 text-center text-2xl font-medium text-foreground shadow-sm outline-none transition-all focus:border-primary/50 focus:ring-2 focus:ring-primary/10 md:text-4xl"
+                style={{ fontFamily: selectedFont.stack, fontWeight: selectedFont.weight, letterSpacing: selectedFont.spacing }}
                 autoFocus
               />
             </label>
           ) : (
-            <h1 className="block w-full break-words px-1 text-3xl font-serif font-medium italic text-foreground tracking-normal leading-tight md:text-5xl">
+            <h1 className="block w-full break-words px-1 text-3xl font-medium text-foreground tracking-normal leading-tight md:text-5xl" style={{ fontFamily: selectedFont.stack, fontWeight: selectedFont.weight, letterSpacing: selectedFont.spacing }}>
               {title}
             </h1>
           )}
@@ -290,12 +378,17 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           <textarea
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
-            className="w-full min-h-[78dvh] bg-transparent font-serif text-base leading-[1.8] text-foreground/90 focus:outline-none resize-y border border-border/30 rounded-lg p-4 focus:border-primary/40 focus:ring-2 focus:ring-primary/10 transition-all sm:min-h-[72vh] sm:p-6 sm:text-lg"
+            className="w-full min-h-[78dvh] resize-y rounded-lg border border-border/30 bg-background/35 p-4 text-foreground/90 transition-all focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/10 sm:min-h-[72vh] sm:p-6"
+            style={{ fontFamily: selectedFont.stack, fontWeight: selectedFont.weight, letterSpacing: selectedFont.spacing, fontSize: readerSize, lineHeight: readerLineHeight }}
           />
         ) : (
-          <article className="prose prose-zinc dark:prose-invert max-w-none">
+          <article className="mx-auto max-w-[42rem] text-foreground/90">
             {paragraphs.map((para, i) => (
-              <p key={i} className="font-serif text-lg md:text-xl leading-[1.8] text-foreground/90 mb-8 first-letter:text-2xl first-letter:font-bold first-letter:text-primary/40">
+              <p
+                key={i}
+                className="mb-7 break-words text-justify indent-[2em] first-letter:text-[1.45em] first-letter:font-semibold first-letter:text-primary/45"
+                style={{ fontFamily: selectedFont.stack, fontWeight: selectedFont.weight, letterSpacing: selectedFont.spacing, fontSize: readerSize, lineHeight: readerLineHeight }}
+              >
                 {para}
               </p>
             ))}

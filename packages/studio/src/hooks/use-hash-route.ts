@@ -21,6 +21,12 @@ export type HashRoute =
   | { page: "radar" }
   | { page: "doctor" };
 
+const IMPORT_TABS = new Set(["chapters", "canon", "fanfic", "spinoff", "imitation"]);
+
+function isImportTab(value: unknown): value is NonNullable<Extract<HashRoute, { page: "import" }>["tab"]> {
+  return typeof value === "string" && IMPORT_TABS.has(value);
+}
+
 function parseHash(hash: string): HashRoute {
   const path = hash.replace(/^#\/?/, "");
 
@@ -87,7 +93,7 @@ function routeToHash(route: HashRoute): string {
     case "images": return "#/images";
     case "radar": return "#/radar";
     case "doctor": return "#/doctor";
-    case "import": return route.tab ? `#/import/${route.tab}` : "#/import";
+    case "import": return isImportTab(route.tab) ? `#/import/${route.tab}` : "#/import";
     case "service-detail": return `#/services/${encodeURIComponent(route.serviceId)}`;
     default: return "";
   }

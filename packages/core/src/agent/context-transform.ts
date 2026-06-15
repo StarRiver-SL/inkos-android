@@ -5,6 +5,13 @@ import { join } from "node:path";
 import { isNewLayoutBook } from "../utils/outline-paths.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
 
+export interface ExternalContextCompressionResult {
+  readonly compressed: string;
+  readonly hash?: string;
+}
+
+export type ExternalContextCompressor = (content: string) => Promise<ExternalContextCompressionResult | null>;
+
 /** Files read in this order; anything else in story/ comes after, sorted alphabetically. */
 const PRIORITY_FILES = [
   "outline/story_frame.md",
@@ -30,7 +37,10 @@ const UPGRADE_HINT =
 export function createBookContextTransform(
   bookId: string | null,
   projectRoot: string,
-  options: { readonly onContextCompression?: ContextCompressionCallback } = {},
+  options: {
+    readonly onContextCompression?: ContextCompressionCallback;
+    readonly compressContext?: ExternalContextCompressor;
+  } = {},
 ): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   if (bookId === null) {
     return async (messages) => messages;
@@ -57,10 +67,13 @@ export function createBookContextTransform(
       });
     }
 
+    const renderedSections = await Promise.all(
+      sections.map((section) => renderContextSection(section, options.compressContext)),
+    );
     const body =
       "[以下是当前书籍的上下文压缩包，每次对话时自动从磁盘读取生成。请基于这些内容进行创作和判断；需要完整原文时再按文件读取。]" +
       hintBlock + "\n\n" +
-      sections.map(renderContextSection).join("\n\n");
+      renderedSections.join("\n\n");
 
     if (compactedSources.length > 0) {
       options.onContextCompression?.({
@@ -85,9 +98,23 @@ interface TruthFileSection {
   content: string;
 }
 
-function renderContextSection(section: TruthFileSection): string {
+async function renderContextSection(
+  section: TruthFileSection,
+  compressContext?: ExternalContextCompressor,
+): Promise<string> {
   if (section.content.length <= FULL_INLINE_CHAR_LIMIT) {
     return `=== ${section.name} ===\n${section.content}`;
+  }
+
+  if (compressContext) {
+    const compressed = await compressContext(section.content).catch(() => null);
+    if (compressed?.compressed) {
+      return [
+        `=== ${section.name} ===`,
+        `[Headroom MCP 已压缩原文件 ${section.content.length} 字符${compressed.hash ? `；CCR hash: ${compressed.hash}` : ""}。需要完整原文时按文件读取。]`,
+        compressed.compressed,
+      ].join("\n");
+    }
   }
 
   const index = buildMarkdownFileIndex(section.content);

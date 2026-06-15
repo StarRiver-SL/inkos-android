@@ -1,4 +1,5 @@
 import { useRef, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
@@ -6,6 +7,13 @@ import { fetchJson } from "../hooks/use-api";
 import { useCompositionInput } from "../hooks/use-composition-input";
 import { useAndroidImeBridge } from "../hooks/use-android-ime-bridge";
 import { appAlert, appConfirm } from "../lib/app-dialog";
+import { buildApiUrl } from "../lib/api-url";
+import {
+  DEFAULT_CHAT_BACKGROUND,
+  readChatBackground,
+  writeChatBackground,
+  type ChatBackgroundSettings,
+} from "../lib/chat-background";
 import { chatSelectors, useChatStore } from "../store/chat";
 import type { ChatSessionKind } from "../store/chat";
 import { useServiceStore } from "../store/service";
@@ -41,11 +49,17 @@ import {
   GitBranch,
   Network,
   Palette,
+  ImagePlus,
+  Upload,
+  RotateCw,
+  Eraser,
   MoreHorizontal,
   Trash2,
   ShieldAlert,
   Sparkles,
   Wrench,
+  Loader2,
+  X,
 } from "lucide-react";
 import { Shimmer } from "../components/ai-elements/shimmer";
 import {
@@ -128,6 +142,22 @@ interface BookChapterHealthPayload {
   }>;
 }
 
+interface WallpaperLibraryItem {
+  readonly id: string;
+  readonly kind: string;
+  readonly title: string;
+  readonly url?: string;
+  readonly updatedAt?: string;
+}
+
+interface WallpaperLibraryResponse {
+  readonly items: ReadonlyArray<WallpaperLibraryItem>;
+}
+
+interface WallpaperUploadResponse {
+  readonly item: WallpaperLibraryItem;
+}
+
 // -- Component --
 
 export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-create", nav, theme, t, sse: _sse }: ChatPageProps) {
@@ -154,6 +184,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const backgroundInputRef = useRef<HTMLInputElement>(null);
   const textareaSessionIdRef = useRef(activeSessionId);
   const autoScrollPinnedRef = useRef(true);
   const [followingLatest, setFollowingLatest] = useState(true);
@@ -255,11 +286,45 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const [playSceneGenerating, setPlaySceneGenerating] = useState(false);
   const [playImageRefreshToken, setPlayImageRefreshToken] = useState(0);
   const [tokenSavingsLabel, setTokenSavingsLabel] = useState<string | null>(null);
+  const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
+  const [chatBackground, setChatBackground] = useState<ChatBackgroundSettings>(readChatBackground);
+  const [wallpaperHistory, setWallpaperHistory] = useState<ReadonlyArray<WallpaperLibraryItem>>([]);
+  const [wallpaperHistoryLoading, setWallpaperHistoryLoading] = useState(false);
+  const [wallpaperUploading, setWallpaperUploading] = useState(false);
+  const [wallpaperName, setWallpaperName] = useState("");
   const worldPanelInsetClass = currentSessionKind === "play" && worldPanelOpen ? "lg:pr-[380px]" : "";
 
   useEffect(() => {
     setPlayGraphOpen(false);
   }, [activeSessionId, currentSessionKind]);
+
+  useEffect(() => {
+    try {
+      writeChatBackground(chatBackground);
+    } catch {
+      // Storage can be unavailable in privacy-restricted WebViews.
+    }
+  }, [chatBackground]);
+
+  useEffect(() => {
+    if (!backgroundMenuOpen) return;
+    let active = true;
+    setWallpaperHistoryLoading(true);
+    void fetchJson<WallpaperLibraryResponse>("/images/library")
+      .then((response) => {
+        if (!active) return;
+        setWallpaperHistory(response.items.filter((item) => item.kind === "wallpaper" && item.url));
+      })
+      .catch(() => {
+        if (active) setWallpaperHistory([]);
+      })
+      .finally(() => {
+        if (active) setWallpaperHistoryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [backgroundMenuOpen]);
 
   // Derived: is the assistant currently streaming/thinking/executing tools?
   const isStreaming = useMemo(() => {
@@ -744,10 +809,66 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     }
   };
 
+  const updateChatBackground = (patch: Partial<ChatBackgroundSettings>) => {
+    setChatBackground((current) => ({ ...current, ...patch }));
+  };
+
+  const handleChatBackgroundFile = (file: File | undefined) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    setWallpaperUploading(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        if (typeof reader.result !== "string") throw new Error("Unable to read image");
+        const response = await fetchJson<WallpaperUploadResponse>("/images/library/wallpapers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: wallpaperName.trim() || file.name, dataUrl: reader.result }),
+        });
+        if (!response.item.url) throw new Error("Wallpaper URL is missing");
+        setWallpaperHistory((current) => [
+          response.item,
+          ...current.filter((item) => item.id !== response.item.id),
+        ]);
+        setChatBackground({ ...DEFAULT_CHAT_BACKGROUND, imageUrl: response.item.url });
+        setWallpaperName("");
+        setBackgroundMenuOpen(true);
+      } catch (error) {
+        await appAlert({
+          title: "壁纸保存失败",
+          message: error instanceof Error ? error.message : String(error),
+          tone: "danger",
+        });
+      } finally {
+        setWallpaperUploading(false);
+      }
+    };
+    reader.onerror = () => {
+      setWallpaperUploading(false);
+      void appAlert({ title: "壁纸读取失败", message: "无法读取所选图片。", tone: "danger" });
+    };
+    reader.readAsDataURL(file);
+  };
+
   return (
     <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+      {chatBackground.imageUrl ? (
+        <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+          <img
+            src={buildApiUrl(chatBackground.imageUrl) ?? chatBackground.imageUrl}
+            alt=""
+            className="absolute left-1/2 top-1/2 h-full w-full object-cover transition-[opacity,transform] duration-500 ease-out"
+            style={{
+              opacity: chatBackground.opacity,
+              objectPosition: `${chatBackground.x}% ${chatBackground.y}%`,
+              transform: `translate(-50%, -50%) rotate(${chatBackground.rotate}deg) scale(${chatBackground.scale / 100})`,
+            }}
+          />
+          <div className="absolute inset-0 bg-background/35" />
+        </div>
+      ) : null}
       {playModeInfo && (
-        <div className={`shrink-0 border-b border-border/45 bg-background/80 px-2.5 py-2 backdrop-blur transition-[padding] duration-200 sm:px-4 ${worldPanelInsetClass}`}>
+        <div className={`relative z-10 shrink-0 border-b border-border/45 bg-background/80 px-2.5 py-2 backdrop-blur transition-[padding] duration-200 sm:px-4 ${worldPanelInsetClass}`}>
           <div className="mx-auto flex max-w-5xl items-center gap-2 rounded-xl border border-border/45 bg-card/65 px-2.5 py-2 text-sm shadow-sm">
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
               {(() => {
@@ -793,7 +914,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         </div>
       )}
       {activeBookId && degradedChapter !== null && (
-        <div className={`shrink-0 border-b border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-2 sm:px-4 ${worldPanelInsetClass}`}>
+        <div className={`relative z-10 shrink-0 border-b border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-2 sm:px-4 ${worldPanelInsetClass}`}>
           <div className="mx-auto flex max-w-5xl items-center gap-3 rounded-xl border border-amber-500/25 bg-card/80 px-3 py-2.5 shadow-sm">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/12 text-amber-600">
               <ShieldAlert size={17} />
@@ -827,7 +948,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
           autoScrollPinnedRef.current = isNearBottom;
           setFollowingLatest(isNearBottom);
         }}
-        className={`chat-message-scroll flex-1 overflow-y-auto [scrollbar-gutter:stable] px-2.5 py-3 transition-[padding] duration-200 sm:px-4 sm:py-6 ${worldPanelInsetClass}`}
+        className={`chat-message-scroll relative z-10 flex-1 overflow-y-auto [scrollbar-gutter:stable] px-2.5 py-3 transition-[padding] duration-200 sm:px-4 sm:py-6 ${worldPanelInsetClass}`}
       >
         {needsPlayModeChoice ? (
           <div className="h-full flex flex-col items-center justify-center text-center select-none gap-4">
@@ -1051,7 +1172,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
 
       {/* Quick actions (only when a book is active) */}
       {hasBook && !showChoicePanel && (
-        <div className={`shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
+        <div className={`relative z-10 shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
           <div className="mx-auto w-full max-w-5xl px-2.5 sm:px-4">
             <QuickActions
               onAction={handleQuickAction}
@@ -1066,7 +1187,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
           images render inside their corresponding chat result card so the
           visual history scrolls with the conversation. */}
       {currentSessionKind === "play" && !needsPlayModeChoice && showChoicePanel && (
-        <div className={`shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
+        <div className={`relative z-10 shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
           <PlayChoicePanel
             choices={playChoices}
             disabled={loading || !activeSessionId}
@@ -1134,13 +1255,13 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                   {loading ? <Square size={14} fill="currentColor" strokeWidth={2.5} className="sm:size-3" /> : <ArrowUp size={16} strokeWidth={2.5} className="sm:size-3.5" />}
                 </button>
               </div>
-              <div className="flex min-h-9 flex-wrap items-center gap-2 border-t border-border/35 px-3 pb-2 pt-1">
+              <div className="grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-t border-border/35 px-3 pb-2 pt-1">
                 {modelPickerStatus === "loading" ? (
                   <span className="text-xs text-muted-foreground/40 animate-pulse">加载模型...</span>
                 ) : modelPickerStatus === "ready" ? (
                   <DropdownMenu>
-                    <DropdownMenuTrigger className="flex min-h-8 max-w-full items-center gap-1.5 rounded-xl px-2.5 py-1 text-sm transition-colors hover:bg-secondary/70">
-                      <span className="max-w-[calc(100vw-7rem)] truncate text-xs font-medium sm:max-w-[220px]">
+                    <DropdownMenuTrigger className="flex min-h-10 min-w-0 max-w-full items-center gap-1.5 rounded-xl px-2.5 py-1 text-sm transition-colors hover:bg-secondary/70 sm:min-h-8">
+                      <span className="min-w-0 truncate text-xs font-medium sm:max-w-[220px]">
                         {selectedModelLabel}
                       </span>
                       <ChevronDown size={14} className="text-muted-foreground" />
@@ -1161,18 +1282,158 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     配置模型 →
                   </button>
                 )}
-                <div className="ml-auto flex items-center gap-2">
-                  {tokenSavingsLabel && (
-                    <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-                      {tokenSavingsLabel}
-                    </span>
-                  )}
+                <div className="flex shrink-0 items-center justify-end gap-1.5">
+                  <div className="relative">
+                    <input
+                      ref={backgroundInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(event) => {
+                        handleChatBackgroundFile(event.target.files?.[0]);
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBackgroundMenuOpen((value) => !value)}
+                      className={`flex h-10 w-10 min-h-10 min-w-10 shrink-0 items-center justify-center rounded-full shadow-sm transition-all sm:h-8 sm:w-8 sm:min-h-8 sm:min-w-8 ${backgroundMenuOpen || chatBackground.imageUrl ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                      title={isZh ? "聊天背景" : "Chat background"}
+                      aria-label={isZh ? "聊天背景" : "Chat background"}
+                    >
+                      <ImagePlus size={15} />
+                    </button>
+{backgroundMenuOpen ? createPortal(
+  <div
+    className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/55 px-3 py-[calc(env(safe-area-inset-top)+0.75rem)] pb-[calc(env(safe-area-inset-bottom)+0.75rem)] backdrop-blur-sm"
+    role="dialog"
+    aria-modal="true"
+    aria-label={isZh ? "聊天背景设置" : "Chat background settings"}
+    onClick={() => setBackgroundMenuOpen(false)}
+  >
+    <div
+      className="max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] w-full max-w-sm overflow-y-auto rounded-2xl border border-border/60 bg-card p-4 shadow-2xl shadow-primary/10"
+      onClick={(event) => event.stopPropagation()}
+    >
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <div className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                            {isZh ? "聊天背景" : "Chat background"}
+                          </div>
+      <div className="flex items-center gap-1">
+        {chatBackground.imageUrl ? (
+          <button
+            type="button"
+            onClick={() => updateChatBackground(DEFAULT_CHAT_BACKGROUND)}
+            className="flex h-7 items-center gap-1 rounded-lg px-2 text-[12px] text-muted-foreground transition-colors hover:bg-secondary/70 hover:text-destructive"
+          >
+            <Eraser size={12} />
+            {isZh ? "清除" : "Clear"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => setBackgroundMenuOpen(false)}
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          aria-label={isZh ? "关闭" : "Close"}
+        >
+          <X size={15} />
+        </button>
+      </div>
+                        </div>
+                        <label className="mb-2 block space-y-1.5">
+                          <span className="text-[12px] font-medium text-muted-foreground">
+                            {isZh ? "壁纸名称" : "Wallpaper name"}
+                          </span>
+                          <input
+                            type="text"
+                            value={wallpaperName}
+                            onChange={(event) => setWallpaperName(event.target.value)}
+                            maxLength={80}
+                            placeholder={isZh ? "例如：夜晚书房" : "For example: Night study"}
+                            className="h-10 w-full rounded-xl border border-border/50 bg-secondary/25 px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/55 focus:border-primary/60 focus:bg-background/80"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => backgroundInputRef.current?.click()}
+                          disabled={wallpaperUploading}
+                          className="mb-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-primary/35 bg-primary/10 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/15 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {wallpaperUploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+                          {chatBackground.imageUrl ? (isZh ? "更换图片" : "Replace image") : (isZh ? "添加图片" : "Add image")}
+                        </button>
+                        <div className="mb-3 border-b border-border/35 pb-3">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <span className="text-[12px] font-medium text-muted-foreground">
+                              {isZh ? "历史壁纸" : "Wallpaper history"}
+                            </span>
+                            <span className="text-[11px] text-muted-foreground/60">{wallpaperHistory.length}</span>
+                          </div>
+                          {wallpaperHistoryLoading ? (
+                            <div className="flex h-16 items-center justify-center rounded-xl bg-secondary/25 text-muted-foreground">
+                              <Loader2 size={16} className="animate-spin" />
+                            </div>
+                          ) : wallpaperHistory.length > 0 ? (
+                            <div className="grid max-h-36 grid-cols-4 gap-2 overflow-y-auto pr-1">
+                              {wallpaperHistory.map((item) => {
+                                const src = item.url ? buildApiUrl(item.url) ?? item.url : undefined;
+                                const selected = item.url === chatBackground.imageUrl;
+                                return (
+                                  <button
+                                    key={item.id}
+                                    type="button"
+                                    onClick={() => item.url && setChatBackground({ ...DEFAULT_CHAT_BACKGROUND, imageUrl: item.url })}
+                                    className={`group relative aspect-square overflow-hidden rounded-lg border transition-all ${selected ? "border-primary ring-2 ring-primary/25" : "border-border/45 hover:border-primary/60"}`}
+                                    title={item.title}
+                                    aria-label={`${isZh ? "切换到壁纸" : "Use wallpaper"} ${item.title}`}
+                                  >
+                                    {src ? <img src={src} alt="" className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105" loading="lazy" /> : null}
+                                    {selected ? <span className="absolute inset-x-0 bottom-0 bg-primary/90 py-0.5 text-[10px] font-medium text-primary-foreground">{isZh ? "使用中" : "Active"}</span> : null}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-dashed border-border/50 px-3 py-3 text-center text-[12px] text-muted-foreground">
+                              {isZh ? "上传后的壁纸会保存在这里" : "Uploaded wallpapers appear here"}
+                            </div>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[12px] text-muted-foreground">
+                          <label className="space-y-1.5">
+                            <span>{isZh ? "透明度" : "Opacity"}</span>
+                            <input type="range" min="0.05" max="0.65" step="0.01" value={chatBackground.opacity} onChange={(e) => updateChatBackground({ opacity: Number(e.target.value) })} className="w-full accent-primary" />
+                          </label>
+                          <label className="space-y-1.5">
+                            <span>{isZh ? "裁剪缩放" : "Crop zoom"}</span>
+                            <input type="range" min="100" max="180" step="1" value={chatBackground.scale} onChange={(e) => updateChatBackground({ scale: Number(e.target.value) })} className="w-full accent-primary" />
+                          </label>
+                          <label className="space-y-1.5">
+                            <span>{isZh ? "水平位置" : "X position"}</span>
+                            <input type="range" min="0" max="100" step="1" value={chatBackground.x} onChange={(e) => updateChatBackground({ x: Number(e.target.value) })} className="w-full accent-primary" />
+                          </label>
+                          <label className="space-y-1.5">
+                            <span>{isZh ? "垂直位置" : "Y position"}</span>
+                            <input type="range" min="0" max="100" step="1" value={chatBackground.y} onChange={(e) => updateChatBackground({ y: Number(e.target.value) })} className="w-full accent-primary" />
+                          </label>
+                        </div>
+                        <label className="mt-2 flex items-center gap-2 rounded-xl border border-border/35 bg-secondary/25 px-2 py-2 text-[12px] text-muted-foreground">
+                          <RotateCw size={14} className="text-primary" />
+                          <span className="shrink-0">{isZh ? "旋转" : "Rotate"}</span>
+                          <input type="range" min="-30" max="30" step="1" value={chatBackground.rotate} onChange={(e) => updateChatBackground({ rotate: Number(e.target.value) })} className="min-w-0 flex-1 accent-primary" />
+                          <span className="w-9 text-right font-mono">{chatBackground.rotate}°</span>
+                        </label>
+                      </div>
+                    </div>,
+                    document.body,
+                  ) : null}
+                  </div>
                   {currentSessionKind === "play" && (
                     <>
                       <button
                         type="button"
                         onClick={() => setPlayGraphOpen(true)}
-                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-all ${playGraphOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                        className={`flex h-10 w-10 min-h-10 min-w-10 shrink-0 items-center justify-center rounded-full shadow-sm transition-all sm:h-8 sm:w-8 sm:min-h-8 sm:min-w-8 ${playGraphOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
                         title={isZh ? "查看当前互动关系图谱" : "View relationship graph"}
                         aria-label={isZh ? "查看关系图谱" : "View relationship graph"}
                       >
@@ -1181,7 +1442,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                       <button
                         type="button"
                         onClick={() => setWorldPanelOpen((v) => !v)}
-                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-all ${worldPanelOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
+                        className={`flex h-10 w-10 min-h-10 min-w-10 shrink-0 items-center justify-center rounded-full shadow-sm transition-all sm:h-8 sm:w-8 sm:min-h-8 sm:min-w-8 ${worldPanelOpen ? "scale-105 bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-muted hover:text-primary"}`}
                         title={isZh ? "查看世界状态与持有物" : "View world state and holdings"}
                       >
                         <Gamepad2 size={15} />
@@ -1189,6 +1450,11 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     </>
                   )}
                 </div>
+                {tokenSavingsLabel && (
+                  <span className="col-span-2 row-start-2 max-w-full truncate rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 sm:col-span-1 sm:col-start-2 sm:max-w-56 sm:justify-self-end sm:text-[11px]">
+                    {tokenSavingsLabel}
+                  </span>
+                )}
               </div>
             </div>
             {currentSessionKind === "play" ? (
@@ -1198,7 +1464,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                   onClick={() => setPlayImageMenuOpen((value) => !value)}
                   disabled={loading || !activeSessionId}
                   title={isZh ? "自动配图" : "Auto illustration"}
-                  className={`flex h-10 w-10 items-center justify-center rounded-xl border border-border/50 bg-secondary/40 shadow-sm transition-all hover:border-primary/50 hover:bg-primary/10 hover:text-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 ${playImageMenuOpen || playImageSettings.actors || playImageSettings.moments || playImageSettings.inventory ? "text-primary" : "text-muted-foreground"}`}
+                  className={`flex h-11 w-11 min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-border/50 bg-secondary/40 shadow-sm transition-all hover:border-primary/50 hover:bg-primary/10 hover:text-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 sm:h-10 sm:w-10 sm:min-h-10 sm:min-w-10 ${playImageMenuOpen || playImageSettings.actors || playImageSettings.moments || playImageSettings.inventory ? "text-primary" : "text-muted-foreground"}`}
                   aria-label={isZh ? "自动配图" : "Auto illustration"}
                 >
                   <Palette size={17} />
@@ -1272,11 +1538,11 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         <>
           {playGraphOpen && (
             <div
-              className="fixed inset-0 z-50 flex justify-end bg-background/65 backdrop-blur-sm"
+              className="fixed inset-0 z-50 flex justify-end bg-background/65 pt-[env(safe-area-inset-top)] backdrop-blur-sm"
               onClick={() => setPlayGraphOpen(false)}
             >
               <aside
-                className="h-full w-full border-l border-border/30 bg-background shadow-2xl sm:max-w-[480px]"
+                className="h-full min-h-0 w-full border-l border-border/30 bg-background shadow-2xl sm:max-w-[480px]"
                 onClick={(event) => event.stopPropagation()}
               >
                 <RelationshipGraph

@@ -72,7 +72,11 @@ const ROLE_STATE_START = "<!-- INKOS:ROLE_RUNTIME_STATE_START -->";
 const ROLE_STATE_END = "<!-- INKOS:ROLE_RUNTIME_STATE_END -->";
 const RELATION_PATTERN = /关系|敌我|盟友|同盟|对手|怀疑|信任|背叛|合作|冲突|alliance|relationship|trust|doubt|ally|enemy|opposes|supports/i;
 
-export function parseRoleRuntimeSummary(markdown: string): RoleRuntimeSummary | null {
+export function parseRoleRuntimeSummary(
+  markdown: string,
+  roleName?: string,
+  knownRoleNames: ReadonlyArray<string> = [],
+): RoleRuntimeSummary | null {
   const start = markdown.indexOf(ROLE_STATE_START);
   const end = markdown.indexOf(ROLE_STATE_END);
   if (start < 0 || end <= start) return null;
@@ -87,7 +91,8 @@ export function parseRoleRuntimeSummary(markdown: string): RoleRuntimeSummary | 
 
   const chapterLine = lines[0] ?? "";
   const chapter = Number.parseInt(chapterLine.match(/\d+/)?.[0] ?? "", 10);
-  const details = lines.slice(1);
+  const rawDetails = lines.slice(1);
+  const details = scopeRoleRuntimeLines(rawDetails, roleName, knownRoleNames);
   const relationLines = details.filter((line) => RELATION_PATTERN.test(line));
   const stateLines = details.filter((line) => !RELATION_PATTERN.test(line));
   return {
@@ -95,6 +100,32 @@ export function parseRoleRuntimeSummary(markdown: string): RoleRuntimeSummary | 
     stateLines,
     relationLines,
   };
+}
+
+function scopeRoleRuntimeLines(
+  lines: ReadonlyArray<string>,
+  roleName?: string,
+  knownRoleNames: ReadonlyArray<string> = [],
+): string[] {
+  if (!roleName) return uniqueLines(lines);
+  const scoped = lines.filter((line) => line.includes(roleName));
+  if (scoped.length > 0) return uniqueLines(scoped);
+  const mentionedAnyKnownRole = lines.some((line) =>
+    knownRoleNames.some((name) => name !== roleName && line.includes(name)),
+  );
+  return mentionedAnyKnownRole ? [] : uniqueLines(lines);
+}
+
+function uniqueLines(lines: ReadonlyArray<string>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = line.replace(/\s+/g, " ").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }
 
 // Phase 5 layout: one file per character under roles/. Each entry opens the
@@ -208,7 +239,7 @@ function SettlementEntry({ role }: { readonly role: RoleDisplayInfo }) {
   return (
     <button
       onClick={() => openArtifact(role.ref.path)}
-      className="w-full rounded-lg bg-secondary/25 px-2.5 py-2 text-left transition-colors hover:bg-secondary/45"
+      className="w-full rounded-lg bg-secondary/25 px-2.5 py-2.5 text-left transition-colors hover:bg-secondary/45"
     >
       <div className="mb-1.5 flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-foreground">
@@ -216,17 +247,18 @@ function SettlementEntry({ role }: { readonly role: RoleDisplayInfo }) {
         </span>
         <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[11px]", badge.color)}>{badge.label}</span>
       </div>
-      {stateLines.slice(0, 2).map((line) => (
-        <p key={line} className="line-clamp-2 text-[13px] leading-5 text-muted-foreground">
+      {stateLines.slice(0, 2).map((line, index) => (
+        <p key={`${index}:${line}`} className="line-clamp-3 text-[13px] leading-5 text-muted-foreground">
           {line}
         </p>
       ))}
-      {relationLines.slice(0, 2).map((line) => (
-        <p key={line} className="mt-1 flex gap-1.5 text-[13px] leading-5 text-muted-foreground">
+      {relationLines.slice(0, 3).map((line, index) => (
+        <p key={`${index}:${line}`} className="mt-1 flex gap-1.5 text-[13px] leading-5 text-muted-foreground">
           <GitBranch size={12} className="mt-1 shrink-0 text-primary/80" />
-          <span className="line-clamp-2">{line}</span>
+          <span className="line-clamp-3">{line}</span>
         </p>
       ))}
+      <p className="mt-2 text-[11px] font-medium text-primary/75">点击查看完整角色摘要</p>
     </button>
   );
 }
@@ -301,11 +333,12 @@ export function CharacterSection({ bookId }: CharacterSectionProps) {
 
         // Phase 5 books expose one file per character under roles/.
         if (roleRefs.length > 0) {
+          const roleNames = roleRefs.map((role) => role.name);
           const roleDetails = await Promise.all(roleRefs.map(async (role) => {
             const detail = await fetchJson<{ content: string | null }>(
               `/books/${bookId}/truth/${role.path}`,
             ).catch(() => ({ content: null }));
-            return { ref: role, runtime: parseRoleRuntimeSummary(detail.content ?? "") };
+            return { ref: role, runtime: parseRoleRuntimeSummary(detail.content ?? "", role.name, roleNames) };
           }));
           if (!cancelled) setRoles(roleDetails);
           return;

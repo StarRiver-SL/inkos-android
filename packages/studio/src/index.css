@@ -7,6 +7,7 @@
 
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "@fontsource-variable/noto-sans-sc";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -48,8 +49,8 @@ html {
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  --font-serif: 'Source Serif 4', 'Lora', Georgia, 'Times New Roman', serif;
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", serif;
+  --font-sans: "Noto Sans SC Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
 
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);

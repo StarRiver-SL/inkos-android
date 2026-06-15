@@ -3,6 +3,7 @@ import {
   buildRelationshipGraphModel,
   buildTruthRelationshipGraph,
   mergeRelationshipGraphs,
+  relationshipVisual,
 } from "../RelationshipGraph";
 
 describe("buildRelationshipGraphModel", () => {
@@ -31,6 +32,8 @@ describe("buildRelationshipGraphModel", () => {
     expect(model.edges.map((edge) => edge.id)).not.toContain("expired");
     expect(model.edges).toHaveLength(4);
     expect(model.nodes.find((node) => node.id === "actor_guard")?.degree).toBe(3);
+    expect(Math.max(...model.nodes.map((node) => node.x)) - Math.min(...model.nodes.map((node) => node.x))).toBeGreaterThan(250);
+    expect(Math.max(...model.nodes.map((node) => node.y)) - Math.min(...model.nodes.map((node) => node.y))).toBeGreaterThan(180);
   });
 
   it("filters by entity type and query", () => {
@@ -52,6 +55,21 @@ describe("buildRelationshipGraphModel", () => {
       "rel-guard-player",
     ]);
     expect(model.nodes.map((node) => node.id)).not.toContain("item_key");
+  });
+
+  it("can keep disconnected book actors visible while chapter settlement is pending", () => {
+    const model = buildRelationshipGraphModel(graph, { includeDisconnected: true });
+
+    expect(model.nodes.map((node) => node.id)).toContain("orphan");
+    expect(model.typeCounts.find((item) => item.type === "actor")?.count).toBe(3);
+  });
+
+  it("assigns distinct visual colors to semantic relationship types", () => {
+    expect(relationshipVisual("敌对").key).toBe("hostile");
+    expect(relationshipVisual("母女").key).toBe("family");
+    expect(relationshipVisual("盟友")).toMatchObject({ key: "alliance", color: "#22c55e" });
+    expect(relationshipVisual("上下级")).toMatchObject({ key: "authority", color: "#eab308" });
+    expect(relationshipVisual("普通认识").key).toBe("neutral");
   });
 
   it("builds book relationships from current_focus relationship groups", () => {
@@ -78,6 +96,73 @@ describe("buildRelationshipGraphModel", () => {
     ]));
     expect(truthGraph.edges).toHaveLength(6);
     expect(truthGraph.edges.map((edge) => edge.type)).toContain("核心关系");
+  });
+
+  it("builds book relationships from colon-delimited current_focus lines", () => {
+    const truthGraph = buildTruthRelationshipGraph([
+      { name: "roles/次要角色/陈默.md", content: "# 陈默" },
+      { name: "roles/次要角色/赵总.md", content: "# 赵总" },
+      { name: "roles/次要角色/林母.md", content: "# 林母" },
+      { name: "roles/主要角色/苏青.md", content: "# 苏青" },
+      { name: "roles/主要角色/林予安.md", content: "# 林予安" },
+      {
+        name: "current_focus.md",
+        content: [
+          "核心关系：陈默、赵总、林母、苏青、林予安",
+          "本章关系变化：赵总试图压制苏青，林予安开始保护苏青。",
+        ].join("\n"),
+      },
+    ]);
+
+    const model = buildRelationshipGraphModel(truthGraph, { includeDisconnected: true });
+
+    expect(model.nodes).toHaveLength(5);
+    expect(model.edges.length).toBeGreaterThan(0);
+    expect(truthGraph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fromId: "book-actor:陈默",
+        toId: "book-actor:赵总",
+        type: "核心关系",
+      }),
+      expect.objectContaining({
+        fromId: "book-actor:苏青",
+        toId: "book-actor:林予安",
+        type: "核心关系",
+      }),
+    ]));
+  });
+
+  it("extracts static relationship tables from role cards", () => {
+    const truthGraph = buildTruthRelationshipGraph([
+      {
+        name: "roles/主要角色/林玄.md",
+        content: [
+          "# 林玄",
+          "## 人际关系",
+          "| 角色 | 关系 | 态度 |",
+          "|------|------|------|",
+          "| 林雨 | 妹妹 | 绝对保护，情感软肋 |",
+          "| 苏晚晴 | 盟友/观察者 | 信任但保持警惕 |",
+        ].join("\n"),
+      },
+      { name: "roles/次要角色/林雨.md", content: "# 林雨" },
+      { name: "roles/主要角色/苏晚晴.md", content: "# 苏晚晴" },
+    ]);
+
+    expect(truthGraph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fromId: "book-actor:林玄",
+        toId: "book-actor:林雨",
+        type: "妹妹",
+      }),
+      expect.objectContaining({
+        fromId: "book-actor:林玄",
+        toId: "book-actor:苏晚晴",
+        type: "盟友",
+      }),
+    ]));
+    const model = buildRelationshipGraphModel(truthGraph, { includeDisconnected: true });
+    expect(model.edges.every((edge) => typeof edge.summary === "string" && edge.summary.length > 0)).toBe(true);
   });
 
   it("extracts chapter-settled relationship changes from role cards", () => {

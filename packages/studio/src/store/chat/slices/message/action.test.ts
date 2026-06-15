@@ -351,6 +351,18 @@ describe("chat message actions", () => {
 
     const sent = store.getState().sendMessage(sessionId, "写一个开场", { sessionKind: "chat" });
     await vi.waitFor(() => expect(store.getState().sessions[sessionId]?.isStreaming).toBe(true));
+    await vi.waitFor(() => expect(fakeEventSources.length).toBeGreaterThan(0));
+    fakeEventSources[0]?.emit("tool:start", {
+      sessionId,
+      id: "writer-1",
+      tool: "sub_agent",
+      args: { agent: "writer" },
+      stages: ["准备章节输入", "撰写章节草稿"],
+    });
+    await vi.waitFor(() => {
+      const assistant = store.getState().sessions[sessionId]?.messages.at(-1);
+      expect(assistant?.toolExecutions?.[0]?.status).toBe("running");
+    });
 
     await store.getState().cancelMessage(sessionId);
     await sent;
@@ -358,7 +370,10 @@ describe("chat message actions", () => {
     const session = store.getState().sessions[sessionId];
     expect(session?.isStreaming).toBe(false);
     expect(session?.abortController).toBeNull();
-    expect(session?.messages.at(-1)?.content).toContain("已停止当前生成");
+    const assistant = session?.messages.at(-1);
+    expect(assistant?.content).toContain("已停止当前生成");
+    expect(assistant?.toolExecutions?.[0]?.status).toBe("cancelled");
+    expect(assistant?.toolExecutions?.[0]?.stages?.[1]?.status).toBe("cancelled");
     expect(fetchJson).toHaveBeenCalledWith("/active-operations/agent%3A" + sessionId + "/cancel", {
       method: "POST",
     });

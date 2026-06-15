@@ -63,6 +63,10 @@ describe("hash route", () => {
       expect(parseHash("#/import/fanfic")).toEqual({ page: "import", tab: "fanfic" });
     });
 
+    it("parses the import landing route", () => {
+      expect(parseHash("#/import")).toEqual({ page: "import" });
+    });
+
     it("parses image library route", () => {
       expect(parseHash("#/images")).toEqual({ page: "images" });
     });
@@ -121,6 +125,11 @@ describe("hash route", () => {
 
     it("import tab -> #/import/{tab}", () => {
       expect(routeToHash({ page: "import", tab: "chapters" })).toBe("#/import/chapters");
+    });
+
+    it("ignores accidental click-event values passed as an import tab", () => {
+      const malformedRoute = { page: "import", tab: { type: "click" } } as unknown as Parameters<typeof routeToHash>[0];
+      expect(routeToHash(malformedRoute)).toBe("#/import");
     });
 
     it("images -> #/images", () => {

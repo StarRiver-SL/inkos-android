@@ -5,6 +5,25 @@ import { describe, expect, it } from "vitest";
 import { PlayStore } from "../play/play-store.js";
 
 describe("PlayStore", () => {
+  it("deletes one world and prunes only orphaned world directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-play-store-cleanup-"));
+    const store = new PlayStore(root);
+    try {
+      for (const id of ["active-world", "orphan-world", "delete-world"]) {
+        await store.createWorld({ id, title: id, premise: "", mode: "open" });
+      }
+
+      await store.deleteWorld("delete-world");
+      await expect(store.loadWorld("delete-world")).resolves.toBeNull();
+
+      await expect(store.pruneOrphanWorlds(new Set(["active-world"]))).resolves.toEqual(["orphan-world"]);
+      await expect(store.loadWorld("active-world")).resolves.toMatchObject({ id: "active-world" });
+      await expect(store.loadWorld("orphan-world")).resolves.toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates and lists worlds and runs with metadata", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-play-store-"));
     const store = new PlayStore(root);

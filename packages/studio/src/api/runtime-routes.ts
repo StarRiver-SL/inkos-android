@@ -1,7 +1,8 @@
-import type { StateManager } from "@actalk/inkos-core";
+import { listBookSessions, PlayStore, type StateManager } from "@actalk/inkos-core";
 import type { Hono } from "hono";
 import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import type { HeadroomMcpManager } from "./headroom-mcp.js";
 
 const DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/Scl-Ywr/inkos/releases/latest/download/update.json";
 const UPDATE_SOURCE_TIMEOUT_MS = 8_000;
@@ -11,7 +12,20 @@ const GITHUB_UPDATE_MIRROR_PREFIXES = [
   "https://gh-proxy.com/",
   "https://githubproxy.cc/",
 ] as const;
-const PROJECT_DIRS = [".inkos", ".inkos/sessions", ".inkos/backups", "books", "genres", "radar", "covers", "shorts", "exports", "logs"];
+export const PROJECT_DIRS = [
+  ".inkos",
+  ".inkos/sessions",
+  ".inkos/backups",
+  "books",
+  "genres",
+  "worlds",
+  "runtime",
+  "radar",
+  "covers",
+  "shorts",
+  "exports",
+  "logs",
+] as const;
 
 const NODE_TOOL_CAPABILITIES = [
   "agent.architect",
@@ -44,6 +58,7 @@ interface RuntimeRoutesDeps {
   readonly root: string;
   readonly state: StateManager;
   readonly broadcast: (event: string, data: unknown) => void;
+  readonly headroom: HeadroomMcpManager;
 }
 
 function envEnabled(name: string, fallback: boolean): boolean {
@@ -141,8 +156,44 @@ async function exists(path: string): Promise<boolean> {
   return stat(path).then(() => true, () => false);
 }
 
-async function ensureProjectStorage(root: string): Promise<void> {
+export async function ensureProjectStorage(root: string): Promise<void> {
   await Promise.all(PROJECT_DIRS.map((dir) => mkdir(join(root, dir), { recursive: true })));
+}
+
+export async function initializeStudioProject(root: string): Promise<void> {
+  await ensureProjectStorage(root);
+  const configPath = join(root, "inkos.json");
+  if (await exists(configPath)) return;
+
+  const config = {
+    name: basename(root),
+    version: "0.1.0",
+    language: "zh",
+    llm: {
+      provider: "openai",
+      service: "custom",
+      configSource: "studio",
+      baseUrl: "",
+      model: "",
+      apiFormat: "chat",
+      stream: true,
+    },
+    notify: [],
+    inputGovernanceMode: "v2",
+    daemon: {
+      schedule: {
+        radarCron: "0 */6 * * *",
+        writeCron: "*/15 * * * *",
+      },
+      maxConcurrentBooks: 3,
+    },
+  };
+
+  try {
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf-8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
 }
 
 async function backupUpgradeMetadata(root: string): Promise<string> {
@@ -159,7 +210,7 @@ async function backupUpgradeMetadata(root: string): Promise<string> {
 }
 
 export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void {
-  const { root, state, broadcast } = deps;
+  const { root, state, broadcast, headroom } = deps;
   const android = process.env.INKOS_ANDROID === "1";
   const play = envEnabled("INKOS_PLAY_ENABLED", true);
 
@@ -213,13 +264,25 @@ export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void 
   app.post("/api/v1/runtime/repair", async (c) => {
     await ensureProjectStorage(root);
     const backupDir = await backupUpgradeMetadata(root);
+    const playSessions = await listBookSessions(root, null);
+    const activeWorldIds = new Set(
+      playSessions.filter((session) => session.sessionKind === "play").map((session) => session.sessionId),
+    );
+    const removedWorldIds = await new PlayStore(root).pruneOrphanWorlds(activeWorldIds);
     const bookIds = await state.listBooks();
     for (const bookId of bookIds) {
       await state.ensureControlDocuments(bookId);
       await state.saveChapterIndex(bookId, await state.loadChapterIndex(bookId));
     }
     broadcast("log", { level: "info", tag: "storage-repair", message: `Storage repair completed; metadata backup: ${backupDir}` });
-    return c.json({ ok: true, root, backupDir, booksChecked: bookIds.length });
+    return c.json({
+      ok: true,
+      root,
+      backupDir,
+      booksChecked: bookIds.length,
+      worldsRemoved: removedWorldIds.length,
+      removedWorldIds,
+    });
   });
 
   app.post("/api/v1/runtime/background-idle", (c) => {
@@ -230,24 +293,28 @@ export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void 
 
   app.get("/api/v1/runtime/token-savings", (c) => c.json({
     ok: true,
-    telemetry: null,
+    telemetry: headroom.getStatus().session,
     contextCompression: true,
   }));
 
-  app.get("/api/v1/token-diagnostics", (c) => c.json({
-    diagnostics: {
-      headroom: { enabled: true, configured: false, lastCompressionOk: null, lastCompressionAt: null, lastError: null },
+  app.get("/api/v1/token-diagnostics", (c) => {
+    const headroomStatus = headroom.getStatus();
+    return c.json({
+      diagnostics: {
+        headroom: headroomStatus,
       embedding: { configured: false, endpoint: null, model: "built-in", lastExternalOk: null, lastExternalAt: null, lastFallbackAt: null, lastError: null },
       telemetry: {
         semanticL1Hits: 0,
         semanticL2Hits: 0,
         semanticMisses: 0,
         cacheSkippedCalls: 0,
-        ccrBlocksCompressed: 0,
-        originalChars: 0,
-        optimizedChars: 0,
-        estimatedTokensSaved: 0,
-        pipeline: [],
+        ccrBlocksCompressed: headroomStatus.session.compressions,
+        originalChars: headroomStatus.session.originalChars,
+        optimizedChars: headroomStatus.session.compressedChars,
+        estimatedTokensSaved: headroomStatus.session.tokensSaved,
+        pipeline: headroomStatus.lastCompressionAt
+          ? [{ kind: "headroom-official", label: "Headroom MCP compression", at: Date.parse(headroomStatus.lastCompressionAt) }]
+          : [],
       },
       semanticCache: {
         storage: { sqliteAvailable: true, path: join(root, "worlds"), fallbackPath: join(root, ".inkos", "cache") },
@@ -261,8 +328,51 @@ export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void 
         hitRate: 0,
         lastMaintenanceAt: null,
       },
-    },
-  }));
+      },
+    });
+  });
+
+  app.post("/api/v1/token-diagnostics/headroom/check", async (c) => {
+    const status = await headroom.check();
+    broadcast("log", {
+      level: status.state === "online" ? "info" : "warn",
+      tag: "headroom",
+      message: status.state === "online"
+        ? `Headroom MCP online; tools=${status.tools.join(",")}`
+        : `Headroom MCP unavailable: ${status.lastError ?? status.state}`,
+    });
+    return c.json({ ok: status.state === "online", headroom: status }, status.state === "online" ? 200 : 503);
+  });
+
+  app.post("/api/v1/token-diagnostics/headroom/self-test", async (c) => {
+    const sample = [
+      "# InkOS Headroom self test",
+      "",
+      "## 当前状态",
+      "这是一段用于验证手机端内置 Headroom-compatible 压缩是否真实执行的诊断文本。",
+      "它不会写入书籍，只会在当前 Node 进程内累计一次压缩统计。",
+      "",
+      "## 长上下文样本",
+      "角色关系、章节摘要、伏笔状态、作者意图、当前聚焦、历史摘要。",
+      "需要保留人名、关系、时间点、未兑现承诺和证据链。",
+      "",
+      "## 重复上下文",
+      "林玄需要保护林雨，同时判断苏晚晴是否可信。".repeat(160),
+    ].join("\n");
+    const result = await headroom.compress(sample);
+    const status = headroom.getStatus();
+    broadcast("log", {
+      level: result ? "info" : "warn",
+      tag: "headroom",
+      message: result
+        ? `Headroom self-test compressed sample; saved=${status.session.tokensSaved}`
+        : `Headroom self-test failed: ${status.lastError ?? status.state}`,
+    });
+    return c.json(
+      { ok: Boolean(result), headroom: status, result },
+      result ? 200 : 503,
+    );
+  });
 
   app.post("/api/v1/token-cache/maintenance", (c) => c.json({
     ok: true,

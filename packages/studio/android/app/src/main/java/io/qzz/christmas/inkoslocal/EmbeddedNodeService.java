@@ -238,6 +238,7 @@ public class EmbeddedNodeService extends Service {
             File runtimeDir = new File(getFilesDir(), "embedded-node");
             File appDir = new File(runtimeDir, "app");
             File projectRoot = resolveProjectRoot();
+            ensureProjectDirectories(projectRoot);
 
             File builtinGenresDir = new File(runtimeDir, "genres");
             packagedRuntimeVersion = readAssetText("inkos-node/runtime-version.txt").trim();
@@ -552,6 +553,30 @@ public class EmbeddedNodeService extends Service {
             writeRuntimeStatus("storage-migration-warning", "Using app-scoped storage without moving existing files: " + error.getMessage());
         }
         return fallbackRoot;
+    }
+
+    private void ensureProjectDirectories(File projectRoot) throws IOException {
+        String[] directories = {
+            ".inkos",
+            ".inkos/sessions",
+            ".inkos/backups",
+            "books",
+            "genres",
+            "worlds",
+            "runtime",
+            "radar",
+            "covers",
+            "shorts",
+            "exports",
+            "logs"
+        };
+        for (String relativePath : directories) {
+            File directory = new File(projectRoot, relativePath);
+            if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory()) {
+                throw new IOException("Unable to create project directory: " + directory.getAbsolutePath());
+            }
+        }
+        writeRuntimeStatus("storage-ready", "Project directories initialized at " + projectRoot.getAbsolutePath());
     }
 
     private void migrateCandidateRoots(File target, File... candidates) throws IOException {

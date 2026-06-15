@@ -34,6 +34,7 @@ import {
   createProposeActionTool,
 } from "./agent-tools.js";
 import { createBookContextTransform } from "./context-transform.js";
+import type { ExternalContextCompressor } from "./context-transform.js";
 import {
   appendTranscriptEvents,
   readTranscriptEvents,
@@ -100,6 +101,8 @@ export interface AgentSessionConfig {
   onEvent?: (event: AgentEvent) => void;
   /** Optional listener for context compression lifecycle events. */
   onContextCompression?: ContextCompressionCallback;
+  /** Optional external compressor used for oversized book context. */
+  compressContext?: ExternalContextCompressor;
   /** Extra HTTP headers for the model request made by the official agent stream. */
   requestHeaders?: Record<string, string>;
   /** Optional diagnostics for model requests made by the official agent stream. */
@@ -796,7 +799,7 @@ async function runAgentSessionUnlocked(
   userMessage: string,
   initialMessages?: Array<{ role: string; content: string }>,
 ): Promise<AgentSessionResult> {
-  const { sessionId, language, pipeline, projectRoot, onEvent, onContextCompression } = config;
+  const { sessionId, language, pipeline, projectRoot, onEvent, onContextCompression, compressContext } = config;
   // Normalize at the entry point so downstream comparisons, closures, and
   // fs paths never see `undefined`. The type is already `string | null`, but
   // some callers may bypass the type system (e.g. `activeBookId ?? null` gets
@@ -906,7 +909,7 @@ async function runAgentSessionUnlocked(
         }),
         messages: initialAgentMessages,
       },
-      transformContext: createBookContextTransform(bookId, projectRoot, { onContextCompression }),
+      transformContext: createBookContextTransform(bookId, projectRoot, { onContextCompression, compressContext }),
       convertToLlm: (messages) => {
         terminalToolResultTail = hasUnansweredTerminalToolResult(messages);
         return convertAgentMessagesForModel(messages, model);

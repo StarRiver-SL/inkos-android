@@ -9,6 +9,7 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  CircleStop,
   ChevronDown,
   Wrench,
   Check,
@@ -64,6 +65,13 @@ function ExecStatusBadge({ exec }: { exec: ToolExecution }) {
           <span>{errorLabel}</span>
         </span>
       );
+    case "cancelled":
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <CircleStop size={12} />
+          <span>已停止</span>
+        </span>
+      );
   }
 }
 
@@ -75,6 +83,8 @@ function StageIcon({ status }: { status: PipelineStage["status"] }) {
       return <Loader2 size={14} className="text-primary animate-spin shrink-0" />;
     case "completed":
       return <CheckCircle2 size={14} className="text-green-600 dark:text-green-400 shrink-0" />;
+    case "cancelled":
+      return <CircleStop size={14} className="text-muted-foreground/70 shrink-0" />;
   }
 }
 
@@ -753,7 +763,7 @@ function PipelineExecution({
   onRejectProposedAction?: (details: ProposedActionDetails) => void;
 }) {
   const isActive = exec.status === "running" || exec.status === "processing";
-  const [open, setOpen] = useState(isActive);
+  const [open, setOpen] = useState(true);
   const elapsedMs = useElapsedTimer(exec.startedAt, isActive);
 
   useEffect(() => {
@@ -790,17 +800,17 @@ function PipelineExecution({
           <ChevronDown size={14} className={`text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
         </div>
       </CollapsibleTrigger>
-      <ProposedActionPreview
-        exec={exec}
-        onProposedAction={onProposedAction}
-        onRejectProposedAction={onRejectProposedAction}
-      />
-      <ShortFictionResultPreview exec={exec} />
-      <PlayResultPreview exec={exec} />
-      <PlayEditPreview exec={exec} />
-      <ChapterArtifactPreview exec={exec} />
       <CollapsibleContent>
         <div className="px-3 pb-3 pt-1">
+          <ProposedActionPreview
+            exec={exec}
+            onProposedAction={onProposedAction}
+            onRejectProposedAction={onRejectProposedAction}
+          />
+          <ShortFictionResultPreview exec={exec} />
+          <PlayResultPreview exec={exec} />
+          <PlayEditPreview exec={exec} />
+          <ChapterArtifactPreview exec={exec} />
           {tokenUsageLabel && (
             <div className="mb-2 inline-flex rounded-full border border-border/45 bg-background/45 px-2.5 py-1 text-[11px] font-medium text-muted-foreground sm:hidden">
               {tokenUsageLabel}
@@ -856,7 +866,7 @@ function PipelineExecution({
 
 function UtilityToolsGroup({ execs }: { execs: ToolExecution[] }) {
   const [open, setOpen] = useState(false);
-  const allDone = execs.every(e => e.status === "completed" || e.status === "error");
+  const allDone = execs.every(e => e.status === "completed" || e.status === "error" || e.status === "cancelled");
   const hasError = execs.some(e => e.status === "error");
 
   return (
@@ -876,6 +886,7 @@ function UtilityToolsGroup({ execs }: { execs: ToolExecution[] }) {
               <span className="font-mono truncate">{exec.tool} {String(exec.args?.path ?? exec.args?.pattern ?? "")}</span>
               {exec.status === "completed" && <CheckCircle2 size={10} className="text-green-600 dark:text-green-400 shrink-0" />}
               {exec.status === "error" && <XCircle size={10} className="text-destructive shrink-0" />}
+              {exec.status === "cancelled" && <CircleStop size={10} className="text-muted-foreground/70 shrink-0" />}
               {(exec.status === "running" || exec.status === "processing") && <Loader2 size={10} className="animate-spin text-primary shrink-0" />}
             </li>
           ))}

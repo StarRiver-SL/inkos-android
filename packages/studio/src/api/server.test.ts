@@ -2864,6 +2864,33 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
 
+  it("deletes the matching world when deleting a play session", async () => {
+    loadBookSessionMock.mockResolvedValue({
+      sessionId: "play-session-1",
+      bookId: null,
+      sessionKind: "play",
+      playMode: "open",
+      title: "Play",
+      messages: [],
+      draftRounds: [],
+      events: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const { createStudioServer } = await import("./server.js");
+    const { PlayStore } = await vi.importActual<typeof import("@actalk/inkos-core")>("@actalk/inkos-core");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const store = new PlayStore(root);
+    await store.createWorld({ id: "play-session-1", title: "Play", premise: "", mode: "open" });
+
+    const response = await app.request("http://localhost/api/v1/sessions/play-session-1", {
+      method: "DELETE",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(store.loadWorld("play-session-1")).resolves.toBeNull();
+  });
+
   it("permanently deletes one session message through DELETE /api/v1/sessions/:sessionId/messages", async () => {
     deleteBookSessionMessageMock.mockResolvedValue({
       sessionId: "agent-session-1",
@@ -4843,6 +4870,8 @@ describe("createStudioServer daemon lifecycle", () => {
     }), "utf-8");
     await mkdir(join(root, "covers", "manual-demo"), { recursive: true });
     await writeFile(join(root, "covers", "manual-demo", "cover.png"), "cover-image");
+    await mkdir(join(root, "wallpapers"), { recursive: true });
+    await writeFile(join(root, "wallpapers", "desk.webp"), "wallpaper-image");
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -4869,10 +4898,61 @@ describe("createStudioServer daemon lifecycle", () => {
         title: "manual-demo",
         url: "/api/v1/project/files/covers/manual-demo/cover.png",
       }),
+      expect.objectContaining({
+        source: "project",
+        kind: "wallpaper",
+        title: "desk",
+        url: "/api/v1/project/files/wallpapers/desk.webp",
+      }),
     ]));
     expect(json.items).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ title: "Turn 3" }),
     ]));
+  });
+
+  it("uploads chat wallpapers into the project image library", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const image = Buffer.from("wallpaper-image").toString("base64");
+
+    const response = await app.request("http://localhost/api/v1/images/library/wallpapers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Night Desk.png",
+        dataUrl: `data:image/png;base64,${image}`,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const json = await response.json() as { item: { id: string; kind: string; title: string; path: string; url: string } };
+    expect(json.item).toEqual(expect.objectContaining({
+      kind: "wallpaper",
+      title: "Night Desk",
+      path: "wallpapers/Night Desk.png",
+      url: "/api/v1/project/files/wallpapers/Night%20Desk.png",
+    }));
+    await expect(access(join(root, json.item.path))).resolves.toBeUndefined();
+
+    const preview = await app.request(`http://localhost${json.item.url}`);
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-type")).toBe("image/png");
+    await expect(preview.text()).resolves.toBe("wallpaper-image");
+
+    const renamed = await app.request("http://localhost/api/v1/images/library", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: json.item.id, title: "Quiet Room" }),
+    });
+    expect(renamed.status).toBe(200);
+    const renamedJson = await renamed.json() as { item: { title: string; path: string; url: string } };
+    expect(renamedJson.item).toEqual(expect.objectContaining({
+      title: "Quiet Room",
+      path: "wallpapers/Quiet Room.png",
+      url: "/api/v1/project/files/wallpapers/Quiet%20Room.png",
+    }));
+    await expect(access(join(root, "wallpapers", "Night Desk.png"))).rejects.toThrow();
+    await expect(access(join(root, "wallpapers", "Quiet Room.png"))).resolves.toBeUndefined();
   });
 
   it("deletes image library entries from Play manifests and project image files", async () => {

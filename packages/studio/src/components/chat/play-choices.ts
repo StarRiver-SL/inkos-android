@@ -11,7 +11,10 @@ function actionsFromExecution(exec: ToolExecution): string[] {
   if (!PLAY_TOOLS.has(exec.tool) || exec.status !== "completed") return [];
   const details = exec.details as { suggestedActions?: unknown } | undefined;
   return Array.isArray(details?.suggestedActions)
-    ? details.suggestedActions.filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+    ? details.suggestedActions
+      .filter((a): a is string => typeof a === "string")
+      .map((a) => a.replace(/^\s*[-*•\d.)、]+/, "").trim())
+      .filter((a) => a.length > 0 && !/^(?:\.{2,}|…+|。+)$/.test(a))
     : [];
 }
 

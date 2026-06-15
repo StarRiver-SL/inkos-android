@@ -1,16 +1,17 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, FolderOpen, Gamepad2, ImageOff, Images, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, FolderOpen, Gamepad2, ImageOff, Images, Pencil, RefreshCw, Trash2, Wallpaper, X } from "lucide-react";
 import { fetchJson, useApi } from "../hooks/use-api";
 import { buildApiUrl } from "../lib/api-url";
 import { appAlert, appConfirm } from "../lib/app-dialog";
+import { clearChatBackground, readChatBackground, selectChatBackground } from "../lib/chat-background";
 
-type ImageKind = "all" | "cover" | "scene" | "actor" | "item" | "short" | "other";
+type ImageKind = "all" | "cover" | "scene" | "actor" | "item" | "short" | "wallpaper" | "other";
 type ImageSource = "all" | "play" | "project";
 
 interface GeneratedImageItem {
   readonly id: string;
   readonly source: "play" | "project";
-  readonly kind: "scene" | "actor" | "item" | "cover" | "short" | "other";
+  readonly kind: "scene" | "actor" | "item" | "cover" | "short" | "wallpaper" | "other";
   readonly status: "ready" | "failed";
   readonly title: string;
   readonly subtitle?: string;
@@ -25,6 +26,7 @@ interface ImageLibraryResponse {
 }
 
 const KIND_LABELS: Record<ImageKind, string> = {
+  wallpaper: "壁纸",
   all: "全部",
   cover: "封面",
   scene: "场景",
@@ -62,6 +64,10 @@ export function ImageLibraryPage() {
   const [source, setSource] = useState<ImageSource>("all");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [preview, setPreview] = useState<GeneratedImageItem | null>(null);
+  const [activeWallpaperUrl, setActiveWallpaperUrl] = useState(() => readChatBackground().imageUrl);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const items = data?.items ?? [];
 
   const filtered = useMemo(() => items.filter((item) => {
@@ -96,6 +102,10 @@ export function ImageLibraryPage() {
     try {
       mutate((current) => current ? { items: current.items.filter((candidate) => candidate.id !== item.id) } : current);
       await fetchJson(`/images/library?id=${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (item.url && activeWallpaperUrl === item.url) {
+        clearChatBackground();
+        setActiveWallpaperUrl(null);
+      }
       if (preview?.id === item.id) setPreview(null);
       await refetch();
     } catch (e) {
@@ -106,9 +116,46 @@ export function ImageLibraryPage() {
     }
   };
 
+  const useAsWallpaper = (item: GeneratedImageItem) => {
+    if (!item.url) return;
+    selectChatBackground(item.url);
+    setActiveWallpaperUrl(item.url);
+  };
+
+  const renameWallpaper = async (item: GeneratedImageItem) => {
+    const title = editingTitle.trim();
+    if (!title) return;
+    setRenamingId(item.id);
+    try {
+      const response = await fetchJson<{ item: GeneratedImageItem }>("/images/library", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: item.id, title }),
+      });
+      mutate((current) => current ? {
+        items: current.items.map((candidate) => candidate.id === item.id ? response.item : candidate),
+      } : current);
+      if (activeWallpaperUrl === item.url && response.item.url) {
+        selectChatBackground(response.item.url);
+        setActiveWallpaperUrl(response.item.url);
+      }
+      setPreview((current) => current?.id === item.id ? response.item : current);
+      setEditingId(null);
+      setEditingTitle("");
+    } catch (error) {
+      await appAlert({
+        title: "重命名失败",
+        message: error instanceof Error ? error.message : String(error),
+        tone: "danger",
+      });
+    } finally {
+      setRenamingId(null);
+    }
+  };
+
   return (
     <div className="space-y-5">
-      <header className="flex flex-col gap-3 border-b border-border/40 pb-4 md:flex-row md:items-end md:justify-between">
+      <header className="flex flex-col items-start gap-3 border-b border-border/40 pb-4 md:flex-row md:items-end md:justify-between">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-primary">
             <Images size={16} />
@@ -121,7 +168,7 @@ export function ImageLibraryPage() {
           type="button"
           onClick={() => void refetch()}
           disabled={loading}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border/60 bg-secondary/40 px-3 text-sm font-semibold text-foreground transition-colors hover:bg-secondary disabled:opacity-60"
+          className="inline-flex h-10 min-w-20 shrink-0 items-center justify-center gap-2 rounded-lg border border-border/60 bg-secondary/40 px-3 text-sm font-semibold text-foreground transition-colors hover:bg-secondary disabled:opacity-60"
         >
           <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
           刷新
@@ -167,7 +214,7 @@ export function ImageLibraryPage() {
       ) : null}
 
       {loading && items.length === 0 ? (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           {Array.from({ length: 8 }).map((_, index) => (
             <div key={index} className="h-52 animate-pulse rounded-lg border border-border/40 bg-secondary/30" />
           ))}
@@ -179,7 +226,7 @@ export function ImageLibraryPage() {
           <p className="mt-1 max-w-sm text-sm leading-6 text-muted-foreground">生成封面或在开放世界里启用/手动生成图片后，会出现在这里。</p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           {filtered.map((item) => {
             const src = imageUrl(item.url);
             const failed = item.status === "failed";
@@ -202,9 +249,52 @@ export function ImageLibraryPage() {
                 <div className="space-y-2 px-3 py-3">
                   <div className="flex items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <h2 className="truncate text-sm font-bold text-foreground">{item.title}</h2>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">{item.subtitle || formatDate(item.updatedAt) || KIND_LABELS[item.kind]}</p>
+                      {editingId === item.id ? (
+                        <div className="space-y-2">
+                          <input
+                            type="text"
+                            value={editingTitle}
+                            onChange={(event) => setEditingTitle(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") void renameWallpaper(item);
+                              if (event.key === "Escape") setEditingId(null);
+                            }}
+                            maxLength={80}
+                            autoFocus
+                            className="h-10 w-full min-w-0 rounded-md border border-primary/45 bg-background px-3 text-sm text-foreground outline-none"
+                          />
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={() => void renameWallpaper(item)} disabled={renamingId === item.id} className="flex h-9 min-w-20 items-center justify-center gap-1.5 rounded-md text-sm font-medium text-primary hover:bg-primary/10 disabled:opacity-50" aria-label="保存名称">
+                              <Check size={14} />
+                              保存
+                            </button>
+                            <button type="button" onClick={() => setEditingId(null)} className="flex h-9 min-w-20 items-center justify-center gap-1.5 rounded-md text-sm text-muted-foreground hover:bg-secondary" aria-label="取消改名">
+                              <X size={14} />
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <h2 className="truncate text-sm font-bold text-foreground">{item.title}</h2>
+                          <p className="mt-0.5 truncate text-xs text-muted-foreground">{item.subtitle || formatDate(item.updatedAt) || KIND_LABELS[item.kind]}</p>
+                        </>
+                      )}
                     </div>
+                    {item.kind === "wallpaper" && editingId !== item.id ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(item.id);
+                          setEditingTitle(item.title);
+                        }}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+                        title="重命名壁纸"
+                        aria-label={`重命名 ${item.title}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void deleteItem(item)}
@@ -220,6 +310,20 @@ export function ImageLibraryPage() {
                     <span className="rounded-full bg-secondary/60 px-2 py-1 text-muted-foreground">{KIND_LABELS[item.kind]}</span>
                     <span className={failed ? "text-destructive" : "text-muted-foreground/70"}>{failed ? "生成失败" : formatDate(item.updatedAt)}</span>
                   </div>
+                  {item.kind === "wallpaper" && item.url ? (
+                    <button
+                      type="button"
+                      onClick={() => useAsWallpaper(item)}
+                      className={`flex h-9 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium transition-colors ${
+                        activeWallpaperUrl === item.url
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border/50 bg-secondary/30 text-foreground hover:border-primary/40 hover:text-primary"
+                      }`}
+                    >
+                      {activeWallpaperUrl === item.url ? <Check size={15} /> : <Wallpaper size={15} />}
+                      {activeWallpaperUrl === item.url ? "当前背景" : "设为聊天背景"}
+                    </button>
+                  ) : null}
                   {item.error ? <p className="line-clamp-2 text-xs leading-5 text-destructive/80">{item.error}</p> : null}
                 </div>
               </article>
@@ -249,6 +353,18 @@ export function ImageLibraryPage() {
             <div className="flex max-h-[76dvh] items-center justify-center bg-secondary/20">
               {imageUrl(preview.url) ? <img src={imageUrl(preview.url)} alt={preview.title} className="max-h-[76dvh] w-full object-contain" /> : null}
             </div>
+            {preview.kind === "wallpaper" && preview.url ? (
+              <div className="border-t border-border/40 p-3">
+                <button
+                  type="button"
+                  onClick={() => useAsWallpaper(preview)}
+                  className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-primary text-sm font-semibold text-primary-foreground"
+                >
+                  {activeWallpaperUrl === preview.url ? <Check size={16} /> : <Wallpaper size={16} />}
+                  {activeWallpaperUrl === preview.url ? "当前聊天背景" : "设为聊天背景"}
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

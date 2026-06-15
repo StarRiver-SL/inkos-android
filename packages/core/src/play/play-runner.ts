@@ -80,6 +80,33 @@ export interface PlayRunnerOptions {
   };
 }
 
+class HeuristicPlayActionInterpreter implements PlayActionInterpreterLike {
+  async interpret(input: {
+    readonly input: string;
+    readonly sceneBrief: string;
+    readonly language?: "zh" | "en";
+  }): Promise<PlayActionIntentInput> {
+    const actionKind = inferPlayActionKind(input.input);
+    return {
+      actionKind,
+      intent: input.input.trim(),
+      manner: "",
+      risk: "",
+      ambiguity: "",
+      secondaryActions: [],
+    };
+  }
+}
+
+function inferPlayActionKind(input: string): PlayActionIntentInput["actionKind"] {
+  const text = input.trim().toLowerCase();
+  if (/^(等|等待|停下|按兵不动|wait|hold|stay|pause)\b/i.test(text)) return "wait";
+  if (/(说|问|告诉|喊|回复|开口|低声|解释|say|ask|tell|shout|reply|whisper|talk)/i.test(text)) return "say";
+  if (/(走|去|进入|离开|靠近|上楼|下楼|前往|穿过|返回|move|go|enter|leave|approach|walk|return)/i.test(text)) return "move";
+  if (/(看|观察|检查|查看|环顾|搜索|翻看|听|闻|look|inspect|check|observe|search|examine|listen)/i.test(text)) return "look";
+  return "do";
+}
+
 export interface PlayStepResult extends PlaySceneRender {
   readonly action: PlayActionIntent;
   readonly mutation: PlayMutation;
@@ -114,15 +141,20 @@ export class PlayRunner {
     this.store = options.store ?? new PlayStore(options.projectRoot);
     this.ownsDb = !options.db;
     this.db = options.db ?? createPlayDB(this.store.runDir(options.worldId, options.runId));
-    if (!options.ctx && (!options.agents?.actionInterpreter || !options.agents.worldMutator || !options.agents.sceneRenderer)) {
+    const useLlmActionInterpreter = String(process.env.INKOS_PLAY_ACTION_INTERPRETER ?? "").trim().toLowerCase() === "llm";
+    const needsCtxForDefaultActionInterpreter = useLlmActionInterpreter && !options.agents?.actionInterpreter;
+    if (!options.ctx && (needsCtxForDefaultActionInterpreter || !options.agents?.worldMutator || !options.agents.sceneRenderer)) {
       throw new Error("PlayRunner requires ctx when default play agents are used.");
     }
     const ctx = options.ctx;
     const silentCtx = ctx ? { ...ctx, onTextDelta: undefined } : undefined;
-    this.actionInterpreter = options.agents?.actionInterpreter ?? new PlayActionInterpreterAgent(silentCtx!);
+    this.actionInterpreter = options.agents?.actionInterpreter
+      ?? (useLlmActionInterpreter ? new PlayActionInterpreterAgent(silentCtx!) : new HeuristicPlayActionInterpreter());
     this.worldMutator = options.agents?.worldMutator ?? new PlayWorldMutatorAgent(silentCtx!);
     this.sceneRenderer = options.agents?.sceneRenderer ?? new PlaySceneRendererAgent(ctx!);
-    this.sceneReconciler = options.agents?.sceneReconciler ?? (silentCtx ? new PlaySceneReconcilerAgent(silentCtx) : null);
+    const enableSceneReconciliation = String(process.env.INKOS_PLAY_SCENE_RECONCILE ?? "").trim().toLowerCase() === "true";
+    this.sceneReconciler = options.agents?.sceneReconciler
+      ?? (silentCtx && enableSceneReconciliation ? new PlaySceneReconcilerAgent(silentCtx) : null);
   }
 
   close(): void {
@@ -190,13 +222,16 @@ export class PlayRunner {
     const world = await this.store.loadWorld(this.options.worldId);
     const language = world?.language ?? "zh";
     const sceneBrief = await this.readOptionalProjection("projections/scene.md");
-    const action = PlayActionIntentSchema.parse(await this.actionInterpreter.interpret({
-      input: rawInput,
-      sceneBrief: sceneBrief || (language === "en" ? "A new turn begins; carry over the current world state." : "新回合开始，沿用当前世界状态。"),
-      language,
-    }));
     const worldContext = renderPlayWorldContext(world, language);
-    const context = await this.buildContextBrief(sceneBrief, language, world);
+    const [actionResult, context] = await Promise.all([
+      this.actionInterpreter.interpret({
+        input: rawInput,
+        sceneBrief: sceneBrief || (language === "en" ? "A new turn begins; carry over the current world state." : "新回合开始，沿用当前世界状态。"),
+        language,
+      }),
+      this.buildContextBrief(sceneBrief, language, world),
+    ]);
+    const action = PlayActionIntentSchema.parse(actionResult);
     const mutation = PlayMutationSchema.parse(await this.worldMutator.proposeMutation({
       turn,
       input: rawInput,

@@ -590,7 +590,7 @@ export function Sidebar({ nav, activePage, sse, t, onClose, mobileOpen }: {
               label={t("nav.import")}
               icon={<FileInput size={16} />}
               active={activePage === "import"}
-              onClick={nav.toImport}
+              onClick={() => nav.toImport()}
             />
             <SidebarItem
               label={t("nav.radar")}
@@ -742,6 +742,7 @@ function SidebarItem({ label, icon, active, onClick, badge, badgeColor }: {
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       data-active={active}
       className={`claude-nav-item group flex min-h-11 w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-sm transition-all duration-200 md:min-h-0 ${

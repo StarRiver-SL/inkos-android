@@ -84,12 +84,13 @@ import {
   type AgentRequestDiagnostics,
   type SessionKind,
 } from "@actalk/inkos-core";
-import { access, appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
-import { registerRuntimeRoutes } from "./runtime-routes.js";
+import { initializeStudioProject, registerRuntimeRoutes } from "./runtime-routes.js";
+import { HeadroomMcpManager } from "./headroom-mcp.js";
 import {
   LEGACY_SHIM_FILES,
   RUNTIME_DIAGNOSTIC_FILE_RE,
@@ -253,8 +254,8 @@ function resolveProjectImageFile(root: string, rawPath: string): { readonly reso
   ) {
     throw new ApiError(400, "INVALID_PROJECT_FILE_PATH", "Invalid project file path");
   }
-  if (!relPath.startsWith("shorts/") && !relPath.startsWith("covers/")) {
-    throw new ApiError(400, "INVALID_PROJECT_FILE_PATH", "Only generated shorts/ and covers/ images can be previewed");
+  if (!relPath.startsWith("shorts/") && !relPath.startsWith("covers/") && !relPath.startsWith("wallpapers/")) {
+    throw new ApiError(400, "INVALID_PROJECT_FILE_PATH", "Only generated shorts/, covers/, and wallpapers/ images can be previewed");
   }
 
   const ext = relPath.split(".").pop()?.toLowerCase() ?? "";
@@ -280,7 +281,7 @@ function resolveProjectImageFile(root: string, rawPath: string): { readonly reso
 type GeneratedImageLibraryItem = {
   readonly id: string;
   readonly source: "play" | "project";
-  readonly kind: "scene" | "actor" | "item" | "cover" | "short" | "other";
+  readonly kind: "scene" | "actor" | "item" | "cover" | "short" | "wallpaper" | "other";
   readonly status: "ready" | "failed";
   readonly title: string;
   readonly subtitle?: string;
@@ -312,6 +313,7 @@ function classifyPlayImageKind(key: string): GeneratedImageLibraryItem["kind"] {
 function classifyProjectImageKind(relPath: string): GeneratedImageLibraryItem["kind"] {
   if (relPath.startsWith("covers/")) return "cover";
   if (relPath.startsWith("shorts/")) return "short";
+  if (relPath.startsWith("wallpapers/")) return "wallpaper";
   return "other";
 }
 
@@ -329,7 +331,7 @@ function decodeLibraryId(id: string): string[] {
 
 async function listProjectGeneratedImages(root: string): Promise<GeneratedImageLibraryItem[]> {
   const items: GeneratedImageLibraryItem[] = [];
-  const roots = ["covers", "shorts"] as const;
+  const roots = ["covers", "shorts", "wallpapers"] as const;
 
   async function walk(base: string, relDir: string): Promise<void> {
     let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
@@ -1984,6 +1986,7 @@ async function probeServiceCapabilities(args: {
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
+  const headroom = new HeadroomMcpManager();
   let cachedConfig = initialConfig;
 
   app.use("/*", cors());
@@ -2235,7 +2238,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   }
 
-  registerRuntimeRoutes(app, { root, state, broadcast });
+  registerRuntimeRoutes(app, { root, state, broadcast, headroom });
 
   async function loadCurrentProjectConfig(
     options?: { readonly requireApiKey?: boolean },
@@ -3698,6 +3701,101 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ items });
   });
 
+  app.post("/api/v1/images/library/wallpapers", async (c) => {
+    const body = await c.req.json<{ name?: string; dataUrl?: string }>().catch(() => null);
+    const dataUrl = body?.dataUrl?.trim() ?? "";
+    const match = /^data:image\/(png|jpe?g|webp);base64,([a-z0-9+/=\s]+)$/iu.exec(dataUrl);
+    if (!match) return c.json({ error: "A PNG, JPEG, or WebP image is required" }, 400);
+
+    const content = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+    if (content.length === 0 || content.length > 12 * 1024 * 1024) {
+      return c.json({ error: "Wallpaper must be between 1 byte and 12 MB" }, 400);
+    }
+
+    const rawExt = match[1].toLowerCase();
+    const ext = rawExt === "jpeg" ? "jpg" : rawExt;
+    const originalTitle = body?.name?.replace(/\.[^.]+$/u, "").trim();
+    const title = (originalTitle || "wallpaper")
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ")
+      .replace(/\s+/gu, " ")
+      .replace(/[.\s]+$/gu, "")
+      .trim()
+      .slice(0, 80) || "wallpaper";
+    let fileName = `${title}.${ext}`;
+    let duplicateIndex = 2;
+    while (await access(join(root, "wallpapers", fileName)).then(() => true).catch(() => false)) {
+      fileName = `${title} (${duplicateIndex}).${ext}`;
+      duplicateIndex += 1;
+    }
+    const relPath = `wallpapers/${fileName}`;
+    const fullPath = join(root, "wallpapers", fileName);
+    await mkdir(dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, content);
+    const updatedAt = new Date().toISOString();
+    const item: GeneratedImageLibraryItem = {
+      id: encodeLibraryId(["project", relPath]),
+      source: "project",
+      kind: "wallpaper",
+      status: "ready",
+      title,
+      subtitle: relPath,
+      url: projectFileUrl(relPath),
+      updatedAt,
+      path: relPath,
+    };
+    return c.json({ item }, 201);
+  });
+
+  app.patch("/api/v1/images/library", async (c) => {
+    const body = await c.req.json<{ id?: string; title?: string }>().catch(() => null);
+    const id = body?.id?.trim() ?? "";
+    const requestedTitle = body?.title?.trim() ?? "";
+    const parts = decodeLibraryId(id);
+    const relPath = parts[0] === "project" ? parts[1] : undefined;
+    if (!relPath?.startsWith("wallpapers/")) {
+      return c.json({ error: "Only wallpapers can be renamed" }, 400);
+    }
+
+    const title = requestedTitle
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ")
+      .replace(/\s+/gu, " ")
+      .replace(/[.\s]+$/gu, "")
+      .trim()
+      .slice(0, 80);
+    if (!title) return c.json({ error: "Wallpaper name is required" }, 400);
+
+    const currentFile = resolveProjectImageFile(root, relPath);
+    const ext = relPath.split(".").pop()?.toLowerCase() ?? "";
+    let fileName = `${title}.${ext}`;
+    let nextRelPath = `wallpapers/${fileName}`;
+    let duplicateIndex = 2;
+    while (
+      nextRelPath !== relPath
+      && await access(join(root, nextRelPath)).then(() => true).catch(() => false)
+    ) {
+      fileName = `${title} (${duplicateIndex}).${ext}`;
+      nextRelPath = `wallpapers/${fileName}`;
+      duplicateIndex += 1;
+    }
+
+    if (nextRelPath !== relPath) {
+      await rename(currentFile.resolved, join(root, nextRelPath));
+    }
+    const fileStat = await stat(join(root, nextRelPath));
+    const item: GeneratedImageLibraryItem = {
+      id: encodeLibraryId(["project", nextRelPath]),
+      source: "project",
+      kind: "wallpaper",
+      status: "ready",
+      title: fileName.replace(/\.[^.]+$/u, ""),
+      subtitle: nextRelPath,
+      url: projectFileUrl(nextRelPath),
+      updatedAt: fileStat.mtime.toISOString(),
+      path: nextRelPath,
+    };
+    return c.json({ item });
+  });
+
   app.delete("/api/v1/images/library", async (c) => {
     const id = c.req.query("id")?.trim();
     if (!id) return c.json({ error: "Image id is required" }, 400);
@@ -3796,7 +3894,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   app.delete("/api/v1/sessions/:sessionId", async (c) => {
-    await deleteBookSession(root, c.req.param("sessionId"));
+    const sessionId = c.req.param("sessionId");
+    const session = await loadBookSession(root, sessionId);
+    await deleteBookSession(root, sessionId);
+    if (session?.sessionKind === "play") {
+      await new PlayStore(root).deleteWorld(sessionId);
+    }
     return c.json({ ok: true });
   });
 
@@ -4478,6 +4581,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               ...event,
             });
           },
+          compressContext: (content) => headroom.compress(content),
           onRequestDiagnostics: (diagnostics) => {
             emitModelRequestDiagnostics(diagnostics, streamSessionId);
           },
@@ -5583,6 +5687,7 @@ export async function startStudioServer(
   port = 4567,
   options?: { readonly staticDir?: string },
 ): Promise<void> {
+  await initializeStudioProject(root);
   const config = await loadProjectConfig(root, { consumer: "studio", requireApiKey: false });
 
   const app = createStudioServer(config, root);

@@ -9,7 +9,7 @@ export interface ToolCall {
 
 export interface PipelineStage {
   label: string;
-  status: "pending" | "active" | "completed";
+  status: "pending" | "active" | "completed" | "cancelled";
   progress?: {
     status?: string;          // "thinking" | "streaming" | ...
     elapsedMs: number;
@@ -24,7 +24,7 @@ export interface ToolExecution {
   tool: string;
   agent?: string;
   label: string;
-  status: "running" | "processing" | "completed" | "error";
+  status: "running" | "processing" | "completed" | "error" | "cancelled";
   args?: Record<string, unknown>;
   result?: string;
   details?: unknown;

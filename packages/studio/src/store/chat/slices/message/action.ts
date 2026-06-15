@@ -13,11 +13,13 @@ import { persistInputDraft } from "../../persistence";
 import { attachSessionStreamListeners } from "./stream-events";
 import {
   bookKey,
+  cancelMessageWork,
   createSessionRuntime,
   deriveResolvedProposals,
   deserializeMessages,
   extractErrorMessage,
   filterDeletedMessages,
+  hasActiveToolExecution,
   mergeSessionIds,
   messageDeletionKey,
   updateSession,
@@ -117,6 +119,7 @@ function estimateResponseTokens(text: string): number {
 }
 
 const AGENT_REQUEST_TIMEOUT_MS = 6 * 60 * 60_000;
+const CANCELLED_MESSAGE = "已停止当前生成。需要的话可以调整提示后重新发送。";
 
 function isLikelyBackgroundDisconnect(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -358,6 +361,45 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
     session.abortController?.abort();
     session.stream?.close();
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, (runtime) => {
+        const messages = [...runtime.messages];
+        let targetIndex = -1;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const message = messages[index];
+          if (
+            message?.role === "assistant"
+            && (message.thinkingStreaming || hasActiveToolExecution(message) || !message.content.trim())
+          ) {
+            targetIndex = index;
+            break;
+          }
+        }
+
+        const nextMessages = targetIndex >= 0
+          ? messages.map((message, index) =>
+              index === targetIndex ? cancelMessageWork(message, CANCELLED_MESSAGE) : message,
+            )
+          : [
+              ...messages,
+              {
+                role: "assistant" as const,
+                content: CANCELLED_MESSAGE,
+                timestamp: Date.now(),
+              },
+            ];
+
+        return {
+          messages: nextMessages,
+          isStreaming: false,
+          stream: null,
+          abortController: null,
+          lastError: null,
+        };
+      }),
+    }));
+    await cancelBackendOperation(sessionId);
+    return;
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (runtime) => ({
         messages: [

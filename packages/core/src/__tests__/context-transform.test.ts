@@ -75,6 +75,50 @@ describe("createBookContextTransform", () => {
     expect(content).not.toContain("UNBOUNDED_BODY_SHOULD_NOT_BE_INJECTED");
   });
 
+  it("uses an external compressor for oversized truth files", async () => {
+    const storyDir = join(projectRoot, "books", bookId, "story");
+    await writeFile(
+      join(storyDir, "story_bible.md"),
+      `# Story Bible\n${"LONG_CONTEXT ".repeat(700)}`,
+    );
+
+    const transform = createBookContextTransform(bookId, projectRoot, {
+      compressContext: async (content) => ({
+        compressed: `COMPRESSED:${content.slice(0, 20)}`,
+        hash: "headroom-hash",
+      }),
+    });
+    const result = await transform([
+      { role: "user" as const, content: "continue", timestamp: Date.now() },
+    ]);
+    const content = (result[0] as { content: string }).content;
+
+    expect(content).toContain("Headroom MCP");
+    expect(content).toContain("CCR hash: headroom-hash");
+    expect(content).toContain("COMPRESSED:# Story Bible");
+    expect(content).not.toContain("LONG_CONTEXT LONG_CONTEXT LONG_CONTEXT");
+  });
+
+  it("falls back to the structural index when the external compressor is offline", async () => {
+    const storyDir = join(projectRoot, "books", bookId, "story");
+    await writeFile(
+      join(storyDir, "story_bible.md"),
+      `# Story Bible\n## Important\n${"LONG_CONTEXT ".repeat(700)}`,
+    );
+
+    const transform = createBookContextTransform(bookId, projectRoot, {
+      compressContext: async () => null,
+    });
+    const result = await transform([
+      { role: "user" as const, content: "continue", timestamp: Date.now() },
+    ]);
+    const content = (result[0] as { content: string }).content;
+
+    expect(content).toContain("## Important");
+    expect(content).toContain("Markdown");
+    expect(content).not.toContain("LONG_CONTEXT LONG_CONTEXT LONG_CONTEXT");
+  });
+
   it("emits session context compression lifecycle events when compacting truth files", async () => {
     const storyDir = join(projectRoot, "books", bookId, "story");
     await writeFile(

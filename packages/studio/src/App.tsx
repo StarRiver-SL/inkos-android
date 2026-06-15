@@ -49,6 +49,7 @@ import {
   MapPin,
   Menu,
   Moon,
+  Radio,
   ShieldCheck,
   Server,
   Sun,
@@ -138,9 +139,30 @@ interface TokenDiagnosticsPayload {
     readonly headroom: {
       readonly enabled: boolean;
       readonly configured: boolean;
+      readonly state: "disabled" | "idle" | "connecting" | "online" | "offline";
+      readonly mode: "external-mcp" | "bundled";
+      readonly command: string;
+      readonly args: readonly string[];
+      readonly tools: readonly string[];
+      readonly lastCheckedAt: string | null;
       readonly lastCompressionOk: boolean | null;
-      readonly lastCompressionAt: number | null;
+      readonly lastCompressionAt: string | null;
       readonly lastError: string | null;
+      readonly stats: {
+        readonly compressions?: number;
+        readonly retrievals?: number;
+        readonly tokens_saved?: number;
+        readonly savings_percent?: number;
+        readonly estimated_cost_saved_usd?: number;
+      } | null;
+      readonly session: {
+        readonly compressions: number;
+        readonly originalTokens: number;
+        readonly compressedTokens: number;
+        readonly tokensSaved: number;
+        readonly originalChars: number;
+        readonly compressedChars: number;
+      };
     };
     readonly embedding: {
       readonly configured: boolean;
@@ -754,6 +776,26 @@ function TokenDiagnosticsButton() {
     }
   };
 
+  const checkHeadroom = async () => {
+    setActionStatus("正在执行 Headroom 压缩自检...");
+    try {
+      const result = await postApi<{
+        ok: boolean;
+        headroom?: TokenDiagnosticsPayload["diagnostics"]["headroom"];
+        result?: { originalTokens?: number; compressedTokens?: number; savingsPercent?: number };
+      }>("/token-diagnostics/headroom/self-test");
+      const session = result.headroom?.session;
+      const saved = session?.tokensSaved ?? Math.max(0, (result.result?.originalTokens ?? 0) - (result.result?.compressedTokens ?? 0));
+      setActionStatus(result.ok
+        ? `Headroom 压缩自检成功：累计压缩 ${session?.compressions ?? 1} 块，估算节省 ${saved.toLocaleString()} tokens。`
+        : "Headroom 压缩自检未通过。");
+    } catch (error) {
+      setActionStatus(`Headroom 压缩自检失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await refresh();
+    }
+  };
+
   const data = diagnostics?.diagnostics;
   const summary = data
     ? data.semanticCache.storage.sqliteAvailable
@@ -800,21 +842,44 @@ function TokenDiagnosticsButton() {
             {data ? (
               <>
                 <RuntimeStatusRow
-                  icon={<Cpu size={16} />}
-                  title="Headroom"
-                  tone={data.headroom.lastCompressionOk === false ? "warn" : "ok"}
+                  icon={<Radio size={16} />}
+                  title="Headroom MCP"
+                  tone={data.headroom.state === "online" ? "ok" : data.headroom.state === "idle" || data.headroom.state === "connecting" ? "wait" : "warn"}
                   message={[
-                    data.headroom.enabled ? "官方 Headroom 已启用。" : "本地 Headroom light 已启用。",
-                    data.headroom.configured ? "已配置官方服务参数。" : "未配置官方 HEADROOM_BASE_URL/API_KEY，当前走本地压缩 fallback。",
-                    data.headroom.lastCompressionOk === true ? "最近一次官方压缩成功。" : "",
-                    data.headroom.lastCompressionOk === false ? `最近一次已回退：${data.headroom.lastError ?? "未知原因"}` : "",
+                    data.headroom.state === "online"
+                      ? data.headroom.mode === "bundled" ? "手机端内置 Headroom-compatible 压缩已启用" : "官方 MCP 在线"
+                      : data.headroom.state === "connecting"
+                        ? "连接中"
+                        : data.headroom.state === "idle"
+                          ? "等待检查"
+                          : data.headroom.state === "disabled"
+                            ? "已禁用"
+                            : "离线，使用 InkOS 本地压缩",
+                    data.headroom.mode === "external-mcp" && data.headroom.configured
+                      ? `命令：${data.headroom.command} ${data.headroom.args.join(" ")}`
+                      : data.headroom.mode === "bundled"
+                        ? "随 APK 内置，无需用户安装 Python 或 headroom 命令"
+                        : "未配置启动命令",
+                    data.headroom.tools.length > 0 ? `工具：${data.headroom.tools.join(" / ")}` : "",
+                    data.headroom.stats?.tokens_saved !== undefined
+                      ? `官方累计节省 ${data.headroom.stats.tokens_saved.toLocaleString()} tokens`
+                      : "",
+                    data.headroom.session.compressions === 0
+                      ? "本次 Node 启动后还没有触发 Headroom 压缩；点击下方压缩自检可立即验证。"
+                      : "",
+                    data.headroom.lastCompressionOk === true
+                      ? `本次运行已压缩 ${data.headroom.session.compressions} 块，节省 ${data.headroom.session.tokensSaved.toLocaleString()} tokens`
+                      : "",
+                    data.headroom.lastError ? `最近错误：${data.headroom.lastError}` : "",
                   ].filter(Boolean).join(" ")}
                 />
                 <RuntimeStatusRow
                   icon={<Activity size={16} />}
                   title="上下文压缩"
                   tone={data.telemetry.ccrBlocksCompressed > 0 ? "ok" : "wait"}
-                  message={`压缩块 ${data.telemetry.ccrBlocksCompressed} 个，估算节省 ${data.telemetry.estimatedTokensSaved.toLocaleString()} tokens，字符 ${data.telemetry.originalChars.toLocaleString()} -> ${data.telemetry.optimizedChars.toLocaleString()}。`}
+                  message={data.telemetry.ccrBlocksCompressed > 0
+                    ? `压缩块 ${data.telemetry.ccrBlocksCompressed} 个，估算节省 ${data.telemetry.estimatedTokensSaved.toLocaleString()} tokens，字符 ${data.telemetry.originalChars.toLocaleString()} -> ${data.telemetry.optimizedChars.toLocaleString()}。`
+                    : "本次 Node 启动后还没有上下文进入 Headroom 压缩。长 truth 文件、超预算书籍上下文，或点击压缩自检后会出现统计。"}
                 />
                 <RuntimeStatusRow
                   icon={<Server size={16} />}
@@ -867,11 +932,19 @@ function TokenDiagnosticsButton() {
             )}
           </div>
 
-          <div className="grid shrink-0 grid-cols-1 gap-3 border-t border-border/45 bg-card/75 px-5 py-4 sm:grid-cols-[1fr_auto_auto] sm:px-6">
+          <div className="grid shrink-0 grid-cols-2 gap-3 border-t border-border/45 bg-card/75 px-5 py-4 sm:grid-cols-[1fr_1fr_auto_auto] sm:px-6">
+            <button
+              type="button"
+              onClick={() => void checkHeadroom()}
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
+            >
+              <Radio size={16} />
+              压缩自检
+            </button>
             <button
               type="button"
               onClick={() => void runMaintenance()}
-              className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
+              className="soft-pill inline-flex h-12 items-center justify-center gap-2 rounded-2xl px-4 text-sm font-semibold text-foreground"
             >
               <Database size={16} />
               维护缓存

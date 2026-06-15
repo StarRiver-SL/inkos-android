@@ -119,6 +119,62 @@ export function findRunningToolPart(
   return undefined;
 }
 
+export function hasActiveToolExecution(message: Message | undefined): boolean {
+  if (!message) return false;
+  return message.toolExecutions?.some((execution) =>
+    execution.status === "running" || execution.status === "processing"
+  ) ?? false;
+}
+
+function cancelExecution(execution: ToolExecution, completedAt: number): ToolExecution {
+  if (execution.status !== "running" && execution.status !== "processing") return execution;
+  return {
+    ...execution,
+    status: "cancelled",
+    completedAt,
+    error: undefined,
+    stages: execution.stages?.map((stage) =>
+      stage.status === "completed"
+        ? stage
+        : { ...stage, status: "cancelled" as const, progress: undefined },
+    ),
+  };
+}
+
+export function cancelMessageWork(
+  message: Message,
+  fallbackContent: string,
+  completedAt = Date.now(),
+): Message {
+  const parts = message.parts?.map((part) => (
+    part.type === "tool"
+      ? { type: "tool" as const, execution: cancelExecution(part.execution, completedAt) }
+      : part.type === "thinking"
+        ? { ...part, streaming: false }
+        : part
+  ));
+
+  if (parts) {
+    const flat = deriveFlat(parts);
+    return {
+      ...message,
+      ...flat,
+      content: flat.content.trim() ? flat.content : message.content || fallbackContent,
+      thinkingStreaming: false,
+      parts,
+      tokenUsage: message.tokenUsage,
+    };
+  }
+
+  const toolExecutions = message.toolExecutions?.map((execution) => cancelExecution(execution, completedAt));
+  return {
+    ...message,
+    content: message.content || fallbackContent,
+    thinkingStreaming: false,
+    ...(toolExecutions ? { toolExecutions } : {}),
+  };
+}
+
 export function deriveFlat(
   parts: MessagePart[],
 ): { content: string; thinking?: string; thinkingStreaming?: boolean; toolExecutions?: ToolExecution[] } {

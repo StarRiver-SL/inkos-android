@@ -1,11 +1,12 @@
-import { useApi } from "../hooks/use-api";
+import { postApi, useApi } from "../hooks/use-api";
 import { useEffect, useMemo, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
-import { Stethoscope, CheckCircle2, XCircle, Loader2, RefreshCw, Download, ShieldCheck, PackageCheck } from "lucide-react";
+import { Stethoscope, CheckCircle2, XCircle, Loader2, RefreshCw, Download, ShieldCheck, PackageCheck, DatabaseBackup, Wrench } from "lucide-react";
 import { downloadUpdateApk, installDownloadedApk, openInstallPermissionSettings, pingUpdateUrl } from "../lib/android-runtime-plugin";
 import { isNativeRuntime } from "../lib/mobile-runtime";
+import { appConfirm } from "../lib/app-dialog";
 
 interface DoctorChecks {
   readonly inkosJson: boolean;
@@ -43,6 +44,15 @@ interface RuntimeUpdateCheck {
 }
 
 interface Nav { toDashboard: () => void }
+
+interface StorageRepairResult {
+  readonly ok: boolean;
+  readonly root: string;
+  readonly backupDir: string;
+  readonly booksChecked: number;
+  readonly worldsRemoved: number;
+  readonly removedWorldIds: ReadonlyArray<string>;
+}
 
 function CheckRow({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
   return (
@@ -394,6 +404,83 @@ function UpdatePanel({ theme, t }: { theme: Theme; t: TFunction }) {
   );
 }
 
+function StorageRepairPanel({ theme, t, onRepaired }: {
+  readonly theme: Theme;
+  readonly t: TFunction;
+  readonly onRepaired: () => void;
+}) {
+  const c = useColors(theme);
+  const [repairing, setRepairing] = useState(false);
+  const [result, setResult] = useState<StorageRepairResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleRepair = async () => {
+    const confirmed = await appConfirm({
+      title: t("doctor.repairConfirmTitle"),
+      message: t("doctor.repairConfirmMessage"),
+      confirmLabel: t("doctor.repairAction"),
+      cancelLabel: t("common.cancel"),
+      tone: "danger",
+    });
+    if (!confirmed) return;
+
+    setRepairing(true);
+    setError(null);
+    try {
+      const repairResult = await postApi<StorageRepairResult>("/runtime/repair");
+      setResult(repairResult);
+      onRepaired();
+    } catch (repairError) {
+      setResult(null);
+      setError(repairError instanceof Error ? repairError.message : String(repairError));
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  return (
+    <div className={`border ${c.cardStatic} rounded-lg p-5`}>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <DatabaseBackup size={18} className="text-primary" />
+            {t("doctor.repairTitle")}
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+            {t("doctor.repairDescription")}
+          </p>
+        </div>
+        <button
+          disabled={repairing}
+          onClick={() => void handleRepair()}
+          className={`inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md px-4 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60 ${c.btnPrimary}`}
+        >
+          {repairing ? <Loader2 size={16} className="animate-spin" /> : <Wrench size={16} />}
+          {repairing ? t("doctor.repairing") : t("doctor.repairAction")}
+        </button>
+      </div>
+
+      {result ? (
+        <div className="mt-4 rounded-lg border border-emerald-500/20 bg-emerald-500/8 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
+          <div className="flex items-center gap-2 font-medium">
+            <CheckCircle2 size={16} />
+            {t("doctor.repairComplete")}
+          </div>
+          <p className="mt-1 leading-6">
+            {t("doctor.repairSummary")
+              .replace("{books}", String(result.booksChecked))
+              .replace("{worlds}", String(result.worldsRemoved))}
+          </p>
+          <p className="mt-1 truncate text-xs opacity-70" title={result.backupDir}>
+            {t("doctor.repairBackup")}: {result.backupDir}
+          </p>
+        </div>
+      ) : null}
+      {error ? <p className="mt-4 text-sm text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
 export function DoctorView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const { data, refetch } = useApi<DoctorChecks>("/doctor");
@@ -442,6 +529,8 @@ export function DoctorView({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
           }
         </div>
       )}
+
+      <StorageRepairPanel theme={theme} t={t} onRepaired={() => refetch()} />
 
       <UpdatePanel theme={theme} t={t} />
     </div>
