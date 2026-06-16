@@ -400,11 +400,11 @@ export function detectCrossChapterRepetition(
         crossRepeats.push(`"${phrase}" (×${count})`);
       }
     }
-    if (crossRepeats.length >= 3) {
+    if (crossRepeats.length >= 1) {
       violations.push({
         rule: "Cross-chapter repetition",
-        severity: "warning",
-        description: `${crossRepeats.length} repeated phrases also found in recent chapters: ${crossRepeats.slice(0, 5).join(", ")}`,
+        severity: "error",
+        description: `${crossRepeats.length} repeated phrases also found in recent chapters: ${crossRepeats.slice(0, 8).join(", ")}`,
         suggestion: "Vary action verbs and descriptive phrases to avoid cross-chapter repetition",
       });
     }
@@ -425,11 +425,11 @@ export function detectCrossChapterRepetition(
         crossRepeats.push(`"${phrase}"(×${count})`);
       }
     }
-    if (crossRepeats.length >= 3) {
+    if (crossRepeats.length >= 1) {
       violations.push({
         rule: "跨章重复",
-        severity: "warning",
-        description: `${crossRepeats.length}个重复短语在近期章节中也出现过：${crossRepeats.slice(0, 5).join("、")}`,
+        severity: "error",
+        description: `${crossRepeats.length}个重复短语在近期章节中也出现过：${crossRepeats.slice(0, 8).join("、")}`,
         suggestion: "变换动作描写和场景用语，避免跨章节机械重复",
       });
     }

@@ -19,6 +19,7 @@ import { createPlayDB } from "./play-db-factory.js";
 import { applyPlayMutation, seedPlayGraph, type PlayReducerDB } from "./play-reducer.js";
 import { PlayStore, type PlayWorld } from "./play-store.js";
 import type { PlayGraphSnapshot } from "./play-file-db.js";
+import { buildWorldKnowledgeContext } from "../knowledge/knowledge-store.js";
 
 export interface PlayActionInterpreterLike {
   readonly interpret: (input: {
@@ -398,8 +399,19 @@ export class PlayRunner {
     const sceneLabel = isEn ? "Current scene:" : "当前场景：";
     const stateLabel = isEn ? "Current state:" : "当前状态：";
     const entityRoster = renderEntityRoster(readGraphSnapshot(this.db)?.entities ?? [], language);
+    const knowledgeContext = await buildWorldKnowledgeContext({
+      projectRoot: this.options.projectRoot,
+      worldId: this.options.worldId,
+      query: [
+        world?.title,
+        world?.premise,
+        sceneBrief,
+        stateBrief,
+      ].filter(Boolean).join("\n"),
+    });
     return [
       worldContext,
+      knowledgeContext,
       entityRoster,
       sceneBrief ? `${sceneLabel}\n${sceneBrief}` : "",
       stateBrief ? `${stateLabel}\n${stateBrief}` : "",

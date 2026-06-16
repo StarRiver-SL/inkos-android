@@ -52,7 +52,7 @@ export interface PlanChapterOutput {
   readonly runtimePath: string;
 }
 
-const MEMO_RETRY_LIMIT = 3;
+const MEMO_RETRY_LIMIT = 2;
 
 /**
  * Phase 3 planner.

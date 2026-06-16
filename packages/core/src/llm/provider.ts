@@ -75,15 +75,18 @@ function shouldRetryAsClaudeCli(model: string, detail: string): boolean {
 
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
-  intervalMs: number = 30000,
+  intervalMs: number = 3000,
 ): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
   const startTime = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
+  let lastProgressChars = 0;
 
   if (onProgress) {
     timer = setInterval(() => {
+      if (totalChars === lastProgressChars) return;
+      lastProgressChars = totalChars;
       onProgress({
         elapsedMs: Date.now() - startTime,
         totalChars,

@@ -83,6 +83,7 @@ import {
   type LLMRequestDiagnostics,
   type AgentRequestDiagnostics,
   type SessionKind,
+  KnowledgeStore,
 } from "@actalk/inkos-core";
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -91,6 +92,7 @@ import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import { initializeStudioProject, registerRuntimeRoutes } from "./runtime-routes.js";
 import { HeadroomMcpManager } from "./headroom-mcp.js";
+import { extractTextWithPython } from "./python-runtime.js";
 import {
   LEGACY_SHIM_FILES,
   RUNTIME_DIAGNOSTIC_FILE_RE,
@@ -473,6 +475,20 @@ function normalizeStudioActionPayload(value: unknown): ActionPayload | undefined
     const message = error instanceof Error ? error.message : String(error);
     throw new ApiError(400, "INVALID_ACTION_PAYLOAD", `Invalid actionPayload: ${message}`);
   }
+}
+
+function normalizeWriteKnowledgeOptions(value: unknown): { enabled?: boolean; sourceIds?: string[] } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const enabled = typeof record.enabled === "boolean" ? record.enabled : undefined;
+  const sourceIds = Array.isArray(record.sourceIds)
+    ? record.sourceIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 12)
+    : undefined;
+  if (enabled === undefined && (!sourceIds || sourceIds.length === 0)) return undefined;
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(sourceIds && sourceIds.length > 0 ? { sourceIds } : {}),
+  };
 }
 
 function normalizeStudioPlayMode(value: unknown): PlayMode | undefined {
@@ -1981,11 +1997,38 @@ async function probeServiceCapabilities(args: {
   };
 }
 
+async function resolveKnowledgeUploadBody(body: {
+  readonly name?: string;
+  readonly content?: string;
+  readonly fileBase64?: string;
+}): Promise<{ readonly name: string; readonly content: string; readonly extraction?: unknown }> {
+  const name = body.name?.trim();
+  if (!name) throw new ApiError(400, "KNOWLEDGE_NAME_REQUIRED", "name is required");
+  const fallbackContent = body.content?.trim() ?? "";
+  if (body.fileBase64?.trim()) {
+    const extracted = await extractTextWithPython({ name, base64: body.fileBase64.trim() });
+    if (extracted?.ok && extracted.text.trim()) {
+      return { name, content: extracted.text, extraction: extracted };
+    }
+    if (fallbackContent) {
+      return { name, content: fallbackContent, extraction: extracted ?? { ok: false, method: "javascript:fallback", warnings: ["Python unavailable."] } };
+    }
+    throw new ApiError(
+      400,
+      "KNOWLEDGE_EXTRACTION_FAILED",
+      extracted?.warnings.join("; ") || "Unable to extract text from file.",
+    );
+  }
+  if (!fallbackContent) throw new ApiError(400, "KNOWLEDGE_CONTENT_REQUIRED", "content is required");
+  return { name, content: fallbackContent };
+}
+
 // --- Server factory ---
 
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
+  const knowledgeStore = new KnowledgeStore(root);
   const headroom = new HeadroomMcpManager();
   let cachedConfig = initialConfig;
 
@@ -2368,7 +2411,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       chapterWordCount?: number;
       targetChapters?: number;
       blurb?: string;
-    }>();
+    }>().catch(() => null);
+    if (!body?.title?.trim()) {
+      return c.json({ error: "title is required" }, 400);
+    }
+    if (body.title.length > 200) {
+      return c.json({ error: "title must be 200 characters or fewer" }, 400);
+    }
+    if (body.blurb && body.blurb.length > 5000) {
+      return c.json({ error: "blurb must be 5000 characters or fewer" }, 400);
+    }
 
     const now = new Date().toISOString();
     const bookConfig = buildStudioBookConfig(body, now);
@@ -2476,7 +2528,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const num = parseInt(c.req.param("num"), 10);
     const bookDir = state.bookDir(id);
     const chaptersDir = join(bookDir, "chapters");
-    const { content, title } = await c.req.json<{ content: string; title?: string }>();
+    const body = await c.req.json<{ content: string; title?: string }>().catch(() => null);
+    if (!body || typeof body.content !== "string") {
+      return c.json({ error: "content is required" }, 400);
+    }
+    if (body.content.length > 2_000_000) {
+      return c.json({ error: "Chapter content must be 2MB or fewer" }, 400);
+    }
+    const { content, title } = body;
     const nextTitle = title?.trim();
     if (title !== undefined && !nextTitle) {
       return c.json({ error: "Chapter title cannot be empty" }, 400);
@@ -2607,19 +2666,86 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  app.get("/api/v1/books/:id/knowledge", async (c) => {
+    const id = c.req.param("id");
+    return c.json(await knowledgeStore.loadOverview("book", id));
+  });
+
+  app.post("/api/v1/books/:id/knowledge/sources", async (c) => {
+    const id = c.req.param("id");
+    const body: { name?: string; content?: string; fileBase64?: string } = await c.req.json<{ name?: string; content?: string; fileBase64?: string }>().catch(() => ({}));
+    const upload = await resolveKnowledgeUploadBody(body);
+    await knowledgeStore.addSource("book", id, {
+      name: upload.name,
+      content: upload.content,
+    });
+    const library = await knowledgeStore.loadOverview("book", id);
+    return c.json({ ...library, extraction: upload.extraction });
+  });
+
+  app.delete("/api/v1/books/:id/knowledge/sources/:sourceId", async (c) => {
+    const id = c.req.param("id");
+    const sourceId = c.req.param("sourceId");
+    await knowledgeStore.removeSource("book", id, sourceId);
+    return c.json(await knowledgeStore.loadOverview("book", id));
+  });
+
+  app.post("/api/v1/books/:id/knowledge/rebuild", async (c) => {
+    const id = c.req.param("id");
+    await knowledgeStore.rebuild("book", id);
+    return c.json(await knowledgeStore.loadOverview("book", id));
+  });
+
+  app.post("/api/v1/books/:id/knowledge/search", async (c) => {
+    const id = c.req.param("id");
+    const body: { query?: string; limit?: number; sourceIds?: string[] } = await c.req.json<{ query?: string; limit?: number; sourceIds?: string[] }>().catch(() => ({}));
+    return c.json(await knowledgeStore.search("book", id, body.query ?? "", body.limit ?? 6, { sourceIds: body.sourceIds }));
+  });
+
+  app.get("/api/v1/knowledge/project", async (c) => {
+    return c.json(await knowledgeStore.loadOverview("project", "global"));
+  });
+
+  app.post("/api/v1/knowledge/project/sources", async (c) => {
+    const body: { name?: string; content?: string; fileBase64?: string } = await c.req.json<{ name?: string; content?: string; fileBase64?: string }>().catch(() => ({}));
+    const upload = await resolveKnowledgeUploadBody(body);
+    await knowledgeStore.addSource("project", "global", {
+      name: upload.name,
+      content: upload.content,
+    });
+    const library = await knowledgeStore.loadOverview("project", "global");
+    return c.json({ ...library, extraction: upload.extraction });
+  });
+
+  app.delete("/api/v1/knowledge/project/sources/:sourceId", async (c) => {
+    await knowledgeStore.removeSource("project", "global", c.req.param("sourceId"));
+    return c.json(await knowledgeStore.loadOverview("project", "global"));
+  });
+
+  app.post("/api/v1/knowledge/project/rebuild", async (c) => {
+    await knowledgeStore.rebuild("project", "global");
+    return c.json(await knowledgeStore.loadOverview("project", "global"));
+  });
+
+  app.post("/api/v1/knowledge/project/search", async (c) => {
+    const body: { query?: string; limit?: number; sourceIds?: string[] } = await c.req.json<{ query?: string; limit?: number; sourceIds?: string[] }>().catch(() => ({}));
+    return c.json(await knowledgeStore.search("project", "global", body.query ?? "", body.limit ?? 6, { sourceIds: body.sourceIds }));
+  });
+
   // --- Actions ---
 
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body: { wordCount?: number; mode?: string } = await c.req.json<{ wordCount?: number; mode?: string }>()
+    const body: { wordCount?: number; mode?: string; knowledge?: { enabled?: boolean; sourceIds?: string[] } } = await c.req.json<{ wordCount?: number; mode?: string; knowledge?: { enabled?: boolean; sourceIds?: string[] } }>()
       .catch(() => ({ wordCount: undefined }));
     const mode = body.mode === "quick" ? "quick" : "full";
+    const knowledge = normalizeWriteKnowledgeOptions(body.knowledge);
 
     broadcast("write:start", { bookId: id });
 
     // Fire and forget — progress/completion/errors pushed via SSE
     const pipeline = new PipelineRunner(await buildPipelineConfig());
-    pipeline.writeNextChapter(id, { wordCount: body.wordCount, mode }).then(
+    pipeline.writeNextChapter(id, { wordCount: body.wordCount, mode, ...(knowledge ? { knowledge } : {}) }).then(
       (result) => {
         broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
       },
@@ -3194,7 +3320,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.put("/api/v1/services/:service/secret", async (c) => {
     const service = c.req.param("service");
-    const { apiKey } = await c.req.json<{ apiKey: string }>();
+    const body = await c.req.json<{ apiKey: string }>().catch(() => null);
+    if (!body) {
+      return c.json({ ok: false, error: "Invalid JSON body" }, 400);
+    }
+    const { apiKey } = body;
     const secrets = await loadSecrets(root);
     const trimmedKey = apiKey?.trim() ?? "";
     if (trimmedKey) {
@@ -3375,45 +3505,61 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   app.get("/api/v1/project/input-governance-mode", async (c) => {
-    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
-    return c.json({ mode: raw.inputGovernanceMode === "legacy" ? "legacy" : "v2" });
+    try {
+      const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
+      return c.json({ mode: raw.inputGovernanceMode === "legacy" ? "legacy" : "v2" });
+    } catch {
+      return c.json({ mode: "v2" });
+    }
   });
 
   app.put("/api/v1/project/input-governance-mode", async (c) => {
-    const { mode } = await c.req.json<{ mode?: unknown }>();
+    const { mode } = await c.req.json<{ mode?: unknown }>().catch(() => ({ mode: undefined }));
     const parsed = InputGovernanceModeSchema.safeParse(mode);
     if (!parsed.success) {
       return c.json({ error: "mode must be legacy or v2" }, 400);
     }
-    const configPath = join(root, "inkos.json");
-    const raw = JSON.parse(await readFile(configPath, "utf-8"));
-    raw.inputGovernanceMode = parsed.data;
-    const { writeFile: writeFileFs } = await import("node:fs/promises");
-    await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
-    return c.json({ ok: true, mode: parsed.data });
+    try {
+      const configPath = join(root, "inkos.json");
+      const raw = JSON.parse(await readFile(configPath, "utf-8"));
+      raw.inputGovernanceMode = parsed.data;
+      const { writeFile: writeFileFs } = await import("node:fs/promises");
+      await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
+      return c.json({ ok: true, mode: parsed.data });
+    } catch {
+      return c.json({ error: "Failed to read or update inkos.json" }, 500);
+    }
   });
 
   app.get("/api/v1/project/detection", async (c) => {
-    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
-    return c.json({ detection: raw.detection ?? null });
+    try {
+      const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
+      return c.json({ detection: raw.detection ?? null });
+    } catch {
+      return c.json({ detection: null });
+    }
   });
 
   app.put("/api/v1/project/detection", async (c) => {
-    const { detection } = await c.req.json<{ detection?: unknown }>();
-    const configPath = join(root, "inkos.json");
-    const raw = JSON.parse(await readFile(configPath, "utf-8"));
-    if (detection === null) {
-      delete raw.detection;
-    } else {
-      const parsed = DetectionConfigSchema.safeParse(detection);
-      if (!parsed.success) {
-        return c.json({ error: parsed.error.issues.map((issue) => issue.message).join("; ") }, 400);
+    const { detection } = await c.req.json<{ detection?: unknown }>().catch(() => ({ detection: undefined }));
+    try {
+      const configPath = join(root, "inkos.json");
+      const raw = JSON.parse(await readFile(configPath, "utf-8"));
+      if (detection === null) {
+        delete raw.detection;
+      } else {
+        const parsed = DetectionConfigSchema.safeParse(detection);
+        if (!parsed.success) {
+          return c.json({ error: parsed.error.issues.map((issue) => issue.message).join("; ") }, 400);
+        }
+        raw.detection = parsed.data;
       }
-      raw.detection = parsed.data;
+      const { writeFile: writeFileFs } = await import("node:fs/promises");
+      await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
+      return c.json({ ok: true, detection: raw.detection ?? null });
+    } catch {
+      return c.json({ error: "Failed to read or update inkos.json" }, 500);
     }
-    const { writeFile: writeFileFs } = await import("node:fs/promises");
-    await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
-    return c.json({ ok: true, detection: raw.detection ?? null });
   });
 
   // --- Truth files browser ---
@@ -4447,7 +4593,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         });
 
         try {
-          const writeResult = await pipeline.writeNextChapter(directWriteBookId);
+          const writeKnowledge = normalizeWriteKnowledgeOptions(actionPayload?.writeNext?.knowledge);
+          const writeResult = await pipeline.writeNextChapter(directWriteBookId, writeKnowledge ? { knowledge: writeKnowledge } : undefined);
           const writeNeedsReview = Boolean(writeResult.status && writeResult.status !== "ready-for-review");
           const responseText = writeNeedsReview
             ? [

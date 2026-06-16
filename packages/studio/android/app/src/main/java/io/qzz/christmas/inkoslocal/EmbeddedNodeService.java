@@ -49,6 +49,7 @@ public class EmbeddedNodeService extends Service {
     private static boolean startedNodeAlready = false;
     private static int autoRestartAttempts = 0;
     private Process nodeProcess = null;
+    private EmbeddedPythonBridge pythonBridge = null;
     private volatile boolean progressMonitorRunning = false;
     private String lastProgressText = "";
     private String lastProgressSignature = "";
@@ -122,6 +123,7 @@ public class EmbeddedNodeService extends Service {
     @Override
     public void onDestroy() {
         progressMonitorRunning = false;
+        stopPythonBridge();
         stopNodeProcess();
         releaseWakeLock();
         super.onDestroy();
@@ -190,6 +192,7 @@ public class EmbeddedNodeService extends Service {
     }
 
     private synchronized void resetEmbeddedRuntime() {
+        stopPythonBridge();
         stopNodeProcess();
         startedNodeAlready = false;
         autoRestartAttempts = 0;
@@ -291,6 +294,19 @@ public class EmbeddedNodeService extends Service {
             setNodeEnv("INKOS_NODE_LOG", logFile.getAbsolutePath());
             setNodeEnv("INKOS_NODE_PROGRESS", progressFile.getAbsolutePath());
 
+            EmbeddedPythonBridge bridge = ensurePythonBridge();
+            if (bridge != null && bridge.isRunning()) {
+                String bridgeUrl = "http://127.0.0.1:" + bridge.getPort();
+                setNodeEnv("INKOS_ANDROID_PYTHON", "chaquopy");
+                setNodeEnv("INKOS_ANDROID_PYTHON_BRIDGE_URL", bridgeUrl);
+                appendRuntimeLog(logFile, "[inkos-python-java] bridge listening on " + bridgeUrl);
+                writeRuntimeStatus("python-bridge-ready", "Embedded Android Python bridge is listening on " + bridgeUrl + ".");
+            } else {
+                String error = bridge == null ? "bridge not initialized" : bridge.getLastError();
+                appendRuntimeLog(logFile, "[inkos-python-java] bridge unavailable: " + error);
+                writeRuntimeStatus("python-bridge-unavailable", "Embedded Android Python bridge unavailable: " + error);
+            }
+
             startPortMonitor(projectRoot);
             updateNotification("InkOS local runtime starting on 127.0.0.1:4567");
             Log.i(TAG, "Starting Node24 JNI runtime: " + server.getAbsolutePath());
@@ -372,6 +388,21 @@ public class EmbeddedNodeService extends Service {
         writeRuntimeStatus("node24-jni-start", "Executing embedded Node with " + Arrays.toString(arguments));
         appendRuntimeLog(logFile, "[inkos-node-java] before startNodeWithArguments " + Arrays.toString(arguments));
         return startNodeWithArguments(arguments);
+    }
+
+    private synchronized EmbeddedPythonBridge ensurePythonBridge() {
+        if (pythonBridge == null) {
+            pythonBridge = new EmbeddedPythonBridge(getApplicationContext(), 4571);
+        }
+        pythonBridge.start();
+        return pythonBridge;
+    }
+
+    private synchronized void stopPythonBridge() {
+        if (pythonBridge != null) {
+            pythonBridge.stop();
+            pythonBridge = null;
+        }
     }
 
     private void appendRuntimeLog(File logFile, String message) {
@@ -813,6 +844,13 @@ public class EmbeddedNodeService extends Service {
             }
             if (!nativeLibSha256.isEmpty()) {
                 payload.put("nativeLibSha256", nativeLibSha256);
+            }
+            if (pythonBridge != null) {
+                payload.put("embeddedPythonBridgeAvailable", pythonBridge.isRunning());
+                payload.put("embeddedPythonBridgePort", pythonBridge.getPort());
+                if (!pythonBridge.getLastError().isEmpty()) {
+                    payload.put("embeddedPythonBridgeError", pythonBridge.getLastError());
+                }
             }
             String json = payload.toString();
             try (FileOutputStream output = new FileOutputStream(statusFile, false)) {

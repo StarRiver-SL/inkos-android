@@ -69,6 +69,7 @@ import {
   syncLegacyStructuredStateFromMarkdown as syncLegacyStructuredStateFromMarkdownHelper,
 } from "./memory-index-sync.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
+import { buildBookKnowledgeContext } from "../knowledge/knowledge-store.js";
 
 export {
   buildImportFoundationSource,
@@ -104,6 +105,11 @@ function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
 }
 
+function mergeExternalContext(existing: string | undefined, knowledgeContext: string): string {
+  const blocks = [existing?.trim(), knowledgeContext.trim()].filter(Boolean);
+  return blocks.join("\n\n---\n\n");
+}
+
 export interface PipelineConfig {
   readonly client: LLMClient;
   readonly model: string;
@@ -132,6 +138,10 @@ export interface PipelineConfig {
 export interface WriteNextChapterOptions {
   readonly wordCount?: number;
   readonly temperatureOverride?: number;
+  readonly knowledge?: {
+    readonly enabled?: boolean;
+    readonly sourceIds?: readonly string[];
+  };
   /**
    * One-off low-cost write. Keeps draft + settlement + persistence, but skips
    * the LLM audit/revise loop and final state-validator pass.
@@ -937,6 +947,20 @@ export class PipelineRunner {
         chapterNumber,
         context ?? this.config.externalContext,
       );
+      const knowledgeContext = await buildBookKnowledgeContext({
+        projectRoot: this.config.projectRoot,
+        bookId,
+        query: [
+          book.title,
+          book.genre,
+          `chapter ${chapterNumber}`,
+          context ?? this.config.externalContext,
+          writeInput.chapterIntent,
+        ].filter(Boolean).join("\n"),
+      });
+      const writeInputWithKnowledge = knowledgeContext
+        ? { ...writeInput, externalContext: mergeExternalContext(writeInput.externalContext, knowledgeContext) }
+        : writeInput;
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);
       const lengthSpec = buildLengthSpec(
@@ -950,7 +974,7 @@ export class PipelineRunner {
         book,
         bookDir,
         chapterNumber,
-        ...writeInput,
+        ...writeInputWithKnowledge,
         lengthSpec,
         ...(wordCount ? { wordCountOverride: wordCount } : {}),
       });
@@ -1559,6 +1583,24 @@ export class PipelineRunner {
       chapterNumber,
       externalContext,
     );
+    const knowledgeContext = options.knowledge?.enabled === false
+      ? ""
+      : await buildBookKnowledgeContext({
+          projectRoot: this.config.projectRoot,
+          bookId,
+          query: [
+            book.title,
+            book.genre,
+            `chapter ${chapterNumber}`,
+            externalContext,
+            writeInput.chapterIntent,
+          ].filter(Boolean).join("\n"),
+          sourceIds: options.knowledge?.sourceIds,
+          includeProject: !(options.knowledge?.sourceIds?.length),
+        });
+    const writeInputWithKnowledge = knowledgeContext
+      ? { ...writeInput, externalContext: mergeExternalContext(writeInput.externalContext, knowledgeContext) }
+      : writeInput;
     const reducedControlInput = writeInput.chapterIntent && writeInput.contextPackage && writeInput.ruleStack
       ? {
           chapterIntent: writeInput.chapterIntent,
@@ -1589,7 +1631,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
-      ...writeInput,
+      ...writeInputWithKnowledge,
       lengthSpec,
       ...(wordCount ? { wordCountOverride: wordCount } : {}),
       ...(temperatureOverride ? { temperatureOverride } : {}),

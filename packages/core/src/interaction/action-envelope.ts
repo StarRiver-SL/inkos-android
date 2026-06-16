@@ -56,11 +56,19 @@ export const GenerateCoverActionPayloadSchema = z.object({
   outputDir: z.string().min(1).optional(),
 }).strict();
 
+export const WriteNextActionPayloadSchema = z.object({
+  knowledge: z.object({
+    enabled: z.boolean().optional(),
+    sourceIds: z.array(z.string().min(1)).max(12).optional(),
+  }).strict().optional(),
+}).strict();
+
 export const ActionPayloadSchema = z.object({
   createBook: CreateBookActionPayloadSchema.optional(),
   shortRun: ShortRunActionPayloadSchema.optional(),
   playStart: PlayStartActionPayloadSchema.optional(),
   generateCover: GenerateCoverActionPayloadSchema.optional(),
+  writeNext: WriteNextActionPayloadSchema.optional(),
 }).strict();
 
 export type ActionPayload = z.infer<typeof ActionPayloadSchema>;

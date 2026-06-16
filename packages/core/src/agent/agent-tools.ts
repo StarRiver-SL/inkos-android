@@ -582,7 +582,10 @@ export function createSubAgentTool(
           case "writer": {
             const targetBookId = resolveToolBookId("writer", bookId, activeBookId);
             progress(`Writing next chapter for "${targetBookId}"...`);
-            const result = await pipeline.writeNextChapter(targetBookId, chapterWordCount);
+            const result = await pipeline.writeNextChapter(targetBookId, {
+              ...(chapterWordCount !== undefined ? { wordCount: chapterWordCount } : {}),
+              ...(options.actionPayload?.writeNext?.knowledge ? { knowledge: options.actionPayload.writeNext.knowledge } : {}),
+            });
             progress(`Writer finished chapter for "${targetBookId}".`);
             const resultStatus = (result as any).status;
             const wordCount = (result as any).wordCount ?? "unknown";

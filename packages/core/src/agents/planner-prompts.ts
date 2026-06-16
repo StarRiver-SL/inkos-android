@@ -220,6 +220,12 @@ export const PLANNER_MEMO_USER_TEMPLATE_EN = `# Chapter {{chapterNumber}} memo r
 ## Last 3 chapter summaries
 {{recent_summaries}}
 
+## Anti-repetition constraint (MUST follow)
+- This chapter's theme, core conflict, and main setting must NOT repeat or closely resemble any of the above chapters
+- If recent chapters followed a "dialogue → discover secret → conflict" pattern, this chapter MUST switch to a different rhythm (e.g. introspection, time skip, subplot pivot)
+- The title must be clearly different in keywords and structure from the last 3 chapter titles
+- If your plan overlaps >30% with the previous chapter summary, you MUST rethink
+
 ## What the current arc is pushing
 {{current_arc_prose}}
 
@@ -268,6 +274,12 @@ export const PLANNER_MEMO_USER_TEMPLATE = `# 第 {{chapterNumber}} 章 memo 请�
 
 ## 最近 3 章摘要
 {{recent_summaries}}
+
+## 反重复约束（必须遵守）
+- 本章主题、核心冲突、主要场景不得与上面任何一章重复或高度相似
+- 如果最近章节涉及"对话→发现秘密→冲突"，本章必须切换为不同节奏（如内心独白、时间跳跃、支线推进）
+- 标题必须与最近 3 章标题在关键词和结构上明显不同
+- 如果你发现自己的计划与上一章摘要有 30% 以上的重叠，必须重新构思
 
 ## 当前 arc 正在推进什么
 {{current_arc_prose}}

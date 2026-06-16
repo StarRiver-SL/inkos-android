@@ -178,7 +178,7 @@ export class WriterAgent extends BaseAgent {
     const { book, bookDir, chapterNumber } = input;
 
     const fingerprintChapterContents = await this.loadRecentChapterContents(bookDir, chapterNumber, 5);
-    const recentChapters = this.joinRecentChapters(fingerprintChapterContents.slice(-1));
+    const recentChapters = this.joinRecentChapters(fingerprintChapterContents.slice(-3));
     const fingerprintChapters = this.joinRecentChapters(fingerprintChapterContents);
 
     const { profile: genreProfile, body: genreBody } =

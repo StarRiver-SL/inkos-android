@@ -1,5 +1,6 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { atomicWriteFile } from "../utils/atomic-file.js";
 
 export interface SecretsFile {
   services: Record<string, { apiKey: string }>;
@@ -53,10 +54,9 @@ export async function saveSecrets(
 ): Promise<void> {
   const dir = join(projectRoot, SECRETS_DIR);
   await mkdir(dir, { recursive: true });
-  await writeFile(
+  await atomicWriteFile(
     join(dir, SECRETS_FILE),
     JSON.stringify(secrets, null, 2),
-    "utf-8",
   );
 }
 
