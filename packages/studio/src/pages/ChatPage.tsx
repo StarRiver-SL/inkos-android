@@ -22,6 +22,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuCheckboxItem,
+  DropdownMenuSeparator,
 } from "../components/ui/dropdown-menu";
 import {
   Reasoning,
@@ -304,9 +306,11 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const [wallpaperUploading, setWallpaperUploading] = useState(false);
   const [wallpaperName, setWallpaperName] = useState("");
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(true);
-  const [knowledgeSourceId, setKnowledgeSourceId] = useState("all");
+  const [knowledgeUseAllSources, setKnowledgeUseAllSources] = useState(true);
+  const [knowledgeSourceIds, setKnowledgeSourceIds] = useState<ReadonlyArray<string>>([]);
   const [knowledgeSources, setKnowledgeSources] = useState<ReadonlyArray<KnowledgeSourceOption>>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [knowledgePickerOpen, setKnowledgePickerOpen] = useState(false);
   const worldPanelInsetClass = currentSessionKind === "play" && worldPanelOpen ? "lg:pr-[380px]" : "";
 
   useEffect(() => {
@@ -344,7 +348,8 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   useEffect(() => {
     if (!activeBookId || currentSessionKind !== "book") {
       setKnowledgeSources([]);
-      setKnowledgeSourceId("all");
+      setKnowledgeUseAllSources(true);
+      setKnowledgeSourceIds([]);
       return;
     }
     let active = true;
@@ -354,7 +359,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         if (!active) return;
         const sources = payload.sources ?? [];
         setKnowledgeSources(sources);
-        setKnowledgeSourceId((current) => current === "all" || sources.some((source) => source.id === current) ? current : "all");
+        setKnowledgeSourceIds((current) => current.filter((sourceId) => sources.some((source) => source.id === sourceId)));
       })
       .catch(() => {
         if (active) setKnowledgeSources([]);
@@ -383,25 +388,46 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     return `${usage.estimated ? "约 " : ""}${usage.totalTokens.toLocaleString()} tokens`;
   }, [messages]);
 
-  const selectedKnowledgeSource = useMemo(
-    () => knowledgeSources.find((source) => source.id === knowledgeSourceId) ?? null,
-    [knowledgeSourceId, knowledgeSources],
+  const selectedKnowledgeSources = useMemo(
+    () => knowledgeSources.filter((source) => knowledgeSourceIds.includes(source.id)),
+    [knowledgeSourceIds, knowledgeSources],
   );
-  const knowledgeSourceLabel = knowledgeSourceId === "all"
-    ? knowledgeLoading
+  const knowledgeSelectionSummary = !knowledgeEnabled
+    ? (isZh ? "未启用" : "Off")
+    : knowledgeLoading
       ? (isZh ? "读取资料中..." : "Loading sources...")
-      : (isZh ? "自动检索全部资料" : "Search all sources")
-    : (selectedKnowledgeSource?.name ?? (isZh ? "已选资料" : "Selected source"));
-  const knowledgeStatusLabel = knowledgeEnabled
-    ? knowledgeSourceId === "all"
-      ? (isZh ? `${knowledgeSources.length} 份资料` : `${knowledgeSources.length} sources`)
-      : (selectedKnowledgeSource?.chunkCount ? `${selectedKnowledgeSource.chunkCount} chunks` : (isZh ? "单份资料" : "Single source"))
-    : (isZh ? "未注入" : "Off");
+      : knowledgeUseAllSources
+        ? (isZh ? "自动检索全部资料" : "Search all sources")
+        : selectedKnowledgeSources.length <= 0
+          ? (isZh ? "未选择资料" : "No sources selected")
+          : selectedKnowledgeSources.length === 1
+            ? selectedKnowledgeSources[0]?.name ?? (isZh ? "已选资料" : "Selected source")
+            : (isZh ? `已选 ${selectedKnowledgeSources.length} 份资料` : `${selectedKnowledgeSources.length} sources selected`);
   const compactTokenSavingsLabel = tokenSavingsLabel
     ? tokenSavingsLabel.includes("enabled") || tokenSavingsLabel.includes("启用")
       ? (isZh ? "Token 优化" : "Token on")
       : tokenSavingsLabel
     : null;
+
+  useEffect(() => {
+    if (!knowledgeUseAllSources && knowledgeSourceIds.length === 0) {
+      setKnowledgeUseAllSources(true);
+    }
+  }, [knowledgeSourceIds, knowledgeUseAllSources]);
+
+  const toggleKnowledgeSource = useCallback((sourceId: string, checked: boolean) => {
+    setKnowledgeEnabled(true);
+    setKnowledgeUseAllSources(false);
+    setKnowledgeSourceIds((current) => checked
+      ? Array.from(new Set([...current, sourceId]))
+      : current.filter((item) => item !== sourceId));
+  }, []);
+
+  const handleSelectAllKnowledgeSources = useCallback(() => {
+    setKnowledgeEnabled(true);
+    setKnowledgeUseAllSources(true);
+    setKnowledgeSourceIds([]);
+  }, []);
 
   const latestTokenSavingsEventAt = useMemo(() => {
     for (let index = sse.messages.length - 1; index >= 0; index -= 1) {
@@ -682,7 +708,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       knowledge: knowledgeEnabled
         ? {
             enabled: true,
-            ...(knowledgeSourceId !== "all" ? { sourceIds: [knowledgeSourceId] } : {}),
+            ...(!knowledgeUseAllSources && knowledgeSourceIds.length > 0 ? { sourceIds: [...knowledgeSourceIds] } : {}),
           }
         : { enabled: false },
     },
@@ -1271,65 +1297,96 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       {hasBook && !showChoicePanel && (
         <div className={`relative z-10 shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
           <div className="mx-auto w-full max-w-5xl px-2.5 sm:px-4">
-            <div className="legacy-chat-toolbar mb-2 flex items-center gap-2 overflow-x-auto rounded-2xl border border-border/45 bg-card/75 px-2.5 py-2 shadow-sm shadow-background/20 backdrop-blur">
+            <div className="legacy-chat-toolbar mb-2 grid grid-cols-3 items-stretch gap-2 overflow-visible rounded-2xl border border-border/45 bg-card/90 px-2.5 py-2 shadow-lg shadow-background/25 backdrop-blur sm:flex sm:flex-nowrap sm:items-center sm:overflow-x-auto dark:bg-card/95">
               <QuickActions
                 onAction={handleQuickAction}
                 disabled={loading || !activeSessionId}
                 isZh={isZh}
               />
-              <button
-                type="button"
-                onClick={() => setKnowledgeEnabled((value) => !value)}
-                className={`legacy-chat-knowledge-toggle flex min-h-9 shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold shadow-sm transition-all active:scale-95 ${
-                  knowledgeEnabled
-                    ? "bg-primary/15 text-primary ring-1 ring-primary/25"
-                    : "bg-secondary/45 text-muted-foreground hover:bg-secondary/70 hover:text-foreground"
-                }`}
-                aria-pressed={knowledgeEnabled}
-              >
-                <span className={`flex h-4 w-4 items-center justify-center rounded-[0.35rem] ${knowledgeEnabled ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
-                  {knowledgeEnabled ? <Check size={12} strokeWidth={3} /> : null}
-                </span>
-                {isZh ? "使用知识库" : "Use knowledge"}
-              </button>
-              <DropdownMenu>
+              <DropdownMenu open={knowledgePickerOpen} onOpenChange={setKnowledgePickerOpen}>
                 <DropdownMenuTrigger
-                  disabled={!knowledgeEnabled || knowledgeLoading}
-                  className="legacy-chat-knowledge-trigger flex min-h-9 min-w-[10.5rem] max-w-[13.5rem] shrink-0 items-center justify-between gap-2 rounded-full border border-border/45 bg-secondary/35 px-3.5 py-1.5 text-left text-xs font-semibold text-foreground shadow-sm transition-all hover:border-primary/35 hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50"
-                  title={isZh ? "选择本次写作参考的知识库资料" : "Choose the knowledge source for this write"}
+                  className={`legacy-chat-knowledge-toggle flex min-h-9 min-w-0 w-full items-center justify-center gap-2 rounded-full px-2.5 py-1.5 text-left text-xs font-semibold shadow-sm transition-all active:scale-95 sm:w-auto sm:shrink-0 sm:justify-start sm:px-3.5 sm:max-w-[16rem] ${
+                    knowledgeEnabled
+                      ? "bg-primary/15 text-primary ring-1 ring-primary/25"
+                      : "bg-secondary/45 text-muted-foreground hover:bg-secondary/70 hover:text-foreground"
+                  }`}
+                  title={isZh ? "启用知识库并选择本次写作参考资料" : "Enable knowledge and choose references for this write"}
+                  onClick={() => {
+                    if (!knowledgeEnabled) setKnowledgeEnabled(true);
+                  }}
                 >
-                  <span className="min-w-0 truncate">{knowledgeSourceLabel}</span>
-                  <ChevronDown size={13} className="shrink-0 text-muted-foreground" />
+                  <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[0.35rem] ${knowledgeEnabled ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    {knowledgeEnabled ? <Check size={12} strokeWidth={3} /> : null}
+                  </span>
+                  <span className="min-w-0 flex-1 sm:flex-none">
+                    <span className="block truncate">{isZh ? "知识库" : "Knowledge"}</span>
+                    <span className={`hidden truncate text-[10px] font-medium sm:block ${knowledgeEnabled ? "text-primary/80" : "text-muted-foreground"}`}>
+                      {knowledgeSelectionSummary}
+                    </span>
+                  </span>
+                  <ChevronDown size={13} className={`shrink-0 transition-transform ${knowledgePickerOpen ? "rotate-180" : ""} ${knowledgeEnabled ? "text-primary/80" : "text-muted-foreground"}`} />
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" side="top" className="w-[min(22rem,calc(100vw-2rem))] rounded-3xl border-border/60 bg-popover/95 p-2 shadow-2xl shadow-primary/10 backdrop-blur">
+                <DropdownMenuContent align="start" side="top" sideOffset={10} className="w-[min(23rem,calc(100vw-1.5rem))] rounded-3xl border-border/60 bg-popover/95 p-2 shadow-2xl shadow-primary/10 backdrop-blur">
                   <div className="px-2 pb-2 pt-1">
                     <div className="text-xs font-semibold text-foreground">{isZh ? "知识库检索" : "Knowledge retrieval"}</div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground">{isZh ? "选择本次写作要注入的参考资料。" : "Pick the references injected into this write."}</div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">{isZh ? "勾选这次写作要参考的资料；不勾选具体文件时会自动检索全部资料。" : "Choose the references for this write. Leave file selection empty to search all sources."}</div>
                   </div>
-                  <DropdownMenuItem
-                    onClick={() => setKnowledgeSourceId("all")}
+                  <DropdownMenuCheckboxItem
+                    checked={knowledgeEnabled}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={(checked) => {
+                      const nextEnabled = checked === true;
+                      setKnowledgeEnabled(nextEnabled);
+                      if (!nextEnabled) setKnowledgePickerOpen(false);
+                    }}
                     className="min-h-10 rounded-2xl px-3"
                   >
-                    <Check size={14} className={knowledgeSourceId === "all" ? "opacity-100" : "opacity-0"} />
+                    <span className="min-w-0 flex-1 truncate">{isZh ? "启用知识库" : "Enable knowledge"}</span>
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    checked={knowledgeUseAllSources}
+                    disabled={!knowledgeEnabled || knowledgeLoading}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={(checked) => {
+                      if (checked) handleSelectAllKnowledgeSources();
+                    }}
+                    className="min-h-10 rounded-2xl px-3"
+                  >
                     <span className="min-w-0 flex-1 truncate">{isZh ? "自动检索全部资料" : "Search all sources"}</span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">{knowledgeSources.length}</span>
-                  </DropdownMenuItem>
-                  {knowledgeSources.map((source) => (
-                    <DropdownMenuItem
+                    {knowledgeSources.length > 0 ? (
+                      <span className="shrink-0 text-[11px] text-muted-foreground">{knowledgeSources.length}</span>
+                    ) : null}
+                  </DropdownMenuCheckboxItem>
+                  {knowledgeSources.length > 0 ? knowledgeSources.map((source) => (
+                    <DropdownMenuCheckboxItem
                       key={source.id}
-                      onClick={() => setKnowledgeSourceId(source.id)}
+                      checked={!knowledgeUseAllSources && knowledgeSourceIds.includes(source.id)}
+                      disabled={!knowledgeEnabled || knowledgeLoading}
+                      onSelect={(event) => event.preventDefault()}
+                      onCheckedChange={(checked) => toggleKnowledgeSource(source.id, checked === true)}
                       className="min-h-10 rounded-2xl px-3"
                     >
-                      <Check size={14} className={knowledgeSourceId === source.id ? "opacity-100" : "opacity-0"} />
                       <span className="min-w-0 flex-1 truncate">{source.name}</span>
                       {source.chunkCount ? <span className="shrink-0 text-[11px] text-muted-foreground">{source.chunkCount}</span> : null}
-                    </DropdownMenuItem>
-                  ))}
+                    </DropdownMenuCheckboxItem>
+                  )) : (
+                    <div className="px-3 py-2 text-[11px] text-muted-foreground">
+                      {knowledgeLoading
+                        ? (isZh ? "资料加载中..." : "Loading sources...")
+                        : (isZh ? "当前还没有可用资料" : "No sources available yet")}
+                    </div>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={handleSelectAllKnowledgeSources}
+                    className="min-h-10 rounded-2xl px-3 text-primary"
+                  >
+                    <Sparkles size={14} />
+                    <span>{isZh ? "恢复自动检索" : "Use automatic retrieval"}</span>
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <span className="legacy-chat-knowledge-status shrink-0 rounded-full border border-border/35 bg-background/30 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
-                {knowledgeStatusLabel}
-              </span>
             </div>
           </div>
         </div>

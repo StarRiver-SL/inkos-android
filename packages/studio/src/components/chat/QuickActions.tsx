@@ -1,8 +1,6 @@
 import {
   Zap,
   Search,
-  FileOutput,
-  TrendingUp,
 } from "lucide-react";
 
 export interface QuickActionsProps {
@@ -36,25 +34,11 @@ const CHIPS: ReadonlyArray<ChipDef> = [
     commandZh: "审计",
     commandEn: "audit",
   },
-  {
-    icon: <FileOutput size={12} />,
-    labelZh: "导出",
-    labelEn: "Export",
-    commandZh: "导出全书",
-    commandEn: "export book",
-  },
-  {
-    icon: <TrendingUp size={12} />,
-    labelZh: "市场雷达",
-    labelEn: "Market radar",
-    commandZh: "扫描市场趋势",
-    commandEn: "scan market trends",
-  },
 ];
 
 export function QuickActions({ onAction, disabled, isZh }: QuickActionsProps) {
   return (
-    <div className="flex gap-2 overflow-x-auto px-1 py-1.5">
+    <div className="legacy-chat-quick-actions contents sm:flex sm:shrink-0 sm:gap-2 sm:overflow-x-auto sm:px-0 sm:py-0">
       {CHIPS.map((chip) => {
         const label = isZh ? chip.labelZh : chip.labelEn;
         const command = isZh ? chip.commandZh : chip.commandEn;
@@ -63,7 +47,7 @@ export function QuickActions({ onAction, disabled, isZh }: QuickActionsProps) {
             key={label}
             onClick={() => onAction(command, chip.requestedIntent)}
             disabled={disabled}
-            className="group flex min-h-9 shrink-0 items-center gap-1.5 rounded-full border border-border/45 bg-card/55 px-3.5 py-1.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur transition-all hover:-translate-y-0.5 hover:border-primary/35 hover:bg-primary/5 hover:text-primary disabled:pointer-events-none disabled:opacity-40"
+            className="legacy-chat-quick-action-chip group flex min-h-9 min-w-0 w-full items-center justify-center gap-1.5 rounded-full border border-border/45 bg-card/55 px-2.5 py-1.5 text-xs font-medium text-muted-foreground shadow-sm backdrop-blur transition-all hover:-translate-y-0.5 hover:border-primary/35 hover:bg-primary/5 hover:text-primary disabled:pointer-events-none disabled:opacity-40 sm:w-auto sm:shrink-0 sm:px-3.5"
           >
             <span className="group-hover:scale-110 transition-transform">{chip.icon}</span>
             {label}
