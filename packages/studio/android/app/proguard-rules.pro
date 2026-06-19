@@ -24,3 +24,10 @@
 -keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
 -keep class io.qzz.christmas.inkoslocal.EmbeddedNodeService { *; }
 -keep class io.qzz.christmas.inkoslocal.InkOSRuntimePlugin { *; }
+
+# Mozilla GeckoView 内核
+-keep class org.mozilla.geckoview.** { *; }
+-keep class org.mozilla.gecko.** { *; }
+-keep class org.nanohttpd.** { *; }
+-dontwarn org.mozilla.gecko.**
+-dontwarn org.nanohttpd.**

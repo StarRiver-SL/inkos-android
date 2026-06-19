@@ -1,20 +1,25 @@
 import { useState, useEffect, useCallback } from "react";
-import { useApi, fetchJson, postApi, putApi, deleteApi } from "../hooks/use-api";
+import { fetchJson, postApi, putApi, deleteApi } from "../hooks/use-api";
+import { appAlert } from "../lib/app-dialog";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { 
-  ChevronLeft, 
-  Plus, 
-  Trash2, 
-  Edit2, 
-  Check, 
-  X, 
-  Flag, 
-  Star, 
-  AlertCircle, 
+import { StudioSelect } from "../components/StudioSelect";
+import { PageHero } from "../components/PageHero";
+import { FormModal } from "../components/FormModal";
+import {
+  ChevronLeft,
+  Plus,
+  Trash2,
+  Edit2,
+  X,
+  Flag,
+  Star,
+  AlertCircle,
   Circle,
   Trophy,
-  Target
+  Target,
+  BookOpen,
+  Maximize2
 } from "lucide-react";
 
 interface Ending {
@@ -49,69 +54,93 @@ export function EndingsPage({ bookId, nav, theme: _theme, t: _t }: {
   t: TFunction;
 }) {
   const [data, setData] = useState<EndingsData>({ endings: [], activeEnding: null });
+  const [originData, setOriginData] = useState<EndingsData>({ endings: [], activeEnding: null });
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editingEnding, setEditingEnding] = useState<string | null>(null);
-  const [newEnding, setNewEnding] = useState({ 
-    name: "", 
-    description: "", 
+  const [viewingEnding, setViewingEnding] = useState<Ending | null>(null);
+  const [newEnding, setNewEnding] = useState({
+    name: "",
+    description: "",
     type: "good" as "good" | "bad" | "neutral" | "hidden"
   });
 
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
-      const result = await fetchJson<EndingsData>(`/books/${bookId}/endings`);
+      let result: EndingsData = { endings: [], activeEnding: null };
+      let originResult: EndingsData = { endings: [], activeEnding: null };
+      try {
+        result = await fetchJson<EndingsData>(`/books/${bookId}/endings`);
+      } catch (e) { console.warn("Endings fetch:", e); }
+      try {
+        originResult = await fetchJson<EndingsData>(`/books/${bookId}/endings/origin`);
+      } catch (e) { console.warn("Origin fetch:", e); }
       setData(result);
-    } catch (error) {
-      console.error("Failed to fetch endings:", error);
-      setData({ endings: [], activeEnding: null });
+      setOriginData(originResult);
     } finally {
       setLoading(false);
     }
   }, [bookId]);
 
+  // Read endings data injected by content script eval polling (bypasses GeckoView fetch hang)
   useEffect(() => {
-    fetchData();
+    const check = () => {
+      const injected = (window as unknown as Record<string, unknown>).__capEndingsData;
+      if (Array.isArray(injected)) {
+        const entry = injected.find((d: { bookId: string }) => d.bookId === bookId);
+        if (entry) {
+          if (entry.endings?.endings?.length > 0 && data.endings.length === 0) setData(entry.endings);
+          if (entry.origin?.endings?.length > 0 && originData.endings.length === 0) setOriginData(entry.origin);
+        }
+      }
+    };
+    check();
+    const timer = setInterval(check, 500);
+    return () => clearInterval(timer);
+  }, [bookId, data.endings.length, originData.endings.length]);
+
+  useEffect(() => {
+    void fetchData();
   }, [fetchData]);
 
   const handleAdd = async () => {
     if (!newEnding.name) return;
     try {
-      const result = await postApi(`/books/${bookId}/endings`, newEnding);
-      setData(result as EndingsData);
+      await postApi(`/books/${bookId}/endings`, newEnding);
+      void fetchData();
       setNewEnding({ name: "", description: "", type: "good" });
       setShowAdd(false);
     } catch (error) {
-      console.error("Failed to add ending:", error);
+      await appAlert({ title: "操作失败", message: `新增结局失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
   const handleUpdate = async (id: string, updates: Partial<Ending>) => {
     try {
-      const result = await putApi(`/books/${bookId}/endings/${id}`, updates);
-      setData(result as EndingsData);
+      await putApi(`/books/${bookId}/endings/${id}`, updates);
+      void fetchData();
       setEditingEnding(null);
     } catch (error) {
-      console.error("Failed to update ending:", error);
+      await appAlert({ title: "操作失败", message: `更新结局失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
-      const result = await deleteApi(`/books/${bookId}/endings/${id}`);
-      setData(result as EndingsData);
+      await deleteApi(`/books/${bookId}/endings/${id}`);
+      void fetchData();
     } catch (error) {
-      console.error("Failed to delete ending:", error);
+      await appAlert({ title: "操作失败", message: `删除结局失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
   const handleSetActive = async (id: string) => {
     try {
-      const result = await postApi(`/books/${bookId}/endings/${id}/activate`);
-      setData(result as EndingsData);
+      await postApi(`/books/${bookId}/endings/${id}/activate`);
+      void fetchData();
     } catch (error) {
-      console.error("Failed to set active ending:", error);
+      await appAlert({ title: "操作失败", message: `激活结局失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -137,183 +166,317 @@ export function EndingsPage({ bookId, nav, theme: _theme, t: _t }: {
       </nav>
 
       {/* Hero Section */}
-      <section className="glass-panel relative overflow-hidden rounded-[2.5rem] p-6 sm:p-10 shadow-3d">
-        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2.5 text-sm font-bold text-primary">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 shadow-inner">
-                <Flag size={16} />
-              </div>
-              <span>FATE & ENDINGS</span>
-            </div>
-            <h1 className="text-4xl font-serif font-bold tracking-tight text-foreground sm:text-5xl">
-              结局演练
-            </h1>
-            <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-              故事不应只有一个终点。在这里设计多种可能的结局，预演不同路径下的命运走向，让每一个抉择都重若千钧。
-            </p>
-          </div>
-          <button
-            onClick={() => setShowAdd(true)}
-            className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            <Plus size={18} />
-            新增结局
-          </button>
-        </div>
-        
-        {/* Decor */}
-        <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full bg-primary/5 blur-3xl opacity-60" />
-      </section>
+      <PageHero
+        label="FATE & ENDINGS"
+        title="结局演练"
+        description="故事不应只有一个终点。在这里设计多种可能的结局，预演不同路径下的命运走向，让每一个抉择都重若千钧。"
+      >
+        <button
+          onClick={() => setShowAdd(true)}
+          className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+        >
+          <Plus size={18} />
+          新增结局
+        </button>
+      </PageHero>
 
       {/* Endings List */}
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        {data.endings.length === 0 ? (
+        {data.endings.length === 0 && originData.endings.length === 0 ? (
           <div className="paper-sheet col-span-full flex flex-col items-center justify-center rounded-[3rem] py-24 text-center">
              <div className="relative mb-6 h-20 w-20 flex items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
                 <Target size={40} />
              </div>
              <h3 className="text-xl font-bold text-foreground">未定的终章</h3>
              <p className="mt-2 max-w-xs text-sm text-muted-foreground leading-relaxed">
-               所有的故事都还在进行中。点击“新增结局”为你的角色勾勒一个可能的归宿。
+               所有的故事都还在进行中。点击"新增结局"为你的角色勾勒一个可能的归宿。
              </p>
           </div>
         ) : (
-          data.endings.map((ending) => {
-            const typeInfo = ENDING_TYPE_INFO[ending.type];
-            const Icon = typeInfo.icon;
-            const isActive = data.activeEnding === ending.id;
-
-            return (
-              <div
-                key={ending.id}
-                className={`paper-sheet relative flex flex-col rounded-[2.5rem] p-7 transition-all hover:-translate-y-1 ${
-                  isActive ? "ring-2 ring-primary shadow-3d" : ""
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${typeInfo.bg} ${typeInfo.color}`}>
-                    <Icon size={24} />
+          <>
+            {/* 原始结局 */}
+            {originData.endings.length > 0 && (
+              <div className="col-span-full">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/15 text-blue-500">
+                    <BookOpen size={16} />
                   </div>
-                  <div className="flex gap-1">
-                     <button
-                       onClick={() => handleSetActive(ending.id)}
-                       className={`flex h-9 px-3 items-center gap-1.5 rounded-xl text-[11px] font-bold transition-all ${
-                         isActive 
-                           ? "bg-primary text-primary-foreground" 
-                           : "bg-secondary text-muted-foreground hover:bg-secondary hover:text-foreground"
-                       }`}
-                     >
-                       {isActive ? "当前演练中" : "设为目标"}
-                     </button>
-                  </div>
+                  <h2 className="text-lg font-bold text-foreground">原始结局（来自故事设定）</h2>
                 </div>
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                  {originData.endings.map((ending) => {
+                    const typeInfo = ENDING_TYPE_INFO[ending.type];
+                    const Icon = typeInfo.icon;
 
-                <div className="mt-6 space-y-3">
-                   <div className="flex items-center justify-between">
-                     <h3 className="text-xl font-bold text-foreground line-clamp-1">{ending.name}</h3>
-                   </div>
-                   <div className={`text-[10px] font-bold uppercase tracking-widest ${typeInfo.color}`}>
-                     {typeInfo.label}
-                   </div>
-                   <p className="text-sm leading-relaxed text-muted-foreground line-clamp-4 min-h-[5rem]">
-                     {ending.description || "暂无结局描述..."}
-                   </p>
-                </div>
+                    return (
+                      <div
+                        key={ending.id}
+                        className="paper-sheet relative flex flex-col rounded-[2.5rem] p-7 border-2 border-blue-500/20 bg-blue-500/5"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${typeInfo.bg} ${typeInfo.color}`}>
+                            <Icon size={24} />
+                          </div>
+                          <div className="flex gap-1">
+                            <span className="flex h-9 px-3 items-center gap-1.5 rounded-xl text-[11px] font-bold bg-blue-500/10 text-blue-500">
+                              原始设定
+                            </span>
+                          </div>
+                        </div>
 
-                <div className="mt-8 flex items-center justify-between border-t border-border/40 pt-5">
-                   <div className="flex gap-2">
-                      <button
-                        onClick={() => {
-                          setEditingEnding(ending.id);
-                          setNewEnding({ name: ending.name, description: ending.description, type: ending.type });
-                        }}
-                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-                      >
-                        <Edit2 size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(ending.id)}
-                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                   </div>
-                   <div className="text-[10px] font-bold text-muted-foreground/60 uppercase">
-                     {new Date(ending.createdAt).toLocaleDateString()}
-                   </div>
+                        <div className="mt-6 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xl font-bold text-foreground line-clamp-1">{ending.name}</h3>
+                          </div>
+                          <div className={`text-[10px] font-bold uppercase tracking-widest ${typeInfo.color}`}>
+                            {typeInfo.label}
+                          </div>
+                          <p className="text-sm leading-relaxed text-muted-foreground line-clamp-6 min-h-[5rem]">
+                            {ending.description || "暂无结局描述..."}
+                          </p>
+                          {ending.chapters && ending.chapters.length > 0 && (
+                            <div className="mt-3 flex flex-wrap gap-1.5">
+                              {ending.chapters.map((ch) => (
+                                <span key={ch} className="rounded-full bg-secondary/60 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+                                  第 {ch} 章
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-8 flex items-center justify-between border-t border-border/40 pt-5">
+                          <button
+                            onClick={() => setViewingEnding(ending)}
+                            className="flex h-8 items-center gap-1.5 rounded-lg bg-secondary/50 px-3 text-[11px] font-bold text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                          >
+                            <Maximize2 size={12} />
+                            查看完整
+                          </button>
+                          <div className="text-[10px] font-bold text-muted-foreground/60 uppercase">
+                            {new Date(ending.createdAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-            );
-          })
+            )}
+
+            {/* 用户自定义结局 */}
+            {data.endings.length > 0 && (
+              <div className="col-span-full">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-500">
+                    <Target size={16} />
+                  </div>
+                  <h2 className="text-lg font-bold text-foreground">自定义结局</h2>
+                </div>
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                  {data.endings.map((ending) => {
+                    const typeInfo = ENDING_TYPE_INFO[ending.type];
+                    const Icon = typeInfo.icon;
+                    const isActive = data.activeEnding === ending.id;
+
+                    return (
+                      <div
+                        key={ending.id}
+                        className={`paper-sheet relative flex flex-col rounded-[2.5rem] p-7 transition-all hover:-translate-y-1 ${
+                          isActive ? "ring-2 ring-primary shadow-3d" : ""
+                        }`}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${typeInfo.bg} ${typeInfo.color}`}>
+                            <Icon size={24} />
+                          </div>
+                          <div className="flex gap-1">
+                            <button
+                              onClick={() => handleSetActive(ending.id)}
+                              className={`flex h-9 px-3 items-center gap-1.5 rounded-xl text-[11px] font-bold transition-all ${
+                                isActive
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-secondary text-muted-foreground hover:bg-secondary hover:text-foreground"
+                              }`}
+                            >
+                              {isActive ? "当前演练中" : "设为目标"}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="mt-6 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xl font-bold text-foreground line-clamp-1">{ending.name}</h3>
+                          </div>
+                          <div className={`text-[10px] font-bold uppercase tracking-widest ${typeInfo.color}`}>
+                            {typeInfo.label}
+                          </div>
+                          <p className="text-sm leading-relaxed text-muted-foreground line-clamp-4 min-h-[5rem]">
+                            {ending.description || "暂无结局描述..."}
+                          </p>
+                          {ending.chapters && ending.chapters.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {ending.chapters.map((ch) => (
+                                <span key={ch} className="rounded-full bg-secondary/60 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+                                  第 {ch} 章
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-8 flex items-center justify-between border-t border-border/40 pt-5">
+                          <button
+                            onClick={() => setViewingEnding(ending)}
+                            className="flex h-8 items-center gap-1.5 rounded-lg bg-secondary/50 px-3 text-[11px] font-bold text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                          >
+                            <Maximize2 size={12} />
+                            查看完整
+                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => {
+                                setEditingEnding(ending.id);
+                                setNewEnding({ name: ending.name, description: ending.description, type: ending.type });
+                              }}
+                              className="flex h-8 w-8 items-center justify-center rounded-lg bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                            >
+                              <Edit2 size={14} />
+                            </button>
+                            <button
+                              onClick={() => handleDelete(ending.id)}
+                              className="flex h-8 w-8 items-center justify-center rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 空状态提示（当既没有原始结局也没有自定义结局时） */}
+            {originData.endings.length === 0 && data.endings.length === 0 && (
+              <div className="paper-sheet col-span-full flex flex-col items-center justify-center rounded-[3rem] py-24 text-center">
+                <div className="relative mb-6 h-20 w-20 flex items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
+                  <Target size={40} />
+                </div>
+                <h3 className="text-xl font-bold text-foreground">未定的终章</h3>
+                <p className="mt-2 max-w-xs text-sm text-muted-foreground leading-relaxed">
+                  故事的终局尚未写入设定文件。点击"新增结局"为你的角色勾勒一个可能的归宿。
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
 
       {/* Add/Edit Modal */}
       {(showAdd || editingEnding) && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-xl fade-in" onClick={() => { setShowAdd(false); setEditingEnding(null); }}>
-          <div className="glass-panel w-full max-w-xl overflow-hidden rounded-[2.5rem] shadow-3d" onClick={e => e.stopPropagation()}>
-             <div className="flex items-center justify-between border-b border-border/40 px-8 py-6">
-                <h2 className="text-2xl font-bold text-foreground">{showAdd ? "规划新的命运" : "修正命运轨迹"}</h2>
-                <button onClick={() => { setShowAdd(false); setEditingEnding(null); }} className="soft-pill flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground">
-                  <X size={18} />
-                </button>
-             </div>
+        <FormModal
+          title={showAdd ? "规划新的命运" : "修正命运轨迹"}
+          onClose={() => { setShowAdd(false); setEditingEnding(null); }}
+          maxWidth="max-w-xl"
+          footer={
+            <>
+              <button
+                onClick={() => { setShowAdd(false); setEditingEnding(null); }}
+                className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
+              >
+                放弃
+              </button>
+              <button
+                onClick={showAdd ? handleAdd : () => handleUpdate(editingEnding!, newEnding)}
+                disabled={!newEnding.name}
+                className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
+              >
+                {showAdd ? "定下命运" : "保存命运"}
+              </button>
+            </>
+          }
+        >
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">结局名称</label>
+              <input
+                type="text"
+                autoFocus
+                value={newEnding.name}
+                onChange={e => setNewEnding({ ...newEnding, name: e.target.value })}
+                className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
+                placeholder="例如：英雄迟暮"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">结局类型</label>
+              <StudioSelect
+                value={newEnding.type}
+                onValueChange={(v) => setNewEnding({ ...newEnding, type: v as any })}
+                options={Object.entries(ENDING_TYPE_INFO).map(([val, info]) => ({ value: val, label: info.label.split(": ")[1] }))}
+              />
+            </div>
+          </div>
 
-             <div className="p-8 space-y-6">
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                   <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">结局名称</label>
-                      <input
-                        type="text"
-                        autoFocus
-                        value={newEnding.name}
-                        onChange={e => setNewEnding({ ...newEnding, name: e.target.value })}
-                        className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
-                        placeholder="例如：英雄迟暮"
-                      />
-                   </div>
-                   <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">结局类型</label>
-                      <select
-                        value={newEnding.type}
-                        onChange={e => setNewEnding({ ...newEnding, type: e.target.value as any })}
-                        className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 appearance-none cursor-pointer"
-                      >
-                         {Object.entries(ENDING_TYPE_INFO).map(([val, info]) => (
-                           <option key={val} value={val}>{info.label.split(": ")[1]}</option>
-                         ))}
-                      </select>
-                   </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">命运终章描述</label>
+            <textarea
+              value={newEnding.description}
+              onChange={e => setNewEnding({ ...newEnding, description: e.target.value })}
+              rows={5}
+              className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
+              placeholder="描写结局的场景、氛围以及各个人物的最终归宿..."
+            />
+          </div>
+        </FormModal>
+      )}
+
+      {/* 详情模态框 */}
+      {viewingEnding && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setViewingEnding(null)} />
+          <div className="relative w-full max-w-2xl max-h-[85vh] overflow-auto rounded-t-[2rem] bg-background p-8 shadow-2xl">
+            <button
+              onClick={() => setViewingEnding(null)}
+              className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-secondary hover:bg-secondary/80 transition-colors"
+            >
+              <X size={18} />
+            </button>
+
+            <div className="flex items-start gap-4 mb-6">
+              <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${ENDING_TYPE_INFO[viewingEnding.type].bg} ${ENDING_TYPE_INFO[viewingEnding.type].color}`}>
+                {(() => { const Icon = ENDING_TYPE_INFO[viewingEnding.type].icon; return <Icon size={28} />; })()}
+              </div>
+              <div className="flex-1">
+                <h2 className="text-xl font-bold text-foreground pr-12">{viewingEnding.name}</h2>
+                <div className={`text-[11px] font-bold uppercase tracking-widest mt-1 ${ENDING_TYPE_INFO[viewingEnding.type].color}`}>
+                  {ENDING_TYPE_INFO[viewingEnding.type].label}
                 </div>
+              </div>
+            </div>
 
-                <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">命运终章描述</label>
-                   <textarea
-                     value={newEnding.description}
-                     onChange={e => setNewEnding({ ...newEnding, description: e.target.value })}
-                     rows={5}
-                     className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
-                     placeholder="描写结局的场景、氛围以及各个人物的最终归宿..."
-                   />
+            <div className="text-sm leading-relaxed text-foreground/80 whitespace-pre-wrap">
+              {viewingEnding.description}
+            </div>
+
+            {viewingEnding.chapters && viewingEnding.chapters.length > 0 && (
+              <div className="mt-6 pt-6 border-t border-border/40">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-3">关联章节</div>
+                <div className="flex flex-wrap gap-2">
+                  {viewingEnding.chapters.map((ch) => (
+                    <span key={ch} className="rounded-full bg-secondary/60 px-3 py-1 text-xs font-bold text-muted-foreground">
+                      第 {ch} 章
+                    </span>
+                  ))}
                 </div>
-             </div>
+              </div>
+            )}
 
-             <div className="flex gap-3 border-t border-border/40 bg-muted/20 px-8 py-6">
-                <button
-                  onClick={() => { setShowAdd(false); setEditingEnding(null); }}
-                  className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
-                >
-                  放弃
-                </button>
-                <button
-                  onClick={showAdd ? handleAdd : () => handleUpdate(editingEnding!, newEnding)}
-                  disabled={!newEnding.name}
-                  className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
-                >
-                  {showAdd ? "定下命运" : "保存命运"}
-                </button>
-             </div>
+            <div className="mt-6 pt-6 border-t border-border/40 text-center text-[11px] font-bold text-muted-foreground/60 uppercase">
+              创建于 {new Date(viewingEnding.createdAt).toLocaleDateString()}
+            </div>
           </div>
         </div>
       )}

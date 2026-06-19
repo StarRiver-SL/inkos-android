@@ -1,22 +1,25 @@
 import { useState, useEffect, useCallback } from "react";
-import { useApi, postApi, fetchJson } from "../hooks/use-api";
+import { useApi, postApi, putApi, deleteApi, fetchJson } from "../hooks/use-api";
+import { appAlert } from "../lib/app-dialog";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { cn } from "../lib/utils";
-import { 
-  Calendar, 
-  ChevronLeft, 
-  ChevronRight, 
-  Plus, 
-  Check, 
-  Target, 
-  Flag, 
-  Star, 
-  Trash2, 
+import { PageHero } from "../components/PageHero";
+import { StatCard } from "../components/StatCard";
+import { FormModal } from "../components/FormModal";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Check,
+  Target,
+  Flag,
+  Star,
+  Trash2,
   TrendingUp,
   Clock,
   Zap,
-  X
+  Calendar
 } from "lucide-react";
 
 interface CalendarDay {
@@ -81,25 +84,25 @@ export function SchedulePage({ bookId, nav, theme: _theme, t }: {
       setShowAddForm(false);
       fetchSchedule();
     } catch (error) {
-      console.error("Failed to add schedule entry:", error);
+      await appAlert({ title: "操作失败", message: `添加日程失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
   const handleToggleComplete = async (entryId: string, completed: boolean) => {
     try {
-      await postApi(`/books/${bookId}/schedule/${entryId}/toggle`, { completed: !completed });
+      await putApi(`/books/${bookId}/schedule/${entryId}`, { completed: !completed });
       fetchSchedule();
     } catch (error) {
-      console.error("Failed to update schedule entry:", error);
+      await appAlert({ title: "操作失败", message: `更新日程失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
   const handleDeleteEntry = async (entryId: string) => {
     try {
-      await postApi(`/books/${bookId}/schedule/${entryId}/delete`, {});
+      await deleteApi(`/books/${bookId}/schedule/${entryId}`);
       fetchSchedule();
     } catch (error) {
-      console.error("Failed to delete schedule entry:", error);
+      await appAlert({ title: "操作失败", message: `删除日程失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -209,52 +212,49 @@ export function SchedulePage({ bookId, nav, theme: _theme, t }: {
       </nav>
 
       {/* Hero Section */}
-      <section className="glass-panel relative overflow-hidden rounded-[2.5rem] p-6 sm:p-10 shadow-3d">
-        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2.5 text-sm font-bold text-primary">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 shadow-inner">
-                <Calendar size={16} />
-              </div>
-              <span>PROGRESS & PLAN</span>
-            </div>
-            <h1 className="text-4xl font-serif font-bold tracking-tight text-foreground sm:text-5xl">
-               {isZh ? "写作日历" : "Writing Calendar"}
-            </h1>
-            <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-              {isZh 
-                ? "见证你的创作旅程。追踪每日字数波动，规划关键章节进度。自律即自由，让每一天的坚持都清晰可见。"
-                : "Witness your creative journey. Track daily word counts and plan key chapters. Discipline is freedom, making every day's persistence visible."}
-            </p>
-          </div>
-          <button
-            onClick={() => setShowAddForm(true)}
-            className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-0.98"
-          >
-            <Plus size={18} />
-            {t("schedule.addPlan")}
-          </button>
-        </div>
-        
-        {/* Decor */}
-        <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full bg-primary/5 blur-3xl opacity-60" />
-      </section>
+      <PageHero
+        label="PROGRESS & PLAN"
+        title={isZh ? "写作日历" : "Writing Calendar"}
+        description={isZh
+          ? "见证你的创作旅程。追踪每日字数波动，规划关键章节进度。自律即自由，让每一天的坚持都清晰可见。"
+          : "Witness your creative journey. Track daily word counts and plan key chapters. Discipline is freedom, making every day's persistence visible."}
+      >
+        <button
+          onClick={() => setShowAddForm(true)}
+          className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-0.98"
+        >
+          <Plus size={18} />
+          {t("schedule.addPlan")}
+        </button>
+      </PageHero>
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-5 sm:gap-6">
-        {[
-          { label: t("schedule.activeDays"), value: data?.stats.totalDaysActive || 0, icon: Clock, color: "text-blue-500" },
-          { label: t("schedule.totalWords"), value: data?.stats.totalWordsWritten.toLocaleString() || 0, icon: TrendingUp, color: "text-emerald-500" },
-          { label: t("schedule.avgWords"), value: data?.stats.avgWordsPerDay || 0, icon: Zap, color: "text-amber-500" },
-          { label: t("schedule.currentStreak"), value: data?.stats.currentStreak || 0, icon: Target, color: "text-primary" },
-          { label: t("schedule.maxStreak"), value: data?.stats.maxStreak || 0, icon: Star, color: "text-purple-500" }
-        ].map((stat, i) => (
-          <div key={i} className="paper-sheet flex flex-col items-center justify-center rounded-3xl p-5 text-center transition-all hover:-translate-y-1">
-             <stat.icon size={18} className={`${stat.color} mb-2 opacity-80`} />
-             <div className="text-2xl font-serif font-bold text-foreground">{stat.value}</div>
-             <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">{stat.label}</div>
-          </div>
-        ))}
+        <StatCard
+          value={data?.stats.totalDaysActive || 0}
+          label={t("schedule.activeDays")}
+          valueClassName="text-blue-500"
+        />
+        <StatCard
+          value={data?.stats.totalWordsWritten.toLocaleString() || 0}
+          label={t("schedule.totalWords")}
+          valueClassName="text-emerald-500"
+        />
+        <StatCard
+          value={data?.stats.avgWordsPerDay || 0}
+          label={t("schedule.avgWords")}
+          valueClassName="text-amber-500"
+        />
+        <StatCard
+          value={data?.stats.currentStreak || 0}
+          label={t("schedule.currentStreak")}
+          valueClassName="text-primary"
+        />
+        <StatCard
+          value={data?.stats.maxStreak || 0}
+          label={t("schedule.maxStreak")}
+          valueClassName="text-purple-500"
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
@@ -395,78 +395,71 @@ export function SchedulePage({ bookId, nav, theme: _theme, t }: {
 
       {/* Add Entry Modal */}
       {showAddForm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-xl fade-in" onClick={() => setShowAddForm(false)}>
-          <div className="glass-panel w-full max-w-md overflow-hidden rounded-[2.5rem] shadow-3d" onClick={e => e.stopPropagation()}>
-             <div className="flex items-center justify-between border-b border-border/40 px-8 py-6">
-                <h2 className="text-2xl font-bold text-foreground">{t("schedule.addPlan")}</h2>
-                <button onClick={() => setShowAddForm(false)} className="soft-pill flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground">
-                  <X size={18} />
-                </button>
-             </div>
-
-             <div className="p-8 space-y-6">
-                <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planDate")}</label>
-                   <input
-                     type="date"
-                     value={newEntry.date}
-                     onChange={(e) => setNewEntry({ ...newEntry, date: e.target.value })}
-                     className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
-                   />
-                </div>
-                <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planContent")}</label>
-                   <input
-                     type="text"
-                     autoFocus
-                     value={newEntry.title}
-                     onChange={(e) => setNewEntry({ ...newEntry, title: e.target.value })}
-                     placeholder={isZh ? "例如：爆更 5000 字、完成高潮情节" : "e.g. Write 5000 words, finish climax"}
-                     className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
-                   />
-                </div>
-                <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planType")}</label>
-                   <div className="grid grid-cols-3 gap-2">
-                      {[
-                        { value: "goal", label: t("schedule.goal"), icon: Target },
-                        { value: "deadline", label: t("schedule.deadline"), icon: Flag },
-                        { value: "milestone", label: t("schedule.milestone"), icon: Star },
-                      ].map((type) => (
-                        <button
-                          key={type.value}
-                          onClick={() => setNewEntry({ ...newEntry, type: type.value as any })}
-                          className={`flex flex-col items-center justify-center gap-2 h-20 rounded-2xl border transition-all ${
-                            newEntry.type === type.value
-                              ? "border-primary bg-primary/5 text-primary ring-2 ring-primary/20"
-                              : "border-border/50 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                          }`}
-                        >
-                          <type.icon size={18} />
-                          <span className="text-[10px] font-bold uppercase">{type.label}</span>
-                        </button>
-                      ))}
-                   </div>
-                </div>
-             </div>
-
-             <div className="flex gap-3 border-t border-border/40 bg-muted/20 px-8 py-6">
-                <button
-                  onClick={() => setShowAddForm(false)}
-                  className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
-                >
-                  {t("schedule.discard")}
-                </button>
-                <button
-                  onClick={handleAddEntry}
-                  disabled={!newEntry.date || !newEntry.title}
-                  className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
-                >
-                  {t("schedule.setPlan")}
-                </button>
-             </div>
+        <FormModal
+          title={t("schedule.addPlan")}
+          onClose={() => setShowAddForm(false)}
+          footer={
+            <>
+              <button
+                onClick={() => setShowAddForm(false)}
+                className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
+              >
+                {t("schedule.discard")}
+              </button>
+              <button
+                onClick={handleAddEntry}
+                disabled={!newEntry.date || !newEntry.title}
+                className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
+              >
+                {t("schedule.setPlan")}
+              </button>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planDate")}</label>
+            <input
+              type="date"
+              value={newEntry.date}
+              onChange={(e) => setNewEntry({ ...newEntry, date: e.target.value })}
+              className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
+            />
           </div>
-        </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planContent")}</label>
+            <input
+              type="text"
+              autoFocus
+              value={newEntry.title}
+              onChange={(e) => setNewEntry({ ...newEntry, title: e.target.value })}
+              placeholder={isZh ? "例如：爆更 5000 字、完成高潮情节" : "e.g. Write 5000 words, finish climax"}
+              className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">{t("schedule.planType")}</label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { value: "goal", label: t("schedule.goal"), icon: Target },
+                { value: "deadline", label: t("schedule.deadline"), icon: Flag },
+                { value: "milestone", label: t("schedule.milestone"), icon: Star },
+              ].map((type) => (
+                <button
+                  key={type.value}
+                  onClick={() => setNewEntry({ ...newEntry, type: type.value as any })}
+                  className={`flex flex-col items-center justify-center gap-2 h-20 rounded-2xl border transition-all ${
+                    newEntry.type === type.value
+                      ? "border-primary bg-primary/5 text-primary ring-2 ring-primary/20"
+                      : "border-border/50 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  }`}
+                >
+                  <type.icon size={18} />
+                  <span className="text-[10px] font-bold uppercase">{type.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </FormModal>
       )}
     </div>
   );

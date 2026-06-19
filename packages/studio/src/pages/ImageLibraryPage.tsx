@@ -123,6 +123,12 @@ export function ImageLibraryPage() {
     setActiveWallpaperUrl(item.url);
   };
 
+  const useAsSessionWallpaper = (item: GeneratedImageItem, sessionId?: string) => {
+    if (!item.url) return;
+    selectChatBackground(item.url, sessionId);
+    setActiveWallpaperUrl(item.url);
+  };
+
   const renameWallpaper = async (item: GeneratedImageItem) => {
     const title = editingTitle.trim();
     if (!title) return;
@@ -313,7 +319,7 @@ export function ImageLibraryPage() {
                     <span className="rounded-full bg-secondary/60 px-2 py-1 text-muted-foreground">{KIND_LABELS[item.kind]}</span>
                     <span className={failed ? "text-destructive" : "text-muted-foreground/70"}>{failed ? "生成失败" : formatDate(item.updatedAt)}</span>
                   </div>
-                  {item.kind === "wallpaper" && item.url ? (
+                  {item.url ? (
                     <button
                       type="button"
                       onClick={() => useAsWallpaper(item)}

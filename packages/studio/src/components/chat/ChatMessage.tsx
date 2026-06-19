@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import type { Theme } from "../../hooks/use-theme";
 import type { TokenUsageSnapshot } from "../../store/chat/types";
 import { useI18n } from "../../hooks/use-i18n";
 import {
@@ -21,7 +20,6 @@ export interface ChatMessageProps {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly timestamp: number;
-  readonly theme: Theme;
   readonly tokenUsage?: TokenUsageSnapshot;
   readonly isStreaming?: boolean;
   readonly onDelete?: () => void;

@@ -1,19 +1,20 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { useApi, fetchJson, postApi, putApi, deleteApi } from "../hooks/use-api";
+import { fetchJson, postApi, putApi, deleteApi } from "../hooks/use-api";
+import { appAlert } from "../lib/app-dialog";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { AnimatePresence, motion } from "motion/react";
-import { 
-  ChevronLeft, 
-  Plus, 
-  Trash2, 
-  Edit2, 
-  Check, 
-  X, 
-  Network, 
-  User, 
+import { StudioSelect } from "../components/StudioSelect";
+import { PageHero } from "../components/PageHero";
+import { FormModal } from "../components/FormModal";
+import {
+  ChevronLeft,
+  Plus,
+  Trash2,
+  Edit2,
+  Network,
+  User,
   Users,
-  ArrowRightLeft, 
+  ArrowRightLeft,
   Flag,
   LayoutGrid,
   Share2,
@@ -170,7 +171,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       setNodeForm({ name: "", role: "protagonist", description: "", group: "" });
       setShowAddNode(false);
     } catch (error) {
-      console.error("Failed to add character:", error);
+      await appAlert({ title: "操作失败", message: `添加角色失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -180,7 +181,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       setData(result as CharacterGraphData);
       setShowEditNode(null);
     } catch (error) {
-      console.error("Failed to update character:", error);
+      await appAlert({ title: "操作失败", message: `更新角色失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -189,7 +190,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       const result = await deleteApi(`/books/${bookId}/characters/node/${nodeId}`);
       setData(result as CharacterGraphData);
     } catch (error) {
-      console.error("Failed to delete character:", error);
+      await appAlert({ title: "操作失败", message: `删除角色失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -201,7 +202,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       setEdgeForm({ source: "", target: "", relation: "", type: "friendly" });
       setShowAddEdge(false);
     } catch (error) {
-      console.error("Failed to add relation:", error);
+      await appAlert({ title: "操作失败", message: `添加关系失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -210,7 +211,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       const result = await deleteApi(`/books/${bookId}/characters/edge/${edgeId}`);
       setData(result as CharacterGraphData);
     } catch (error) {
-      console.error("Failed to delete relation:", error);
+      await appAlert({ title: "操作失败", message: `删除关系失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -241,63 +242,44 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
       </nav>
 
       {/* Hero Section */}
-      <section className="glass-panel relative overflow-hidden rounded-[2.5rem] p-6 sm:p-10">
-        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2.5 text-sm font-bold text-primary">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 shadow-inner">
-                <Users size={16} />
-              </div>
-              <span>CHARACTERS</span>
-            </div>
-            <h1 className="text-4xl font-serif font-bold tracking-tight text-foreground sm:text-5xl">
-              人物志 & 关系网
-            </h1>
-            <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-              管理你故事中的每一个灵魂。定义他们的角色地位，编织错综复杂的人际关系，确保角色动机与冲突逻辑自洽。
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-3">
-            <div className="soft-pill flex p-1">
-              <button
-                onClick={() => setViewMode("list")}
-                className={`flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold transition-all ${
-                  viewMode === "list" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <LayoutGrid size={16} />
-                列表视图
-              </button>
-              <button
-                onClick={() => setViewMode("graph")}
-                className={`flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold transition-all ${
-                  viewMode === "graph" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Share2 size={16} />
-                图谱视图
-              </button>
-            </div>
-            <button
-              onClick={() => setShowAddNode(true)}
-              className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
-            >
-              <Plus size={18} />
-              新增角色
-            </button>
-          </div>
+      <PageHero
+        label="CHARACTERS"
+        title="人物志 & 关系网"
+        description="管理你故事中的每一个灵魂。定义他们的角色地位，编织错综复杂的人际关系，确保角色动机与冲突逻辑自洽。"
+      >
+        <div className="soft-pill flex p-1">
+          <button
+            onClick={() => setViewMode("list")}
+            className={`flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold transition-all ${
+              viewMode === "list" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <LayoutGrid size={16} />
+            列表视图
+          </button>
+          <button
+            onClick={() => setViewMode("graph")}
+            className={`flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold transition-all ${
+              viewMode === "graph" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Share2 size={16} />
+            图谱视图
+          </button>
         </div>
-
-        {/* Decorative elements */}
-        <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-primary/5 blur-3xl" />
-        <div className="absolute -bottom-20 -left-20 h-64 w-64 rounded-full bg-accent/5 blur-3xl" />
-      </section>
+        <button
+          onClick={() => setShowAddNode(true)}
+          className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+        >
+          <Plus size={18} />
+          新增角色
+        </button>
+      </PageHero>
 
       {viewMode === "list" ? (
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-8 md:grid-cols-3">
           {/* Character List */}
-          <div className="lg:col-span-2 space-y-6">
+          <div className="md:col-span-2 space-y-6">
             <h2 className="flex items-center gap-2 text-xl font-bold text-foreground">
               <User size={20} className="text-primary" />
               角色成员 ({data.nodes.length})
@@ -332,7 +314,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
                           </div>
                         )}
                       </div>
-                      <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <div className="flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">
                         <button
                           onClick={() => startEditingNode(node)}
                           className="flex h-8 w-8 items-center justify-center rounded-xl bg-secondary/80 text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
@@ -353,15 +335,35 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
                     </p>
                     
                     <div className="mt-5 flex items-center justify-between border-t border-border/40 pt-4">
-                      <div className="flex -space-x-2">
-                        {/* Placeholder for related character avatars */}
-                        {[1, 2, 3].map((i) => (
-                          <div key={i} className="h-7 w-7 rounded-full border-2 border-card bg-muted flex items-center justify-center text-[10px] font-bold text-muted-foreground">
-                            {i}
-                          </div>
-                        ))}
+                      <div className="flex gap-2">
+                        {(() => {
+                          const related = data.edges
+                            .filter(e => e.source === node.id || e.target === node.id)
+                            .slice(0, 3)
+                            .map(e => {
+                              const otherId = e.source === node.id ? e.target : e.source;
+                              return data.nodes.find(n => n.id === otherId);
+                            })
+                            .filter(Boolean) as CharacterNode[];
+                          if (related.length === 0) {
+                            return <span className="text-[11px] text-muted-foreground/50">暂无关联角色</span>;
+                          }
+                          return related.map((r) => (
+                            <button
+                              key={r.id}
+                              onClick={(e) => { e.stopPropagation(); startEditingNode(r); }}
+                              className="h-7 w-7 rounded-full border-2 border-card bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary hover:bg-primary/20 transition-colors"
+                              title={r.name}
+                            >
+                              {r.name.charAt(0)}
+                            </button>
+                          ));
+                        })()}
                       </div>
-                      <button className="text-[11px] font-bold text-primary hover:underline">
+                      <button
+                        onClick={() => startEditingNode(node)}
+                        className="text-[11px] font-bold text-primary hover:underline"
+                      >
                         详细档案 →
                       </button>
                     </div>
@@ -398,15 +400,15 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
                   return (
                     <div key={edge.id} className="group relative p-5 transition-colors hover:bg-muted/30">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="flex min-w-0 flex-1 items-center gap-3">
-                          <div className="truncate font-bold text-foreground">{source?.name || "未知"}</div>
+                        <div className="flex items-center gap-2 overflow-x-auto hide-scrollbar" style={{ scrollbarWidth: 'none' }}>
+                          <span className="shrink-0 font-bold text-foreground">{source?.name || "未知"}</span>
                           <div className="flex shrink-0 flex-col items-center">
-                            <div className={`rounded-full px-3 py-1 text-[11px] font-bold ${RELATION_TYPES[edge.type].bg} ${RELATION_TYPES[edge.type].color}`}>
+                            <div className={`rounded-full px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${RELATION_TYPES[edge.type].bg} ${RELATION_TYPES[edge.type].color}`}>
                               {edge.relation}
                             </div>
-                            <div className="h-px w-8 bg-border/60" />
+                            <div className="h-px w-6 bg-border/60" />
                           </div>
-                          <div className="truncate font-bold text-foreground">{target?.name || "未知"}</div>
+                          <span className="shrink-0 font-bold text-foreground">{target?.name || "未知"}</span>
                         </div>
                         <button
                           onClick={() => handleDeleteEdge(edge.id)}
@@ -424,9 +426,9 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
         </div>
       ) : (
         /* Graph View Actual Implementation */
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
-          {/* SVG Canvas Area */}
-          <div className="lg:col-span-3 relative glass-panel overflow-hidden rounded-[2.5rem] border border-border/25 bg-[radial-gradient(circle_at_50%_40%,hsl(var(--primary)/0.05),transparent_50%),linear-gradient(180deg,hsl(var(--background)/0.5),hsl(var(--secondary)/0.1))] shadow-soft backdrop-blur-md">
+        <div className="grid grid-cols-1 gap-8 md:grid-cols-4">
+          {/* SVG Canvas Area - on mobile, show after sidebar */}
+          <div className="md:col-span-3 relative glass-panel overflow-hidden rounded-[2rem] md:rounded-[2.5rem] border border-border/25 bg-[radial-gradient(circle_at_50%_40%,hsl(var(--primary)/0.05),transparent_50%),linear-gradient(180deg,hsl(var(--background)/0.5),hsl(var(--secondary)/0.1))] shadow-soft backdrop-blur-md">
             <svg
               viewBox={`0 0 ${W} ${H}`}
               className="block w-full aspect-[4/3] focus:outline-none"
@@ -602,7 +604,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
           </div>
 
           {/* Right Sidebar Detail / Action Card */}
-          <div className="lg:col-span-1 space-y-6">
+          <div className="md:col-span-1 space-y-6 md:order-first">
             {selectedNodeId && graphNodesMap.has(selectedNodeId) ? (
               (() => {
                 const node = graphNodesMap.get(selectedNodeId)!;
@@ -611,7 +613,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
                 );
 
                 return (
-                  <div className="glass-panel rounded-[2.5rem] p-6 space-y-6 shadow-3d fade-in">
+                  <div className="glass-panel rounded-[2rem] md:rounded-[2.5rem] p-5 md:p-6 space-y-6 shadow-3d fade-in">
                     <div className="flex items-start justify-between">
                       <div className="space-y-1">
                         <h3 className="text-2xl font-bold text-foreground">{node.name}</h3>
@@ -684,11 +686,11 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
 
                             return (
                               <div key={edge.id} className="flex items-center justify-between gap-2 bg-secondary/35 hover:bg-secondary/50 rounded-xl p-3 text-xs transition-colors">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <span className="font-bold text-foreground truncate max-w-[60px]">
-                                    {isSource ? "对 " : "被 "}
+                                <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden">
+                                  <span className="font-bold text-foreground shrink-0">
+                                    {isSource ? "对" : "被"}
                                   </span>
-                                  <span className="font-bold text-primary truncate max-w-[70px]">
+                                  <span className="font-bold text-primary truncate">
                                     {otherNode?.name || "未知"}
                                   </span>
                                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold ${relInfo?.bg} ${relInfo?.color}`}>
@@ -711,7 +713,7 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
                 );
               })()
             ) : (
-              <div className="glass-panel flex h-[350px] flex-col items-center justify-center rounded-[2.5rem] p-6 text-center text-muted-foreground">
+              <div className="glass-panel flex h-[250px] md:h-[350px] flex-col items-center justify-center rounded-[2rem] md:rounded-[2.5rem] p-6 text-center text-muted-foreground">
                 <Focus size={32} className="text-muted-foreground/30 mb-3 animate-pulse" />
                 <h4 className="text-sm font-bold text-foreground">关系探索</h4>
                 <p className="text-xs mt-2 leading-relaxed max-w-[200px]">
@@ -725,172 +727,143 @@ export function CharacterGraphPage({ bookId, nav, theme: _theme, t: _t }: {
 
       {/* Add/Edit Node Modal */}
       {(showAddNode || showEditNode) && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-xl fade-in" onClick={() => { setShowAddNode(false); setShowEditNode(null); }}>
-          <div className="glass-panel w-full max-w-xl overflow-hidden rounded-[2.5rem] shadow-3d" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-border/40 px-8 py-6">
-              <h2 className="text-2xl font-bold text-foreground">{showAddNode ? "新增角色档案" : "编辑角色档案"}</h2>
-              <button onClick={() => { setShowAddNode(false); setShowEditNode(null); }} className="soft-pill flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground hover:text-foreground">
-                <X size={18} />
-              </button>
-            </div>
-            
-            <div className="max-h-[70dvh] overflow-y-auto p-8 space-y-6">
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">角色姓名</label>
-                  <input
-                    type="text"
-                    value={nodeForm.name}
-                    onChange={e => setNodeForm({ ...nodeForm, name: e.target.value })}
-                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
-                    placeholder="例如：林惊羽"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">角色地位</label>
-                  <select
-                    value={nodeForm.role}
-                    onChange={e => setNodeForm({ ...nodeForm, role: e.target.value as any })}
-                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all appearance-none cursor-pointer"
-                  >
-                    {Object.entries(ROLE_INFO).map(([val, info]) => (
-                      <option key={val} value={val}>{info.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">所属阵营 / 团体</label>
-                <input
-                  type="text"
-                  value={nodeForm.group}
-                  onChange={e => setNodeForm({ ...nodeForm, group: e.target.value })}
-                  className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
-                  placeholder="例如：青云门、草庙村"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">人设描述</label>
-                <textarea
-                  value={nodeForm.description}
-                  onChange={e => setNodeForm({ ...nodeForm, description: e.target.value })}
-                  rows={4}
-                  className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
-                  placeholder="描写角色的性格特征、外貌、核心追求等..."
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3 border-t border-border/40 bg-muted/20 px-8 py-6">
-              <button 
+        <FormModal
+          title={showAddNode ? "新增角色档案" : "编辑角色档案"}
+          onClose={() => { setShowAddNode(false); setShowEditNode(null); }}
+          maxWidth="max-w-xl"
+          footer={
+            <>
+              <button
                 onClick={() => { setShowAddNode(false); setShowEditNode(null); }}
                 className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
               >
                 取消
               </button>
-              <button 
+              <button
                 onClick={showAddNode ? handleAddNode : () => handleUpdateNode(showEditNode!)}
                 disabled={!nodeForm.name}
                 className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
               >
                 {showAddNode ? "确认创建" : "保存修改"}
               </button>
+            </>
+          }
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">角色姓名</label>
+              <input
+                type="text"
+                value={nodeForm.name}
+                onChange={e => setNodeForm({ ...nodeForm, name: e.target.value })}
+                className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 transition-all"
+                placeholder="例如：林惊羽"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">角色地位</label>
+              <StudioSelect
+                value={nodeForm.role}
+                onValueChange={(v) => setNodeForm({ ...nodeForm, role: v as any })}
+                options={Object.entries(ROLE_INFO).map(([val, info]) => ({ value: val, label: info.label }))}
+              />
             </div>
           </div>
-        </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">所属阵营 / 团体</label>
+            <input
+              type="text"
+              value={nodeForm.group}
+              onChange={e => setNodeForm({ ...nodeForm, group: e.target.value })}
+              className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
+              placeholder="例如：青云门、草庙村"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">人设描述</label>
+            <textarea
+              value={nodeForm.description}
+              onChange={e => setNodeForm({ ...nodeForm, description: e.target.value })}
+              rows={4}
+              className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
+              placeholder="描写角色的性格特征、外貌、核心追求等..."
+            />
+          </div>
+        </FormModal>
       )}
 
       {/* Add Edge Modal */}
       {showAddEdge && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-xl fade-in" onClick={() => setShowAddEdge(false)}>
-          <div className="glass-panel w-full max-w-md overflow-hidden rounded-[2.5rem] shadow-3d" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-border/40 px-8 py-6">
-              <h2 className="text-2xl font-bold text-foreground">建立关系纽带</h2>
-              <button onClick={() => setShowAddEdge(false)} className="soft-pill flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground hover:text-foreground">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="p-8 space-y-6">
-               <div className="space-y-2">
-                 <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">源角色</label>
-                 <select
-                   value={edgeForm.source}
-                   onChange={e => setEdgeForm({ ...edgeForm, source: e.target.value })}
-                   className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 appearance-none cursor-pointer"
-                 >
-                   <option value="">选择角色...</option>
-                   {data.nodes.map(node => (
-                     <option key={node.id} value={node.id} disabled={node.id === edgeForm.target}>{node.name}</option>
-                   ))}
-                 </select>
-               </div>
-
-               <div className="flex justify-center py-2">
-                 <div className="h-10 w-10 flex items-center justify-center rounded-full bg-secondary text-primary shadow-inner rotate-90">
-                    <ArrowRightLeft size={18} />
-                 </div>
-               </div>
-
-               <div className="space-y-2">
-                 <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">目标角色</label>
-                 <select
-                   value={edgeForm.target}
-                   onChange={e => setEdgeForm({ ...edgeForm, target: e.target.value })}
-                   className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 appearance-none cursor-pointer"
-                 >
-                   <option value="">选择角色...</option>
-                   {data.nodes.map(node => (
-                     <option key={node.id} value={node.id} disabled={node.id === edgeForm.source}>{node.name}</option>
-                   ))}
-                 </select>
-               </div>
-
-               <div className="grid grid-cols-2 gap-4 pt-2">
-                 <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">关系描述</label>
-                   <input
-                     type="text"
-                     value={edgeForm.relation}
-                     onChange={e => setEdgeForm({ ...edgeForm, relation: e.target.value })}
-                     className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50"
-                     placeholder="例如：生死之交"
-                   />
-                 </div>
-                 <div className="space-y-2">
-                   <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">关系性质</label>
-                   <select
-                     value={edgeForm.type}
-                     onChange={e => setEdgeForm({ ...edgeForm, type: e.target.value as any })}
-                     className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 appearance-none cursor-pointer"
-                   >
-                     {Object.entries(RELATION_TYPES).map(([val, info]) => (
-                       <option key={val} value={val}>{info.label}</option>
-                     ))}
-                   </select>
-                 </div>
-               </div>
-            </div>
-
-            <div className="flex gap-3 border-t border-border/40 bg-muted/20 px-8 py-6">
-              <button 
+        <FormModal
+          title="建立关系纽带"
+          onClose={() => setShowAddEdge(false)}
+          footer={
+            <>
+              <button
                 onClick={() => setShowAddEdge(false)}
                 className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
               >
                 取消
               </button>
-              <button 
+              <button
                 onClick={handleAddEdge}
                 disabled={!edgeForm.source || !edgeForm.target || !edgeForm.relation}
                 className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
               >
                 建立连接
               </button>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">源角色</label>
+            <StudioSelect
+              value={edgeForm.source}
+              onValueChange={(v) => setEdgeForm({ ...edgeForm, source: v })}
+              options={data.nodes.map(node => ({ value: node.id, label: node.name, disabled: node.id === edgeForm.target }))}
+              placeholder="选择角色..."
+            />
+          </div>
+
+          <div className="flex justify-center py-2">
+            <div className="h-10 w-10 flex items-center justify-center rounded-full bg-secondary text-primary shadow-inner rotate-90">
+              <ArrowRightLeft size={18} />
             </div>
           </div>
-        </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">目标角色</label>
+            <StudioSelect
+              value={edgeForm.target}
+              onValueChange={(v) => setEdgeForm({ ...edgeForm, target: v })}
+              options={data.nodes.map(node => ({ value: node.id, label: node.name, disabled: node.id === edgeForm.source }))}
+              placeholder="选择角色..."
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">关系描述</label>
+              <input
+                type="text"
+                value={edgeForm.relation}
+                onChange={e => setEdgeForm({ ...edgeForm, relation: e.target.value })}
+                className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50"
+                placeholder="例如：生死之交"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground ml-1">关系性质</label>
+              <StudioSelect
+                value={edgeForm.type}
+                onValueChange={(v) => setEdgeForm({ ...edgeForm, type: v as any })}
+                options={Object.entries(RELATION_TYPES).map(([val, info]) => ({ value: val, label: info.label }))}
+              />
+            </div>
+          </div>
+        </FormModal>
       )}
     </div>
   );

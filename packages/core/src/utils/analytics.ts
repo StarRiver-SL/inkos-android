@@ -60,8 +60,29 @@ export function computeAnalytics(
   const categoryCounts = new Map<string, number>();
   for (const ch of chapters) {
     for (const issue of ch.auditIssues) {
-      const catMatch = issue.match(/\[(?:critical|warning|info)\]\s*(.+?)[:：]/);
-      const category = catMatch?.[1] ?? "未分类";
+      // 支持多种格式的问题分类提取
+      // 格式1: [severity] Category: description
+      // 格式2: Category: description
+      // 格式3: Category - description
+      // 格式4: Category。description (中文句号)
+      let category = "未分类";
+
+      // 尝试提取分类名称
+      const patterns = [
+        /\[(?:critical|warning|info|warning|error)\]\s*([^:：\-]+)/,  // [severity] Category
+        /^([^:：\-]+)[:：]/,  // Category: 或 Category：
+        /^([^:：\-。]+)[：:]/,  // Category: 或 Category：
+      ];
+
+      for (const pattern of patterns) {
+        const match = issue.match(pattern);
+        if (match && match[1]) {
+          category = match[1].trim();
+          // 过滤掉太短或无效的分类
+          if (category.length >= 2) break;
+        }
+      }
+
       categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
     }
   }
@@ -118,12 +139,16 @@ export function computeAnalytics(
   // --- Consecutive writing days ---
   let consecutiveWritingDays = 0;
   if (allWritingDays.size > 0) {
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-    
+    // 使用本地时区计算今天的日期
+    const now = new Date();
+    const localOffset = now.getTimezoneOffset();
+    const localToday = new Date(now.getTime() - localOffset * 60000);
+    const today = localToday.toISOString().slice(0, 10);
+    const yesterday = new Date(localToday.getTime() - 86400000).toISOString().slice(0, 10);
+
     // If no activity today, check if streak is alive from yesterday
     let d = allWritingDays.has(today) ? new Date(today) : (allWritingDays.has(yesterday) ? new Date(yesterday) : null);
-    
+
     if (d) {
       while (allWritingDays.has(d.toISOString().slice(0, 10))) {
         consecutiveWritingDays++;

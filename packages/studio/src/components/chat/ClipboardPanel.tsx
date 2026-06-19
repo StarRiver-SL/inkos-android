@@ -12,7 +12,6 @@ interface ClipboardEntry {
 
 interface ClipboardPanelProps {
   readonly bookId: string;
-  readonly theme: Theme;
   readonly onInsert?: (text: string) => void;
   readonly onClose: () => void;
 }
@@ -103,12 +102,16 @@ export function ClipboardPanel({ bookId, onInsert, onClose }: ClipboardPanelProp
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md bg-background shadow-2xl"
     >
-      <div className="w-full max-w-2xl max-h-[80vh] rounded-2xl border border-border bg-card text-card-foreground shadow-2xl overflow-hidden flex flex-col">
+      {/* Overlay */}
+      <div
+        className="flex-1 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      {/* Panel */}
+      <div className="w-full max-w-md h-full flex flex-col border-l border-border bg-card">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div className="flex items-center gap-2">

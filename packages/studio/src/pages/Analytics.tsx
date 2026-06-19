@@ -146,6 +146,21 @@ export function Analytics({ bookId, nav, theme, t }: { bookId: string; nav: Nav;
         </div>
       )}
 
+      {/* Chapters with most issues */}
+      {data.chaptersWithMostIssues.length > 0 && (
+        <div className={`border ${c.cardStatic} rounded-lg p-5`}>
+          <h2 className={`text-sm font-medium ${c.subtle} mb-4`}>问题最多的章节</h2>
+          <div className="space-y-2">
+            {data.chaptersWithMostIssues.map(({ chapter, issueCount }) => (
+              <div key={chapter} className="flex items-center justify-between text-sm">
+                <span className={c.subtle}>第 {chapter} 章</span>
+                <span className="tabular-nums font-medium text-amber-600">{issueCount} 个问题</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Status distribution */}
       {statuses.length > 0 && (
         <div className={`border ${c.cardStatic} rounded-lg p-5`}>

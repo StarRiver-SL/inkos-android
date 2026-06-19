@@ -136,7 +136,9 @@ function filterStaleOperations(operations: ActiveOperation[]): ActiveOperation[]
   const now = Date.now();
   return operations.filter((op) => {
     const lastActivity = op.updatedAt ?? op.startedAt;
-    return lastActivity == null || now - lastActivity < STALE_OPERATION_THRESHOLD_MS;
+    // Operations without any timestamp are treated as stale (phantom/leaked)
+    if (lastActivity == null) return false;
+    return now - lastActivity < STALE_OPERATION_THRESHOLD_MS;
   });
 }
 

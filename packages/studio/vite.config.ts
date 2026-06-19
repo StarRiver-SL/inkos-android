@@ -3,6 +3,17 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
 
+// Languages actually used by the novel writing app
+const USED_LANGUAGES = new Set([
+  "text", "typescript", "javascript", "jsx", "tsx", "json", "css", "scss",
+  "html", "xml", "markdown", "python", "bash", "sh", "zsh", "powershell",
+  "rust", "go", "java", "c", "cpp", "sql", "yaml", "toml", "ini",
+  "diff", "regex", "latex", "bibtex", "makefile", "dockerfile",
+  "ruby", "php", "swift", "kotlin", "dart", "lua", "perl", "r",
+  "haskell", "elixir", "clojure", "scheme", "lisp", "scala",
+  "vue", "svelte", "astro",
+]);
+
 const vendorChunkRules: ReadonlyArray<[string, ReadonlyArray<string>]> = [
   [
     "vendor-react",
@@ -48,8 +59,32 @@ function manualChunks(id: string): string | undefined {
   return undefined;
 }
 
+function filterShikiLangs() {
+  return {
+    name: "filter-shiki-langs",
+    enforce: "pre" as const,
+    resolveId(source: string) {
+      const langMatch = source.match(/shiki[/\\]dist[/\\]langs[/\\]([^.]+)\.mjs$/);
+      if (langMatch) {
+        const langId = langMatch[1].replace(/-[^-]*$/, "");
+        const langName = langId.split("-")[0];
+        if (!USED_LANGUAGES.has(langId) && !USED_LANGUAGES.has(langName)) {
+          return { id: "\0shiki-empty-lang", moduleSideEffects: false };
+        }
+      }
+      return null;
+    },
+    load(id: string) {
+      if (id === "\0shiki-empty-lang") {
+        return { code: "export default [];", map: null };
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), filterShikiLangs()],
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
@@ -59,9 +94,8 @@ export default defineConfig({
     port: 4567,
     proxy: {
       "/api/v1/events": {
-        target: `http://localhost:${process.env.INKOS_STUDIO_PORT ?? "4569"}`,
+        target: `http://localhost:${process.env.INKOS_STUDIO_PORT ?? "4659"}`,
         changeOrigin: true,
-        // SSE needs unbuffered streaming — bypass http-proxy response handling
         selfHandleResponse: true,
         configure: (proxy) => {
           proxy.on("proxyRes", (proxyRes, _req, res) => {
@@ -71,7 +105,7 @@ export default defineConfig({
         },
       },
       "/api": {
-        target: `http://localhost:${process.env.INKOS_STUDIO_PORT ?? "4569"}`,
+        target: `http://localhost:${process.env.INKOS_STUDIO_PORT ?? "4659"}`,
         changeOrigin: true,
       },
     },

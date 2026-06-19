@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useApi } from "./use-api";
 
 type Lang = "zh" | "en";
@@ -491,9 +492,9 @@ export function useI18n() {
   const { data } = useApi<{ language: string }>("/project");
   const lang: Lang = data?.language === "en" ? "en" : "zh";
 
-  function t(key: StringKey): string {
+  const t = useCallback((key: StringKey): string => {
     return strings[key][lang];
-  }
+  }, [lang]);
 
   return { t, lang };
 }

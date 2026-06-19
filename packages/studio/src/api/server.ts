@@ -3,6 +3,15 @@ import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
+
+// 兼容 Node 24 (Chakra) 的 UUID 生成
+function generateUUID(): string {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 import {
   StateManager,
   PipelineRunner,
@@ -2795,7 +2804,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       entries = [];
     }
     const entry = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       text: body.text.trim(),
       tags: body.tags ?? [],
       createdAt: new Date().toISOString(),
@@ -2850,7 +2859,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       entries = [];
     }
     const entry = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       text: body.text.trim(),
       label: body.label?.trim() || body.text.trim().slice(0, 20),
       category: body.category?.trim() || "general",
@@ -2995,7 +3004,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     const entry = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       date: body.date,
       title: body.title.trim(),
       type: body.type ?? "goal",
@@ -3782,6 +3791,12 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
         const raw = await readFile(filePath, "utf-8");
         return c.json(JSON.parse(raw));
       } catch {
+        // Try to initialize from truth files
+        const fromTruth = await buildForeshadowingFromTruth(bookDir);
+        if (fromTruth && fromTruth.items.length > 0) {
+          await writeFile(filePath, JSON.stringify(fromTruth, null, 2), "utf-8");
+          return c.json(fromTruth);
+        }
         return c.json({ items: [] });
       }
     } catch (e) {
@@ -3791,6 +3806,7 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
 
   app.post("/api/v1/books/:id/foreshadowing/scan", async (c) => {
     const id = c.req.param("id");
+    const body: { chapterRange?: { start: number; end: number } } = await c.req.json().catch(() => ({}));
 
     try {
       const bookDir = state.bookDir(id);
@@ -3802,34 +3818,55 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
         .filter((f) => f.endsWith(".md") && /^\d{4}/.test(f))
         .sort();
 
+      // 使用传入的章节范围，默认为所有章节
+      const range = body.chapterRange || { start: 1, end: 9999 };
+
       const chaptersContent: Array<{ number: number; content: string }> = [];
-      for (const file of chapterFiles.slice(0, 8)) {
+      // 只扫描指定范围内的章节
+      const filteredFiles = chapterFiles.filter((file) => {
         const chapterNum = parseInt(file.slice(0, 4), 10);
-        const content = await readFile(join(chaptersDir, file), "utf-8");
-        chaptersContent.push({ number: chapterNum, content: content.slice(0, 1000) });
+        return chapterNum >= range.start && chapterNum <= range.end;
+      });
+      const fileContents = await Promise.all(
+        filteredFiles.map((file) => readFile(join(chaptersDir, file), "utf-8")),
+      );
+      for (let i = 0; i < filteredFiles.length; i++) {
+        const chapterNum = parseInt(filteredFiles[i].slice(0, 4), 10);
+        // 每章取前 3000 字符（增加内容深度）
+        chaptersContent.push({ number: chapterNum, content: fileContents[i].slice(0, 3000) });
       }
+
+      // 按章节顺序排序
+      chaptersContent.sort((a, b) => a.number - b.number);
+
+      // 加载现有数据用于增量合并
+      const existingFilePath = join(bookDir, "foreshadowing.json");
+      let existingData: { items: Array<Record<string, unknown>> } = { items: [] };
+      try {
+        existingData = JSON.parse(await readFile(existingFilePath, "utf-8"));
+      } catch { /* 文件不存在，使用空数据 */ }
 
       const prompt = `你是一位伏笔分析专家。请分析以下小说中的伏笔和线索。
 
 书名：${book.title}
 
-章节内容：
+章节内容（按章节顺序排列）：
 ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join("\n\n")}
 
 请识别：
-1. 已埋设的伏笔（未回收）
-2. 已回收的伏笔
-3. 潜在的线索
-4. 伏笔的强弱程度
+1. 已埋设的伏笔（未回收）- 类型为 "planted"
+2. 已回收的伏笔 - 类型为 "resolved"
+3. 潜在的线索 - 类型为 "clue"
+4. 伏笔的强弱程度：strong|medium|weak
 
 请返回JSON格式：
 {
   "items": [
     {
       "type": "planted|resolved|clue",
-      "content": "伏笔内容描述",
+      "content": "伏笔内容描述（简洁）",
       "plantedChapter": 1,
-      "resolvedChapter": null,
+      "resolvedChapter": null 或数字,
       "strength": "strong|medium|weak",
       "importance": "high|medium|low"
     }
@@ -3841,19 +3878,59 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
       const response = await chatCompletion(pipelineConfig.client, pipelineConfig.model, [{ role: "user", content: prompt }]);
       const result = response.content;
 
-      let parsed;
+      let newItems: Array<Record<string, unknown>> = [];
       try {
         const jsonMatch = result.match(/\{[\s\S]*\}/);
-        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          newItems = parsed.items || [];
+        }
       } catch {
-        parsed = { items: [] };
+        newItems = [];
       }
 
-      // Save to file
-      const filePath = join(bookDir, "foreshadowing.json");
-      await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf-8");
+      // 合并现有数据和新扫描结果
+      // 移除本次扫描范围内已存在的旧条目（避免重复）
+      const existingItems = existingData.items.filter((item: Record<string, unknown>) => {
+        const plantedCh = (item.plantedChapter as number) || 0;
+        const resolvedCh = (item.resolvedChapter as number) || 0;
+        // 如果条目在扫描范围内但已被 AI 重新分析过，则移除（让新结果替代）
+        // 通过内容相似度判断是否是同一个伏笔
+        const itemContent = (item.content as string) || "";
+        return !newItems.some(newItem => {
+          const newContent = (newItem.content as string) || "";
+          // 简单的相似度判断：包含关系或长度相近
+          return (itemContent.includes(newContent) || newContent.includes(itemContent)) &&
+                 plantedCh >= range.start && plantedCh <= range.end;
+        });
+      });
 
-      return c.json(parsed);
+      // 合并新旧数据
+      const mergedData = {
+        items: [
+          ...existingItems,
+          ...newItems.map((item: Record<string, unknown>) => ({
+            id: generateUUID(),
+            type: item.type || "planted",
+            content: item.content || "",
+            plantedChapter: item.plantedChapter || 1,
+            resolvedChapter: item.resolvedChapter ?? null,
+            strength: item.strength || "medium",
+            importance: item.importance || "medium",
+          }))
+        ]
+      };
+
+      // 按章节顺序排序
+      mergedData.items.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+        return ((a.plantedChapter as number) || 0) - ((b.plantedChapter as number) || 0);
+      });
+
+      // Save merged data to file
+      const filePath = join(bookDir, "foreshadowing.json");
+      await writeFile(filePath, JSON.stringify(mergedData, null, 2), "utf-8");
+
+      return c.json(mergedData);
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
@@ -3877,7 +3954,7 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
       }
 
       data.items.push({
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         type: body.type ?? "planted",
         content: body.content,
         plantedChapter: body.plantedChapter ?? 0,
@@ -3953,6 +4030,300 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
     }
   });
 
+  // --- Truth file parsers (truth 文件 → JSON 初始化) ---
+
+  /** 解析 character_matrix.md + roles/ → character-graph.json 格式 */
+  async function buildCharacterGraphFromTruth(bookDir: string) {
+    const matrixPath = join(bookDir, "story", "character_matrix.md");
+    let matrixMd: string;
+    try {
+      matrixMd = await readFile(matrixPath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const characters: Array<{ id: string; name: string; role: string; description: string; group: string }> = [];
+    const relationships: Array<{ id: string; source: string; target: string; relation: string; type: string }> = [];
+    const nameToId = new Map<string, string>();
+
+    // Split by ## headings (character entries) — support both ## and ### formats
+    const sections = matrixMd.split(/^#{2,3} /m).slice(1);
+    let charIdx = 0;
+    for (const section of sections) {
+      const lines = section.split("\n");
+      const name = lines[0].trim().replace(/\s*\/.*/, ""); // Remove "/ English name" suffix
+      if (!name) continue;
+
+      const fields: Record<string, string> = {};
+      for (const line of lines.slice(1)) {
+        const m = line.match(/^-\s+\*\*(.+?)\*\*:\s*(.+)/);
+        if (m) fields[m[1]] = m[2].trim();
+      }
+
+      const charId = `char_${++charIdx}`;
+      nameToId.set(name, charId);
+
+      // Map 定位 → role
+      const position = fields["定位"] || "";
+      let role = "minor";
+      if (position.includes("主角")) role = "protagonist";
+      else if (position.includes("反派")) role = "antagonist";
+      else if (position.includes("盟友") || position.includes("配角")) role = "supporting";
+
+      // Group from 标签
+      const group = (fields["标签"] || "").split("、")[0] || "未分类";
+
+      // Description from 性格 + 动机
+      const desc = [fields["性格"], fields["动机"]].filter(Boolean).join("。").replace(/。。/g, "。");
+
+      characters.push({ id: charId, name, role, description: desc, group });
+
+      // Parse 关系 field → edges
+      const relStr = fields["关系"] || "";
+      const relParts = relStr.split(/\s*\|\s*/);
+      for (const part of relParts) {
+        const m = part.match(/(.+?)\((.+?)\)/);
+        if (!m) continue;
+        const targetName = m[1].trim();
+        const relDesc = m[2].trim();
+
+        // Infer relationship type from description keywords
+        let type = "friendly";
+        if (/敌对|敌人|威胁|恐惧/.test(relDesc)) type = "hostile";
+        else if (/妹妹|哥哥|父亲|母亲|家人|依赖/.test(relDesc)) type = "family";
+        else if (/交易|伙伴|下属|上级/.test(relDesc)) type = "business";
+        else if (/保护|盟友|观察/.test(relDesc)) type = "friendly";
+
+        relationships.push({
+          id: `edge_${name}_${targetName}`,
+          source: name,
+          target: targetName,
+          relation: relDesc,
+          type,
+        });
+      }
+    }
+
+    // Second pass: resolve edge source/target names → charIds
+    for (const edge of relationships) {
+      const srcId = nameToId.get(edge.source);
+      const tgtId = nameToId.get(edge.target);
+      if (srcId) edge.source = srcId;
+      if (tgtId) edge.target = tgtId;
+    }
+
+    // Try to read roles/ directory for richer descriptions
+    const rolesDir = join(bookDir, "story", "roles");
+    try {
+      const tierDirs = await readdir(rolesDir);
+      for (const tierDir of tierDirs) {
+        const tierPath = join(rolesDir, tierDir);
+        const statResult = await stat(tierPath).catch(() => null);
+        if (!statResult?.isDirectory()) continue;
+        const roleFiles = await readdir(tierPath);
+        for (const file of roleFiles) {
+          if (!file.endsWith(".md")) continue;
+          const roleName = file.replace(/\.md$/, "");
+          const existing = characters.find((c) => c.name === roleName);
+          if (existing) {
+            try {
+              const content = await readFile(join(tierPath, file), "utf-8");
+              // Extract first meaningful paragraph as description enrichment
+              const firstPara = content.split(/\n\n+/).find((p) => p.trim() && !p.startsWith("#") && !p.startsWith("|"));
+              if (firstPara && firstPara.length > existing.description.length) {
+                existing.description = firstPara.replace(/\n/g, " ").slice(0, 200);
+              }
+            } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch { /* no roles dir */ }
+
+    return { characters, relationships };
+  }
+
+  /** 解析 pending_hooks.md → foreshadowing.json 格式 */
+  async function buildForeshadowingFromTruth(bookDir: string) {
+    const hooksPath = join(bookDir, "story", "pending_hooks.md");
+    let hooksMd: string;
+    try {
+      hooksMd = await readFile(hooksPath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const items: Array<{ id: string; type: string; content: string; plantedChapter: number; resolvedChapter: number | null; strength: string; importance: string }> = [];
+
+    // Parse markdown table
+    const lines = hooksMd.split("\n");
+    let headers: string[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("|")) continue;
+
+      const cells = trimmed.split("|").map((c) => c.trim()).filter(Boolean);
+      if (cells.length < 3) continue;
+
+      // Skip separator row
+      if (cells.every((c) => /^[-:]+$/.test(c))) continue;
+
+      // Header row
+      if (cells[0] === "hook_id") {
+        headers = cells;
+        continue;
+      }
+
+      // Data row
+      if (headers.length === 0) continue;
+      const row: Record<string, string> = {};
+      for (let i = 0; i < headers.length && i < cells.length; i++) {
+        row[headers[i]] = cells[i];
+      }
+
+      const hookId = row["hook_id"] || `hook_${items.length}`;
+      const status = (row["状态"] || "").toLowerCase();
+      const hookType = row["类型"] || "mystery";
+
+      // Map status → foreshadowing type
+      let type = "planted";
+      if (status === "resolved" || status === "closed") type = "resolved";
+      else if (status === "progressing") type = "planted";
+
+      // Map 回收节奏 → strength
+      const pace = row["回收节奏"] || "";
+      let strength = "medium";
+      if (/立即|近期/.test(pace)) strength = "strong";
+      else if (/慢烧|长线/.test(pace)) strength = "weak";
+
+      const content = [row["预期回收"], row["备注"]].filter(Boolean).join(" — ");
+
+      items.push({
+        id: hookId,
+        type,
+        content: content || hookId,
+        plantedChapter: parseInt(row["起始章节"] || "0", 10) || 0,
+        resolvedChapter: null,
+        strength,
+        importance: /核心|是/.test(row["核心"] || "") ? "high" : "medium",
+      });
+    }
+
+    return { items };
+  }
+
+  /** 解析 brief.md → world-settings.json 格式 */
+  async function buildWorldSettingsFromTruth(bookDir: string) {
+    const briefPath = join(bookDir, "story", "brief.md");
+    let briefMd: string;
+    try {
+      briefMd = await readFile(briefPath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const categories: Array<{ id: string; name: string; description: string; settings: Array<{ id: string; key: string; value: string; notes: string }> }> = [];
+
+    // Split by 【标题】 sections
+    const sectionRegex = /【(.+?)】/g;
+    const splits: Array<{ title: string; content: string }> = [];
+    let lastIdx = 0;
+    let lastTitle = "";
+
+    // Find all section boundaries
+    const matches = [...briefMd.matchAll(sectionRegex)];
+    for (let i = 0; i < matches.length; i++) {
+      if (i > 0) {
+        const content = briefMd.slice(matches[i - 1].index! + matches[i - 1][0].length, matches[i].index).trim();
+        splits.push({ title: lastTitle, content });
+      }
+      lastTitle = matches[i][1];
+    }
+    // Last section
+    if (matches.length > 0) {
+      const content = briefMd.slice(matches[matches.length - 1].index! + matches[matches.length - 1][0].length).trim();
+      splits.push({ title: lastTitle, content });
+    }
+
+    // If no 【】 sections found, treat entire file as one category
+    if (splits.length === 0) {
+      categories.push({
+        id: generateUUID(),
+        name: "故事简介",
+        description: "",
+        settings: [{ id: generateUUID(), key: "简介", value: briefMd.trim(), notes: "" }],
+      });
+    } else {
+      for (const split of splits) {
+        const settings: Array<{ id: string; key: string; value: string; notes: string }> = [];
+        const contentLines = split.content.split("\n").filter((l) => l.trim());
+        for (const line of contentLines) {
+          const cleaned = line.replace(/^[-*]\s*/, "").trim();
+          if (!cleaned) continue;
+          // Try to split by first colon or Chinese colon
+          const colonIdx = cleaned.search(/[:：]/);
+          if (colonIdx > 0 && colonIdx < 30) {
+            settings.push({
+              id: generateUUID(),
+              key: cleaned.slice(0, colonIdx).trim(),
+              value: cleaned.slice(colonIdx + 1).trim(),
+              notes: "",
+            });
+          } else {
+            settings.push({
+              id: generateUUID(),
+              key: `条目${settings.length + 1}`,
+              value: cleaned,
+              notes: "",
+            });
+          }
+        }
+        categories.push({
+          id: generateUUID(),
+          name: split.title,
+          description: "",
+          settings,
+        });
+      }
+    }
+
+    // Also try to read story_frame.md for narrative rules
+    const framePath = join(bookDir, "story", "outline", "story_frame.md");
+    try {
+      const frameMd = await readFile(framePath, "utf-8");
+      // Extract ## headings and their content
+      const frameSections = frameMd.split(/^## /m).slice(1);
+      for (const section of frameSections) {
+        const lines = section.split("\n");
+        const title = lines[0].trim();
+        const content = lines.slice(1).join("\n").trim();
+        if (!title || !content) continue;
+        const settings: Array<{ id: string; key: string; value: string; notes: string }> = [];
+        const contentLines = content.split("\n\n").filter((l) => l.trim());
+        for (const para of contentLines) {
+          const cleaned = para.replace(/\n/g, " ").trim().slice(0, 500);
+          if (cleaned) {
+            settings.push({
+              id: generateUUID(),
+              key: `段落${settings.length + 1}`,
+              value: cleaned,
+              notes: "",
+            });
+          }
+        }
+        if (settings.length > 0) {
+          categories.push({
+            id: generateUUID(),
+            name: `叙事规则 · ${title}`,
+            description: "",
+            settings,
+          });
+        }
+      }
+    } catch { /* no story_frame.md */ }
+
+    return { categories };
+  }
+
   // --- Character Relationship Graph (角色关系图谱) ---
 
   app.get("/api/v1/books/:id/character-graph", async (c) => {
@@ -3966,6 +4337,12 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
         const raw = await readFile(filePath, "utf-8");
         return c.json(JSON.parse(raw));
       } catch {
+        // Try to initialize from truth files
+        const fromTruth = await buildCharacterGraphFromTruth(bookDir);
+        if (fromTruth && fromTruth.characters.length > 0) {
+          await writeFile(filePath, JSON.stringify(fromTruth, null, 2), "utf-8");
+          return c.json(fromTruth);
+        }
         return c.json({ characters: [], relationships: [] });
       }
     } catch (e) {
@@ -4210,7 +4587,172 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
     }
   });
 
+  // --- Characters API (前端 CharacterGraphPage 使用 /characters 路径) ---
+  // 读写同一份 character-graph.json，但返回前端期望的 { nodes, edges, groups } 格式
+
+  /** 将 character-graph.json 内部格式转换为前端 CharacterGraphData 格式 */
+  function toCharacterGraphData(data: { characters?: unknown[]; relationships?: unknown[] }) {
+    const nodes = ((data.characters || []) as Array<{ id: string; name: string; role: string; description: string; group: string }>).map((ch) => ({
+      id: ch.id,
+      name: ch.name,
+      role: ch.role as "protagonist" | "supporting" | "antagonist" | "minor",
+      description: ch.description || "",
+      group: ch.group || "未分类",
+    }));
+    const edges = ((data.relationships || []) as Array<{ id: string; source: string; target: string; relation: string; type: string }>).map((r) => ({
+      id: r.id,
+      source: r.source,
+      target: r.target,
+      relation: r.relation || "",
+      type: (r.type || "friendly") as "friendly" | "hostile" | "family" | "romantic" | "business",
+    }));
+    const groups = [...new Set(nodes.map((n) => n.group))];
+    return { nodes, edges, groups };
+  }
+
+  app.get("/api/v1/books/:id/characters", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      try {
+        const raw = await readFile(filePath, "utf-8");
+        return c.json(toCharacterGraphData(JSON.parse(raw)));
+      } catch {
+        // Try to initialize from truth files
+        const fromTruth = await buildCharacterGraphFromTruth(bookDir);
+        if (fromTruth && fromTruth.characters.length > 0) {
+          await writeFile(filePath, JSON.stringify(fromTruth, null, 2), "utf-8");
+          return c.json(toCharacterGraphData(fromTruth));
+        }
+        return c.json({ nodes: [], edges: [], groups: [] });
+      }
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/characters/node", async (c) => {
+    const id = c.req.param("id");
+    const body: { name?: string; role?: string; description?: string; group?: string } = await c.req.json().catch(() => ({}));
+    if (!body.name) return c.json({ error: "name is required" }, 400);
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      let data: { characters: Array<{ id: string; name: string; role: string; description: string; group: string }>; relationships: unknown[] };
+      try { data = JSON.parse(await readFile(filePath, "utf-8")); } catch { data = { characters: [], relationships: [] }; }
+      data.characters.push({ id: generateUUID(), name: body.name, role: body.role || "minor", description: body.description || "", group: body.group || "未分类" });
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(toCharacterGraphData(data));
+    } catch (e) { return c.json({ error: String(e) }, 500); }
+  });
+
+  app.put("/api/v1/books/:id/characters/node/:nodeId", async (c) => {
+    const id = c.req.param("id");
+    const nodeId = c.req.param("nodeId");
+    const body: { name?: string; role?: string; description?: string; group?: string } = await c.req.json().catch(() => ({}));
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      let data: { characters: Array<{ id: string; name: string; role: string; description: string; group: string }>; relationships: unknown[] };
+      try { data = JSON.parse(await readFile(filePath, "utf-8")); } catch { return c.json({ error: "Character graph not found" }, 404); }
+      const node = data.characters.find((ch) => ch.id === nodeId);
+      if (!node) return c.json({ error: "Character not found" }, 404);
+      if (body.name !== undefined) node.name = body.name;
+      if (body.role !== undefined) node.role = body.role;
+      if (body.description !== undefined) node.description = body.description;
+      if (body.group !== undefined) node.group = body.group;
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(toCharacterGraphData(data));
+    } catch (e) { return c.json({ error: String(e) }, 500); }
+  });
+
+  app.delete("/api/v1/books/:id/characters/node/:nodeId", async (c) => {
+    const id = c.req.param("id");
+    const nodeId = c.req.param("nodeId");
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      let data: { characters: Array<{ id: string; [key: string]: unknown }>; relationships: Array<{ source: string; target: string; [key: string]: unknown }> };
+      try { data = JSON.parse(await readFile(filePath, "utf-8")); } catch { return c.json({ error: "Character graph not found" }, 404); }
+      data.characters = data.characters.filter((ch) => ch.id !== nodeId);
+      data.relationships = data.relationships.filter((r) => r.source !== nodeId && r.target !== nodeId);
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(toCharacterGraphData(data));
+    } catch (e) { return c.json({ error: String(e) }, 500); }
+  });
+
+  app.post("/api/v1/books/:id/characters/edge", async (c) => {
+    const id = c.req.param("id");
+    const body: { source?: string; target?: string; relation?: string; type?: string } = await c.req.json().catch(() => ({}));
+    if (!body.source || !body.target) return c.json({ error: "source and target are required" }, 400);
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      let data: { characters: unknown[]; relationships: Array<{ id: string; source: string; target: string; relation: string; type: string }> };
+      try { data = JSON.parse(await readFile(filePath, "utf-8")); } catch { return c.json({ error: "Character graph not found" }, 404); }
+      data.relationships.push({ id: generateUUID(), source: body.source, target: body.target, relation: body.relation || "", type: body.type || "friendly" });
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(toCharacterGraphData(data));
+    } catch (e) { return c.json({ error: String(e) }, 500); }
+  });
+
+  app.delete("/api/v1/books/:id/characters/edge/:edgeId", async (c) => {
+    const id = c.req.param("id");
+    const edgeId = c.req.param("edgeId");
+    try {
+      const bookDir = state.bookDir(id);
+      const filePath = join(bookDir, "character-graph.json");
+      let data: { characters: unknown[]; relationships: Array<{ id: string; [key: string]: unknown }> };
+      try { data = JSON.parse(await readFile(filePath, "utf-8")); } catch { return c.json({ error: "Character graph not found" }, 404); }
+      data.relationships = data.relationships.filter((r) => r.id !== edgeId);
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(toCharacterGraphData(data));
+    } catch (e) { return c.json({ error: String(e) }, 500); }
+  });
+
   // --- Multiple Endings Management (多结局分支管理) ---
+
+  app.get("/api/v1/books/:id/endings/origin", async (c) => {
+    const id = c.req.param("id");
+    console.log(`[DEBUG] Fetching origin endings for book: ${id}`);
+
+    try {
+      const bookDir = state.bookDir(id);
+      const storyFramePath = join(bookDir, "story", "outline", "story_frame.md");
+      console.log(`[DEBUG] Story frame path: ${storyFramePath}`);
+
+      try {
+        const content = await readFile(storyFramePath, "utf-8");
+        // Extract the ending section from story_frame.md
+        const endingMatch = content.match(/## 终局方向 \+ 全书 Objective\s*\n([\s\S]*?)(?=\n##|$)/);
+        console.log(`[DEBUG] Ending match found: ${!!endingMatch}`);
+        if (endingMatch) {
+          const endingText = endingMatch[1].trim();
+          console.log(`[DEBUG] Ending text (first 100 chars): ${endingText.substring(0, 100)}`);
+          return c.json({
+            endings: [{
+              id: "origin",
+              name: "原始结局",
+              description: endingText,
+              type: "neutral" as const,
+              chapters: [],
+              createdAt: new Date().toISOString(),
+              isOrigin: true
+            }],
+            activeEnding: null
+          });
+        }
+        return c.json({ endings: [], activeEnding: null });
+      } catch (readErr) {
+        console.log(`[DEBUG] Error reading story frame:`, readErr);
+        return c.json({ endings: [], activeEnding: null });
+      }
+    } catch (e) {
+      console.error(`[DEBUG] Error in origin endings API:`, e);
+      return c.json({ error: String(e) }, 500);
+    }
+  });
 
   app.get("/api/v1/books/:id/endings", async (c) => {
     const id = c.req.param("id");
@@ -4248,7 +4790,7 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
       }
 
       const newEnding = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         name: body.name,
         description: body.description ?? "",
         type: body.type ?? "neutral",
@@ -4324,6 +4866,27 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
     }
   });
 
+  // Activate (set as target) an ending
+  app.post("/api/v1/books/:id/endings/:endingId/activate", async (c) => {
+    const bookId = c.req.param("id");
+    const endingId = c.req.param("endingId");
+    const bookDir = join(root, "books", bookId);
+    const filePath = join(bookDir, "endings.json");
+    try {
+      const raw = await readFile(filePath, "utf-8").catch(() => '{"endings":[],"activeEnding":null}');
+      const data = JSON.parse(raw) as { endings: Array<{ id: string }>; activeEnding: string | null };
+      const target = data.endings.find((e) => e.id === endingId);
+      if (!target) {
+        return c.json({ error: "Ending not found" }, 404);
+      }
+      data.activeEnding = endingId;
+      await writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+      return c.json(data);
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
   // --- World Setting Management (世界观设定管理) ---
 
   app.get("/api/v1/books/:id/world-settings", async (c) => {
@@ -4337,6 +4900,12 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
         const raw = await readFile(filePath, "utf-8");
         return c.json(JSON.parse(raw));
       } catch {
+        // Try to initialize from truth files
+        const fromTruth = await buildWorldSettingsFromTruth(bookDir);
+        if (fromTruth && fromTruth.categories.length > 0) {
+          await writeFile(filePath, JSON.stringify(fromTruth, null, 2), "utf-8");
+          return c.json(fromTruth);
+        }
         return c.json({ categories: [] });
       }
     } catch (e) {
@@ -4362,7 +4931,7 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
       }
 
       data.categories.push({
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         name: body.name,
         description: body.description ?? "",
         settings: [],
@@ -4396,7 +4965,7 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
       if (!category) return c.json({ error: "Category not found" }, 404);
 
       category.settings.push({
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         key: body.key,
         value: body.value ?? "",
         notes: body.notes ?? "",
@@ -5992,29 +6561,50 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
   });
 
   app.post("/api/v1/agent", async (c) => {
-    const {
-      instruction,
-      activeBookId,
-      sessionId: reqSessionId,
-      sessionKind: reqSessionKind,
-      actionSource: reqActionSource,
-      requestedIntent: reqRequestedIntent,
-      actionPayload: reqActionPayload,
-      playMode: reqPlayMode,
-      model: reqModel,
-      service: reqService,
-    } = await c.req.json<{
-      instruction: string;
-      activeBookId?: string;
-      sessionId?: string;
-      sessionKind?: string;
-      actionSource?: string;
-      requestedIntent?: string;
-      actionPayload?: unknown;
-      playMode?: string;
-      model?: string;
-      service?: string;
-    }>();
+    // 解析请求参数，添加错误处理
+    let instruction: string;
+    let activeBookId: string | undefined;
+    let reqSessionId: string | undefined;
+    let reqSessionKind: string | undefined;
+    let reqActionSource: string | undefined;
+    let reqRequestedIntent: string | undefined;
+    let reqActionPayload: unknown;
+    let reqPlayMode: string | undefined;
+    let reqModel: string | undefined;
+    let reqService: string | undefined;
+
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json();
+    } catch (jsonErr) {
+      // GeckoView + Capacitor HTTP proxy may corrupt or truncate the body on
+      // large POST requests.  Fall back to reading the raw text and attempting
+      // a manual parse so we can surface a clear error instead of an opaque 500.
+      try {
+        const raw = await c.req.text();
+        console.error("[agent] c.req.json() failed, raw body length:", raw.length, "prefix:", raw.slice(0, 120));
+        body = JSON.parse(raw);
+      } catch {
+        console.error("[agent] Failed to parse request JSON:", jsonErr);
+        return c.json({
+          error: {
+            code: "INVALID_REQUEST",
+            message: `请求体不是合法 JSON。可能原因是 Capacitor HTTP 代理损坏了 body。原始前缀: ${String((jsonErr as Error).message ?? "").slice(0, 120)}`,
+          },
+        }, 400);
+      }
+    }
+    instruction = body.instruction as string;
+    activeBookId = body.activeBookId as string | undefined;
+    reqSessionId = body.sessionId as string | undefined;
+    reqSessionKind = body.sessionKind as string | undefined;
+    reqActionSource = body.actionSource as string | undefined;
+    reqRequestedIntent = body.requestedIntent as string | undefined;
+    reqActionPayload = body.actionPayload;
+    reqPlayMode = body.playMode as string | undefined;
+    reqModel = body.model as string | undefined;
+    reqService = body.service as string | undefined;
+
     const sessionId = reqSessionId;
     if (!instruction?.trim()) {
       return c.json({ error: "No instruction provided" }, 400);
@@ -6042,10 +6632,13 @@ ${chaptersContent.map((ch) => `--- 第${ch.number}章 ---\n${ch.content}`).join(
 
     try {
       // Load config + create LLM client (pipeline created after model resolution)
+      console.error("[agent] Step 1: Loading project config...");
       const config = await loadCurrentProjectConfig({ requireApiKey: false });
+      console.error("[agent] Step 2: Config loaded, creating LLM client...");
       const client = createStudioLLMClient(config.llm, { sessionId });
-
+      console.error("[agent] Step 3: Loading book session...");
       const loadedBookSession = await loadBookSession(root, sessionId);
+      console.error("[agent] Step 4: Session loaded:", loadedBookSession ? "found" : "not found");
       if (!loadedBookSession) {
         throw new ApiError(404, "SESSION_NOT_FOUND", `Session not found: ${sessionId}`);
       }
@@ -8081,6 +8674,11 @@ export async function startStudioServer(
     const { readFile: readFileFs } = await import("node:fs/promises");
     const { join: joinPath } = await import("node:path");
     const { existsSync } = await import("node:fs");
+
+    // Health endpoint — used by the Android UI to confirm the Node backend is alive.
+    // Must appear before the SPA catch-all so that fetchJson("/api/health") returns JSON, not HTML.
+    app.get("/health", (c) => c.json({ ok: true }));
+    app.get("/api/health", (c) => c.json({ ok: true }));
 
     // Serve static assets (js, css, etc.)
     app.get("/assets/*", async (c) => {

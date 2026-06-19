@@ -45,6 +45,12 @@ interface InkOSRuntimePlugin {
     message: string;
     busy: boolean;
   }): Promise<{ ok: boolean }>;
+  checkNodeStatus(): Promise<{
+    state: string;
+    message: string;
+    nativeLibSize?: number;
+    packagedRuntimeVersion?: string;
+  }>;
 }
 
 const InkOSRuntime = registerPlugin<InkOSRuntimePlugin>("InkOSRuntime");
@@ -62,6 +68,25 @@ export async function restartEmbeddedNode(): Promise<boolean> {
 
 export async function ensureEmbeddedNodeRunning(): Promise<boolean> {
   return restartEmbeddedNode();
+}
+
+/**
+ * Read the Node runtime status directly from the native filesystem.
+ * Bypasses both network fetch and Capacitor Filesystem plugin,
+ * which may not work reliably on GeckoView.
+ */
+export async function checkNodeStatusFromNative(): Promise<{
+  state: string;
+  message: string;
+  nativeLibSize?: number;
+  packagedRuntimeVersion?: string;
+} | null> {
+  if (!isNativeRuntime()) return null;
+  try {
+    return await InkOSRuntime.checkNodeStatus();
+  } catch {
+    return null;
+  }
 }
 
 export async function resetEmbeddedNodeRuntime(): Promise<boolean> {
@@ -141,13 +166,14 @@ export async function installDownloadedApk(path: string): Promise<{
 }
 
 export async function requestBatteryOptimizationExemption(): Promise<boolean> {
-  if (!isNativeRuntime()) return false;
-  try {
-    await InkOSRuntime.requestBatteryOptimizationExemption();
-    return true;
-  } catch {
-    return false;
+  if (!isNativeRuntime()) throw new Error("仅在 Android 应用中可用");
+  // Use direct HTTP endpoint to bypass broken Capacitor bridge in GeckoView
+  const res = await fetch("/__cap_battery_exemption", { method: "POST" });
+  const data = await res.json() as { ok?: boolean; error?: string };
+  if (!res.ok || data.error) {
+    throw new Error(data.error ?? "打开权限设置失败");
   }
+  return data.ok === true;
 }
 
 export async function isBatteryOptimizationIgnored(): Promise<boolean | null> {

@@ -208,3 +208,18 @@ packages/studio/android/app/build/
 packages/studio/android/app/libnode/
 packages/studio/android/app/src/main/jniLibs/
 packages/studio/android/app/src/main/assets/inkos-node/
+
+# Play world data
+worlds/
+
+# Temp files
+test.js
+$err
+$log
+DEBUG-APK-README.md
+*.pyc
+__pycache__/
+build-err.txt
+capacitor-android-x5/
+screenshot*.png
+.env.production

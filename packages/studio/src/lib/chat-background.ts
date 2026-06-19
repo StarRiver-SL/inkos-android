@@ -18,12 +18,10 @@ export const DEFAULT_CHAT_BACKGROUND: ChatBackgroundSettings = {
   y: 50,
 };
 
-export function readChatBackground(): ChatBackgroundSettings {
+function parseSettings(raw: string | null): ChatBackgroundSettings {
   if (typeof window === "undefined") return DEFAULT_CHAT_BACKGROUND;
   try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(CHAT_BACKGROUND_STORAGE_KEY) ?? "null",
-    ) as Partial<ChatBackgroundSettings> | null;
+    const parsed = JSON.parse(raw ?? "null") as Partial<ChatBackgroundSettings> | null;
     return {
       ...DEFAULT_CHAT_BACKGROUND,
       ...parsed,
@@ -34,18 +32,31 @@ export function readChatBackground(): ChatBackgroundSettings {
   }
 }
 
-export function writeChatBackground(settings: ChatBackgroundSettings): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(CHAT_BACKGROUND_STORAGE_KEY, JSON.stringify(settings));
+/** Read wallpaper for a specific session; falls back to global wallpaper. */
+export function readChatBackground(sessionId?: string | null): ChatBackgroundSettings {
+  if (typeof window === "undefined") return DEFAULT_CHAT_BACKGROUND;
+  if (sessionId) {
+    const sessionKey = `${CHAT_BACKGROUND_STORAGE_KEY}:${sessionId}`;
+    const sessionRaw = window.localStorage.getItem(sessionKey);
+    if (sessionRaw) return parseSettings(sessionRaw);
+  }
+  return parseSettings(window.localStorage.getItem(CHAT_BACKGROUND_STORAGE_KEY));
 }
 
-export function selectChatBackground(imageUrl: string): ChatBackgroundSettings {
+/** Write wallpaper for a specific session. Pass null/undefined to write globally. */
+export function writeChatBackground(settings: ChatBackgroundSettings, sessionId?: string | null): void {
+  if (typeof window === "undefined") return;
+  const key = sessionId ? `${CHAT_BACKGROUND_STORAGE_KEY}:${sessionId}` : CHAT_BACKGROUND_STORAGE_KEY;
+  window.localStorage.setItem(key, JSON.stringify(settings));
+}
+
+export function selectChatBackground(imageUrl: string, sessionId?: string | null): ChatBackgroundSettings {
   const settings = { ...DEFAULT_CHAT_BACKGROUND, imageUrl };
-  writeChatBackground(settings);
+  writeChatBackground(settings, sessionId);
   return settings;
 }
 
-export function clearChatBackground(): ChatBackgroundSettings {
-  writeChatBackground(DEFAULT_CHAT_BACKGROUND);
+export function clearChatBackground(sessionId?: string | null): ChatBackgroundSettings {
+  writeChatBackground(DEFAULT_CHAT_BACKGROUND, sessionId);
   return DEFAULT_CHAT_BACKGROUND;
 }

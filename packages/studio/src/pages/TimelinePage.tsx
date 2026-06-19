@@ -1,19 +1,25 @@
 import { useState, useEffect, useCallback } from "react";
 import { useApi, postApi, fetchJson } from "../hooks/use-api";
+import { appAlert } from "../lib/app-dialog";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { 
-  Clock, 
-  AlertTriangle, 
-  RefreshCw, 
-  Hash, 
-  Calendar, 
-  Users, 
+import { PageHero } from "../components/PageHero";
+import {
+  Clock,
+  AlertTriangle,
+  RefreshCw,
+  Hash,
+  Calendar,
+  Users,
   ArrowRight,
   ChevronLeft,
   Search,
   Sparkles,
-  Calculator
+  Calculator,
+  Eye,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 
 interface TimelineAnchor {
@@ -22,6 +28,8 @@ interface TimelineAnchor {
   readonly parsedDate?: string;
   readonly charactersPresent: string[];
   readonly eventSummary: string;
+  readonly position?: number;
+  readonly contextParagraph?: string;
 }
 
 interface TimelineData {
@@ -51,6 +59,7 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [calcA, setCalcA] = useState<number>(-1);
   const [calcB, setCalcB] = useState<number>(-1);
+  const [selectedAnchor, setSelectedAnchor] = useState<number | null>(null);
   const isZh = t("analytics.title") !== "Analytics";
 
   const handleRebuild = async () => {
@@ -58,8 +67,8 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
     try {
       await postApi(`/books/${bookId}/timeline/rebuild`);
       refetch();
-    } catch {
-      // keep current data
+    } catch (error) {
+      await appAlert({ title: "重建失败", message: `时间线重建失败：${error instanceof Error ? error.message : "未知错误"}` });
     } finally {
       setRebuilding(false);
     }
@@ -69,8 +78,8 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
     try {
       const result = await fetchJson<{ issues: ValidationIssue[] }>(`/books/${bookId}/timeline/validate`);
       setIssues(result?.issues ?? []);
-    } catch {
-      setIssues([]);
+    } catch (error) {
+      await appAlert({ title: "校验失败", message: `时间线校验失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   }, [bookId]);
 
@@ -104,45 +113,27 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
       </nav>
 
       {/* Hero Section */}
-      <section className="glass-panel relative overflow-hidden rounded-[2.5rem] p-6 sm:p-10 shadow-3d">
-        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2.5 text-sm font-bold text-primary">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 shadow-inner">
-                <Clock size={16} />
-              </div>
-              <span>CHRONOLOGY & LOGIC</span>
-            </div>
-            <h1 className="text-4xl font-serif font-bold tracking-tight text-foreground sm:text-5xl">
-              时间线计算器
-            </h1>
-            <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-              把控故事的时空跨度。精准捕捉每一个章节的时间锚点，自动计算情节间隔，严谨校验逻辑漏洞，让你的世界观坚不可摧。
-            </p>
-          </div>
-          
-          <div className="flex flex-wrap gap-3">
-             <button
-               onClick={handleValidate}
-               className="soft-pill inline-flex h-12 items-center justify-center gap-2 rounded-2xl px-6 text-sm font-bold text-foreground transition-all hover:border-primary/40 active:scale-95"
-             >
-               <AlertTriangle size={18} className="text-amber-500" />
-               一致性检查
-             </button>
-             <button
-               onClick={handleRebuild}
-               disabled={rebuilding}
-               className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
-             >
-               <RefreshCw size={18} className={rebuilding ? "animate-spin" : ""} />
-               {rebuilding ? "正在重建脉络..." : "重建时间线"}
-             </button>
-          </div>
-        </div>
-        
-        {/* Decor */}
-        <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full bg-primary/5 blur-3xl opacity-60" />
-      </section>
+      <PageHero
+        label="CHRONOLOGY & LOGIC"
+        title="时间线计算器"
+        description="把控故事的时空跨度。精准捕捉每一个章节的时间锚点，自动计算情节间隔，严谨校验逻辑漏洞，让你的世界观坚不可摧。"
+      >
+        <button
+          onClick={handleValidate}
+          className="soft-pill inline-flex h-12 items-center justify-center gap-2 rounded-2xl px-6 text-sm font-bold text-foreground transition-all hover:border-primary/40 active:scale-95"
+        >
+          <AlertTriangle size={18} className="text-amber-500" />
+          一致性检查
+        </button>
+        <button
+          onClick={handleRebuild}
+          disabled={rebuilding}
+          className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+        >
+          <RefreshCw size={18} className={rebuilding ? "animate-spin" : ""} />
+          {rebuilding ? "正在重建脉络..." : "重建时间线"}
+        </button>
+      </PageHero>
 
       {/* Main Content Layout */}
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
@@ -179,9 +170,35 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
                       <div className="text-xl font-serif font-bold text-foreground">
                          跨越 {Math.abs(anchorB.chapter - anchorA.chapter)} 个章节
                       </div>
-                      <p className="mt-1 text-[10px] text-muted-foreground leading-tight px-2">
-                         自动提取的具体日期差值计算暂未集成
-                      </p>
+                      {(() => {
+                        // Try to compute a more precise time gap
+                        const parseYear = (d: string) => {
+                          const m = d.match(/第(\d+)年/);
+                          return m ? parseInt(m[1]) : null;
+                        };
+                        const parseDate = (d: string) => {
+                          const m = d.match(/(\d{4})-(\d{2})-(\d{2})/);
+                          return m ? new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3])) : null;
+                        };
+                        const aDate = anchorA.parsedDate;
+                        const bDate = anchorB.parsedDate;
+                        if (aDate && bDate) {
+                          const aYear = parseYear(aDate);
+                          const bYear = parseYear(bDate);
+                          if (aYear !== null && bYear !== null) {
+                            const diff = Math.abs(bYear - aYear);
+                            if (diff > 0) return <p className="mt-1 text-xs text-primary/80 font-medium">约 {diff} 年</p>;
+                          }
+                          const aD = parseDate(aDate);
+                          const bD = parseDate(bDate);
+                          if (aD && bD) {
+                            const days = Math.abs(Math.round((bD.getTime() - aD.getTime()) / 86400000));
+                            if (days > 30) return <p className="mt-1 text-xs text-primary/80 font-medium">约 {Math.round(days / 30)} 个月（{days} 天）</p>;
+                            if (days > 0) return <p className="mt-1 text-xs text-primary/80 font-medium">{days} 天</p>;
+                          }
+                        }
+                        return <p className="mt-1 text-[10px] text-muted-foreground leading-tight px-2">选择具有日期信息的节点可获得精确间隔</p>;
+                      })()}
                    </div>
                    
                    <button 
@@ -260,6 +277,7 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
                           if (calcA === -1) setCalcA(i);
                           else if (calcB === -1 && i !== calcA) setCalcB(i);
                           else { setCalcA(i); setCalcB(-1); }
+                          setSelectedAnchor(selectedAnchor === i ? null : i);
                         }}
                         className={`paper-sheet w-full rounded-[2rem] p-6 text-left transition-all duration-300 hover:shadow-3d hover:-translate-y-1 ${
                           isSelected ? "ring-2 ring-primary bg-primary/[0.03]" :
@@ -296,7 +314,10 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
                          </div>
 
                          <p className="text-lg font-medium leading-relaxed text-foreground mb-5">
-                            {anchor.eventSummary}
+                            {anchor.eventSummary.length > 120 && selectedAnchor !== i
+                              ? `${anchor.eventSummary.slice(0, 117)}…`
+                              : anchor.eventSummary
+                            }
                          </p>
 
                          {anchor.charactersPresent.length > 0 && (
@@ -310,6 +331,41 @@ export function TimelinePage({ bookId, nav, theme: _theme, t }: {
                             </div>
                          )}
                       </button>
+
+                      {/* Detail Panel */}
+                      {selectedAnchor === i && (
+                        <div className="mt-3 paper-sheet rounded-[1.5rem] p-6 space-y-4 animate-in fade-in slide-in-from-top-2 border border-primary/10">
+                          {/* Full paragraph */}
+                          {anchor.contextParagraph && anchor.contextParagraph !== anchor.eventSummary && (
+                            <div>
+                              <div className="flex items-center gap-2 text-xs font-bold text-primary mb-2">
+                                <Eye size={12} />
+                                完整上下文
+                              </div>
+                              <div className="text-sm leading-relaxed text-foreground/80 bg-muted/20 rounded-xl p-4 max-h-[300px] overflow-y-auto">
+                                <span className="text-primary font-bold">{anchor.timeDescription}</span>
+                                <span className="ml-1">{(anchor.contextParagraph || "").replace(anchor.timeDescription, "").trim()}</span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-3 pt-2 border-t border-border/20">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); nav.toChapter(bookId, anchor.chapter); }}
+                              className="inline-flex items-center gap-2 rounded-xl bg-primary/10 px-4 py-2 text-xs font-bold text-primary hover:bg-primary/20 transition-colors"
+                            >
+                              <ExternalLink size={12} />
+                              前往第 {anchor.chapter} 章
+                            </button>
+                            {anchor.position !== undefined && (
+                              <span className="text-[10px] text-muted-foreground">
+                                段落位置：字符 {anchor.position}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
                    </div>
                  );
                })}

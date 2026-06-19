@@ -28,6 +28,7 @@ allprojects {
         maven { url 'https://maven.aliyun.com/repository/central' }
         maven { url 'https://maven.aliyun.com/repository/public' }
         maven { url 'https://chaquo.com/maven' }
+        maven { url 'https://maven.mozilla.org/maven2/' }
         google()
         mavenCentral()
     }

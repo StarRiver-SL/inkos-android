@@ -691,7 +691,7 @@ export function RelationshipGraph(props: {
         initial={{ opacity: 0, y: -6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.24, ease: "easeOut" }}
-        className="flex shrink-0 items-center gap-2 border-b border-border/20 px-3 py-3"
+        className="flex shrink-0 items-center gap-2 border-b border-border/20 px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-3"
       >
         <button
           onClick={props.onClose}

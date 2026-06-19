@@ -14,6 +14,9 @@ import type {
 
 type RunSubscriber = (event: RunStreamEvent) => void;
 
+const MAX_RUNS = 200;
+const TTL_MS = 30 * 60 * 1000; // 30 minutes
+
 export class RunStore {
   private readonly runs = new Map<string, StudioRun>();
   private readonly subscribers = new Map<string, Set<RunSubscriber>>();
@@ -51,7 +54,17 @@ export class RunStore {
   }
 
   get(runId: string): StudioRun | null {
-    return this.runs.get(runId) ?? null;
+    const run = this.runs.get(runId);
+    if (!run) return null;
+    // TTL eviction: treat as expired if terminal and older than 30 minutes
+    if (isTerminalRunStatus(run.status)) {
+      const age = Date.now() - new Date(run.updatedAt).getTime();
+      if (age > TTL_MS) {
+        this.runs.delete(runId);
+        return null;
+      }
+    }
+    return run;
   }
 
   findActiveRun(bookId: string): StudioRun | null {
@@ -147,6 +160,11 @@ export class RunStore {
     };
     this.runs.set(runId, next);
 
+    // Evict oldest terminal runs when capacity is exceeded
+    if (this.runs.size > MAX_RUNS) {
+      this.evictTerminalRuns();
+    }
+
     for (const event of events) {
       this.publish(runId, event);
     }
@@ -155,6 +173,24 @@ export class RunStore {
     }
 
     return next;
+  }
+
+  /** Remove terminal runs to keep memory bounded. */
+  private evictTerminalRuns(): void {
+    // Collect terminal run entries sorted oldest-first by updatedAt
+    const terminal: Array<[string, string]> = [];
+    for (const [id, run] of this.runs) {
+      if (isTerminalRunStatus(run.status)) {
+        terminal.push([id, run.updatedAt]);
+      }
+    }
+    terminal.sort((a, b) => a[1].localeCompare(b[1]));
+
+    // Remove oldest until we drop below the limit
+    for (const [id] of terminal) {
+      if (this.runs.size <= MAX_RUNS) break;
+      this.runs.delete(id);
+    }
   }
 
   private publish(runId: string, event: RunStreamEvent): void {

@@ -43,6 +43,11 @@ interface ChapterMeta {
   readonly title: string;
   readonly status: string;
   readonly wordCount: number;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly auditIssues?: ReadonlyArray<{ readonly category: string; readonly message: string }>;
+  readonly reviewNote?: string;
+  readonly detectionScore?: number;
 }
 
 interface BookData {
@@ -55,9 +60,16 @@ interface BookData {
     readonly targetChapters?: number;
     readonly language?: string;
     readonly fanficMode?: string;
+    readonly createdAt?: string;
+    readonly updatedAt?: string;
   };
   readonly chapters: ReadonlyArray<ChapterMeta>;
   readonly nextChapter: number;
+  readonly bookRules?: {
+    readonly bannedWords?: ReadonlyArray<string>;
+    readonly preferredWords?: ReadonlyArray<{ readonly avoid: string; readonly prefer: string }>;
+    readonly domainTerms?: ReadonlyArray<{ readonly term: string; readonly definition?: string }>;
+  } | null;
 }
 
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect" | "format" | "expand" | "condense";
@@ -592,6 +604,11 @@ export function BookDetail({
               <Zap size={14} />
               <span>{totalWords.toLocaleString()} {t("book.words")}</span>
             </div>
+            {book.createdAt && (
+              <span className="text-xs text-muted-foreground/60">
+                {new Date(book.createdAt).toLocaleDateString()}
+              </span>
+            )}
             {book.fanficMode && (
               <span className="flex items-center gap-1 text-purple-500">
                 <Sparkles size={12} />
@@ -599,6 +616,19 @@ export function BookDetail({
               </span>
             )}
           </div>
+          {data.bookRules && (
+            <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground/60">
+              {data.bookRules.bannedWords && data.bookRules.bannedWords.length > 0 && (
+                <span className="rounded-full bg-destructive/5 px-2 py-0.5 text-destructive/70">禁用词 {data.bookRules.bannedWords.length}</span>
+              )}
+              {data.bookRules.preferredWords && data.bookRules.preferredWords.length > 0 && (
+                <span className="rounded-full bg-primary/5 px-2 py-0.5 text-primary/70">优先词 {data.bookRules.preferredWords.length}</span>
+              )}
+              {data.bookRules.domainTerms && data.bookRules.domainTerms.length > 0 && (
+                <span className="rounded-full bg-blue-500/5 px-2 py-0.5 text-blue-500/70">术语 {data.bookRules.domainTerms.length}</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -1005,6 +1035,16 @@ export function BookDetail({
                         {STATUS_CONFIG[ch.status]?.icon}
                         <span>{translateChapterStatus(ch.status, t)}</span>
                       </div>
+                      {ch.auditIssues && ch.auditIssues.length > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-600">
+                          {ch.auditIssues.length} 问题
+                        </span>
+                      )}
+                      {ch.detectionScore != null && ch.detectionScore > 0 && (
+                        <span className="text-[10px] text-muted-foreground/50">
+                          AI {(ch.detectionScore * 100).toFixed(0)}%
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1155,9 +1195,16 @@ export function BookDetail({
                   </td>
                   <td className="px-6 py-4 text-muted-foreground font-medium tabular-nums text-xs">{(ch.wordCount ?? 0).toLocaleString()}</td>
                   <td className="px-6 py-4">
-                    <div className={`inline-flex items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
-                      {STATUS_CONFIG[ch.status]?.icon}
-                      {translateChapterStatus(ch.status, t)}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <div className={`inline-flex items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-tight ${STATUS_CONFIG[ch.status]?.color ?? "bg-muted text-muted-foreground"}`}>
+                        {STATUS_CONFIG[ch.status]?.icon}
+                        {translateChapterStatus(ch.status, t)}
+                      </div>
+                      {ch.auditIssues && ch.auditIssues.length > 0 && (
+                        <span className="inline-flex items-center rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold text-amber-600">
+                          {ch.auditIssues.length}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-6 py-4 text-right">

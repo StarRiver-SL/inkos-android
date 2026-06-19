@@ -12,14 +12,20 @@ export function createPlayDB(runDir: string): PlayGraphDB {
   try {
     return new PlayDB(runDir);
   } catch (error) {
-    if (isMissingNodeSqliteError(error)) {
+    if (isSqliteUnavailableError(error)) {
       return new PlayFileDB(runDir);
     }
     throw error;
   }
 }
 
-function isMissingNodeSqliteError(error: unknown): boolean {
+function isSqliteUnavailableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes("node:sqlite") || message.includes("No such built-in module");
+  // node:sqlite module missing (Node < 22.5)
+  if (message.includes("node:sqlite") || message.includes("No such built-in module")) return true;
+  // SQLite file open failures on Android external storage (FUSE/SELinux)
+  if (message.includes("unable to open database file")) return true;
+  // Generic SQLite initialization errors
+  if (message.includes("ERR_SQLITE_ERROR")) return true;
+  return false;
 }

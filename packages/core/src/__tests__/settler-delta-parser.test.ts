@@ -130,4 +130,86 @@ describe("parseSettlerDeltaOutput", () => {
       }),
     ]);
   });
+
+  it("handles truncated JSON output missing closing fence", () => {
+    // Simulate maxTokens truncation: opening ```json is present but closing ``` is cut off
+    const truncatedContent = [
+      "=== POST_SETTLEMENT ===",
+      "本章推进了剧情。",
+      "",
+      "=== RUNTIME_STATE_DELTA ===",
+      "```json",
+      JSON.stringify({
+        chapter: 44,
+        currentStatePatch: {
+          currentLocation: "老城区钟楼内部",
+          currentGoal: "调查苏晚死亡真相",
+        },
+        hookOps: {
+          upsert: [
+            {
+              hookId: "shadow-trace",
+              startChapter: 43,
+              type: "mystery",
+              status: "progressing",
+              lastAdvancedChapter: 44,
+              expectedPayoff: "揭开Shadow的追踪技术",
+              payoffTiming: "near-term",
+              notes: "钟楼内发现新线索",
+            },
+          ],
+          mention: [],
+          resolve: [],
+          defer: [],
+        },
+        chapterSummary: {
+          chapter: 44,
+          title: "钟楼探秘",
+          characters: "林予安,苏青",
+          events: "进入钟楼调查",
+          stateChanges: "确立了战术同盟",
+          hookActivity: "shadow-trace advanced",
+          mood: "紧张",
+          chapterType: "主线推进",
+        },
+        notes: ["本章完成关键转折"],
+      }),
+      // Missing closing ``` — truncation happens here
+    ].join("\n");
+
+    const result = parseSettlerDeltaOutput(truncatedContent);
+    expect(result.postSettlement).toBe("本章推进了剧情。");
+    expect(result.runtimeStateDelta.chapter).toBe(44);
+    expect(result.runtimeStateDelta.currentStatePatch?.currentLocation).toBe("老城区钟楼内部");
+    expect(result.runtimeStateDelta.hookOps.upsert[0]?.hookId).toBe("shadow-trace");
+    expect(result.runtimeStateDelta.chapterSummary?.title).toBe("钟楼探秘");
+  });
+
+  it("handles raw JSON without any code fence markers", () => {
+    const rawJson = JSON.stringify({
+      chapter: 50,
+      currentStatePatch: {
+        currentGoal: "完成最终决战",
+      },
+      hookOps: {
+        upsert: [],
+        mention: ["main-plot"],
+        resolve: [],
+        defer: [],
+      },
+      notes: [],
+    });
+
+    const result = parseSettlerDeltaOutput([
+      "=== POST_SETTLEMENT ===",
+      "最终章完成。",
+      "",
+      "=== RUNTIME_STATE_DELTA ===",
+      rawJson,
+    ].join("\n"));
+
+    expect(result.postSettlement).toBe("最终章完成。");
+    expect(result.runtimeStateDelta.chapter).toBe(50);
+    expect(result.runtimeStateDelta.hookOps.mention).toEqual(["main-plot"]);
+  });
 });

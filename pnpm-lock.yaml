@@ -159,12 +159,24 @@ importers:
       '@capacitor/status-bar':
         specifier: ^8.0.2
         version: 8.0.2(@capacitor/core@8.4.0)
-      '@fontsource-variable/geist':
-        specifier: ^5.2.8
-        version: 5.2.9
       '@fontsource-variable/noto-sans-sc':
         specifier: ^5.2.10
         version: 5.2.10
+      '@fontsource-variable/noto-serif-sc':
+        specifier: ^5.2.10
+        version: 5.2.10
+      '@fontsource/ma-shan-zheng':
+        specifier: ^5.2.9
+        version: 5.2.9
+      '@fontsource/zcool-kuaile':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/zcool-qingke-huangyou':
+        specifier: ^5.2.8
+        version: 5.2.8
+      '@fontsource/zcool-xiaowei':
+        specifier: ^5.2.8
+        version: 5.2.8
       '@hono/node-server':
         specifier: 1.19.13
         version: 1.19.13(hono@4.12.25)
@@ -234,9 +246,6 @@ importers:
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0
-      use-chat-submit:
-        specifier: ^1.0.8
-        version: 1.0.8(react@19.2.4)
       zustand:
         specifier: ^5.0.12
         version: 5.0.12(@types/react@19.2.14)(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4))
@@ -1029,11 +1038,23 @@ packages:
   '@floating-ui/utils@0.2.11':
     resolution: {integrity: sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==}
 
-  '@fontsource-variable/geist@5.2.9':
-    resolution: {integrity: sha512-TP+QSBG3wxKGPE33CbMy/L0Nu3qvJ6Fy81Yc4LnQ95xH+i+cfEp8fyU8/kfV14YwszxIFPhnoMTbjL71waVpyQ==}
-
   '@fontsource-variable/noto-sans-sc@5.2.10':
     resolution: {integrity: sha512-zdk10i5HrDQTXI7ldD61zToX1fsgig8vDTsu7zB48SXOitWfuX0e5viZAwnkHuhwh096PU6X6i1AyAsbBCISpA==}
+
+  '@fontsource-variable/noto-serif-sc@5.2.10':
+    resolution: {integrity: sha512-TRhuDxWAnqUUtRZFCy8aoJB3/7HsuCaW/4B3wBTE0hzE8QVapklTjE2aY7s/wXWFXHLdflYNroloZoXekoKClw==}
+
+  '@fontsource/ma-shan-zheng@5.2.9':
+    resolution: {integrity: sha512-5Pvpb5q6sq00/g+yLLE8iYWcsAqnoIqCloBsjN0bphkGWU3Wp3EfT0CgTsKOiLsPM8GN3AUP0ZaFM2/JR33C/g==}
+
+  '@fontsource/zcool-kuaile@5.2.8':
+    resolution: {integrity: sha512-pIeFNRM0rwrJkO+TP7WG+KXvqy0YFRrPecNNzHTNOQLYhxrqN67/wzyx3fH+Ky63Y/Am5heB5XIzsEx/Io+P4w==}
+
+  '@fontsource/zcool-qingke-huangyou@5.2.8':
+    resolution: {integrity: sha512-ChEhJ6tb8ss6x35JJUzwYhbrY3jJVTe9UlP/whHUjaTxqT683jJ35QobKYw6SP4c0nAmJrl74AYIqR8y5ysMgw==}
+
+  '@fontsource/zcool-xiaowei@5.2.8':
+    resolution: {integrity: sha512-HppFdc8Y0djYbSpK6FbMFhEaZJwfGE5yIKLN3d5q5V239NQxm3sULJjfbMYyAMKswhG6hNTtXQkt8lOl4OmoLA==}
 
   '@google/genai@1.50.0':
     resolution: {integrity: sha512-oHv7JfdI6SLUitERptYoHqpn4Y2wWyPOBfWtpw8kfKTqqEiMJpUC6SEtiQPogb55Ip8fymj4bxGnGBTVV/Z9Ew==}
@@ -7031,9 +7052,17 @@ snapshots:
 
   '@floating-ui/utils@0.2.11': {}
 
-  '@fontsource-variable/geist@5.2.9': {}
-
   '@fontsource-variable/noto-sans-sc@5.2.10': {}
+
+  '@fontsource-variable/noto-serif-sc@5.2.10': {}
+
+  '@fontsource/ma-shan-zheng@5.2.9': {}
+
+  '@fontsource/zcool-kuaile@5.2.8': {}
+
+  '@fontsource/zcool-qingke-huangyou@5.2.8': {}
+
+  '@fontsource/zcool-xiaowei@5.2.8': {}
 
   '@google/genai@1.50.0(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))':
     dependencies:

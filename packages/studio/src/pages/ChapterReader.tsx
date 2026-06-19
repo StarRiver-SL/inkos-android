@@ -56,11 +56,15 @@ interface Nav {
 }
 
 const READER_FONTS = [
-  { id: "song", label: "宋体", stack: '"Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", SimSun, serif', weight: 450, spacing: "0" },
+  { id: "song", label: "宋体", stack: '"Noto Serif SC Variable", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", SimSun, serif', weight: 450, spacing: "0" },
   { id: "hei", label: "黑体", stack: '"Noto Sans SC Variable", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif', weight: 400, spacing: "0" },
-  { id: "kai", label: "楷体", stack: 'KaiTi, "Kaiti SC", STKaiti, "Noto Serif CJK SC", serif', weight: 500, spacing: "0.025em" },
-  { id: "fangsong", label: "仿宋", stack: 'FangSong, STFangsong, "FangSong_GB2312", "Noto Serif CJK SC", serif', weight: 400, spacing: "0.04em" },
+  { id: "kai", label: "楷体", stack: '"Noto Serif SC Variable", KaiTi, "Kaiti SC", STKaiti, serif', weight: 500, spacing: "0.025em" },
+  { id: "fangsong", label: "仿宋", stack: '"Noto Serif SC Variable", FangSong, STFangsong, "FangSong_GB2312", serif', weight: 400, spacing: "0.04em" },
   { id: "serif", label: "雅致衬线", stack: 'var(--font-serif)', weight: 550, spacing: "0.012em" },
+  { id: "kuaile", label: "快乐体", stack: '"ZCOOL KuaiLe", "Noto Sans SC Variable", sans-serif', weight: 400, spacing: "0.02em" },
+  { id: "huangyou", label: "黄油体", stack: '"ZCOOL QingKe HuangYou", "Noto Sans SC Variable", sans-serif', weight: 400, spacing: "0.03em" },
+  { id: "xiaowei", label: "小薇体", stack: '"ZCOOL XiaoWei", "Noto Sans SC Variable", sans-serif', weight: 400, spacing: "0.015em" },
+  { id: "mashan", label: "手写体", stack: '"Ma Shan Zheng", "Noto Serif SC Variable", serif', weight: 400, spacing: "0.01em" },
 ] as const;
 
 type ReaderFontId = (typeof READER_FONTS)[number]["id"];

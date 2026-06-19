@@ -876,6 +876,11 @@ public class EmbeddedNodeService extends Service {
 
     private void writePublicRuntimeStatus(String json) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && !Environment.isExternalStorageManager()) {
+                Log.d(TAG, "Skipping public runtime status mirror: MANAGE_EXTERNAL_STORAGE not granted");
+                return;
+            }
             File publicStatusDir = resolvePublicStatusDir();
             if (publicStatusDir == null) {
                 return;

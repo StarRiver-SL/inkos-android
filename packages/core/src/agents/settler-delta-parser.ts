@@ -48,6 +48,64 @@ export function parseSettlerDeltaOutput(content: string): SettlerDeltaOutput {
 
 function stripCodeFence(value: string): string {
   const trimmed = value.trim();
+
+  // First try matching a complete fenced block (```...```)
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced?.[1]?.trim() ?? trimmed;
+  if (fenced?.[1]?.trim()) {
+    return fenced[1].trim();
+  }
+
+  // Truncated output: no closing ```. Strip opening fence marker.
+  const withoutOpeningFence = trimmed.replace(/^```(?:json)?\s*/i, "").trim();
+
+  // If it starts with { or [, the JSON was likely truncated by maxTokens.
+  // Try to find a valid JSON prefix — find the last "}" at depth 0.
+  if (withoutOpeningFence.startsWith("{") || withoutOpeningFence.startsWith("[")) {
+    const extracted = extractValidJsonPrefix(withoutOpeningFence);
+    if (extracted) return extracted;
+  }
+
+  return withoutOpeningFence;
+}
+
+/**
+ * Extract a valid JSON object prefix from a potentially truncated string.
+ * Finds the last position where a valid top-level object closes (depth reaches 0).
+ */
+function extractValidJsonPrefix(json: string): string {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i]!;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === "{" || char === "[") {
+      depth++;
+    } else if (char === "}" || char === "]") {
+      depth--;
+      if (depth === 0) {
+        return json.slice(0, i + 1);
+      }
+    }
+  }
+
+  return json;
 }

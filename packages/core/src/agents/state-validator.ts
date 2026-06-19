@@ -49,9 +49,52 @@ export class StateValidatorAgent extends BaseAgent {
 
     const langInstruction = language === "en"
       ? "Respond in English."
-      : "用中文回答。";
+      : "全程使用中文回答，包括分类标签（如 [矛盾]、[不支持的变更] 等）。";
 
-    const systemPrompt = `You are a continuity validator for a novel writing system. ${langInstruction}
+    const isZh = language === "zh";
+
+    const systemPrompt = isZh
+      ? `你是一个小说写作系统的连续性校验器。全程使用中文回答。
+
+给定章节文本和 truth 文件（状态卡 + 伏笔池）的变更，检查是否存在矛盾：
+
+1. 无叙事支撑的状态变更 — truth 文件说某事发生了，但章节正文没有描述
+2. 遗漏的状态变更 — 章节正文描述了某事发生，但 truth 文件没有记录
+3. 时间不可能性 — 角色在没有过渡的情况下移动位置，伤势在没有时间流逝的情况下愈合
+4. 伏笔异常 — 伏笔消失但未标记为已解决，或新伏笔在章节中没有依据
+5. 回溯性编辑 — truth 文件变更暗示某事发生在前一章，而非当前章
+6. 跨 truth 关键设定冲突 — 编号规则、名称、等级、身份、地点或关系标签与章节文本或权威上下文矛盾
+
+## 章末快照语义
+
+- 新的状态卡是章节末尾的快照，不是声称其值在整个章节中都成立。
+- 按时间顺序阅读章节。后面明确的过渡会覆盖前面的条件。
+- 更早的事件是历史证据，当章节后来改变该状态时不是矛盾。
+- 例如：之前收到消息并不与"手机物理隔离"的终态矛盾，如果角色后来关机并取出电池。
+- 只有当最终明确的章节状态与新状态卡冲突，或没有叙事过渡支持新的终态时，才报告矛盾。
+
+输出格式（简单，非 JSON）：
+- 包含一个独立的判定行：恰好 PASS 或 FAIL（该行不放其他内容）
+- 后续行：每行一条警告，可选 [类别] 前缀
+- 如果完全没有问题，直接输出：PASS
+
+示例：
+PASS
+[无支撑的变更] 状态卡说角色移动到了森林，但正文只显示了意图
+[次要] 伏笔 H03 推进了但正文描述简略
+
+或者如果有硬矛盾：
+FAIL
+[矛盾] 状态说角色已死但章节正文显示他们在说话
+[无支撑的变更] 新地点在正文中完全没有提及
+
+重要：只对与正文直接冲突的事实性矛盾输出 FAIL。不要对以下情况输出 FAIL：
+- 稍微超前于正文的推断
+- 状态卡没有捕获的缺失细节
+- 从正文合理的推断
+- 不与正文矛盾的伏笔管理差异
+这些应该是 PASS 附带警告，而不是 FAIL。`
+      : `You are a continuity validator for a novel writing system. ${langInstruction}
 
 Given the chapter text and the CHANGES made to truth files (state card + hooks pool), check for contradictions:
 
@@ -94,18 +137,9 @@ These should be warnings with PASS, not FAIL.`;
 
     const authorityBlock = this.buildAuthorityContextBlock(authorityContext);
 
-    const userPrompt = `Chapter ${chapterNumber} validation:
-
-${authorityBlock}
-
-## State Card Changes
-${stateDiff || "(no changes)"}
-
-## Hooks Pool Changes
-${hooksDiff || "(no changes)"}
-
-## Chapter Text (chronological; later explicit state changes override earlier conditions)
-${chapterContent}`;
+    const userPrompt = isZh
+      ? `第 ${chapterNumber} 章校验：\n\n${authorityBlock}\n\n## 状态卡变更\n${stateDiff || "（无变更）"}\n\n## 伏笔池变更\n${hooksDiff || "（无变更）"}\n\n## 章节正文（按时间顺序；后面明确的状态变化覆盖前面的条件）\n${chapterContent}`
+      : `Chapter ${chapterNumber} validation:\n\n${authorityBlock}\n\n## State Card Changes\n${stateDiff || "(no changes)"}\n\n## Hooks Pool Changes\n${hooksDiff || "(no changes)"}\n\n## Chapter Text (chronological; later explicit state changes override earlier conditions)\n${chapterContent}`;
 
     try {
       const response = await this.chat(

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from "react";
 import { fetchJson, postApi, deleteApi } from "../../hooks/use-api";
 import type { Theme } from "../../hooks/use-theme";
 import type { TFunction } from "../../hooks/use-i18n";
-import { useColors } from "../../hooks/use-colors";
 import { Lightbulb, X, Trash2, Plus, Link } from "lucide-react";
 
 export interface ScratchEntry {
@@ -20,8 +19,7 @@ export interface ScratchpadPanelProps {
   readonly onClose: () => void;
 }
 
-export function ScratchpadPanel({ bookId, theme, t, onClose }: ScratchpadPanelProps) {
-  const c = useColors(theme);
+export function ScratchpadPanel({ bookId, theme: _theme, t, onClose }: ScratchpadPanelProps) {
   const [entries, setEntries] = useState<ReadonlyArray<ScratchEntry>>([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState("");

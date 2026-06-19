@@ -1017,9 +1017,10 @@ export function createPlayStartTool(
       let seed: PlayOpeningSeedResult | null = null;
       let graph;
       if (existingTranscript.length === 0 && pipeline) {
-        const db = createPlayDB(store.runDir(world.id, runId));
+        let db: ReturnType<typeof createPlayDB> | undefined;
         let runner: ReturnType<NonNullable<PlayStartToolOptions["runnerFactory"]>> | PlayRunner | undefined;
         try {
+          db = createPlayDB(store.runDir(world.id, runId));
           const ctx = pipeline.createAgentContext("play");
           runner = options.runnerFactory?.({
             projectRoot,
@@ -1040,7 +1041,7 @@ export function createPlayStartTool(
           // Starting the world must stay fail-open when a model drifts.
         } finally {
           if (runner) closePlayRunner(runner);
-          closePlayDB(db);
+          if (db) closePlayDB(db);
         }
       }
 
@@ -1324,17 +1325,33 @@ export function createPlayStepTool(
       const target = { worldId, runId, world };
       onUpdate?.(textResult(`Advancing "${target.worldId}" / "${target.runId}"...`));
       const ctx = pipeline.createAgentContext("play");
-      const runner = options.runnerFactory?.({
-        projectRoot,
-        worldId: target.worldId,
-        runId: target.runId,
-        ctx,
-      }) ?? new PlayRunner({
-        projectRoot,
-        worldId: target.worldId,
-        runId: target.runId,
-        ctx,
-      });
+      let runner: PlayRunner;
+      try {
+        runner = (options.runnerFactory?.({
+          projectRoot,
+          worldId: target.worldId,
+          runId: target.runId,
+          ctx,
+        }) ?? new PlayRunner({
+          projectRoot,
+          worldId: target.worldId,
+          runId: target.runId,
+          ctx,
+        })) as PlayRunner;
+      } catch (err) {
+        const isZh = (target.world?.language ?? "zh") !== "en";
+        return textResult(
+          isZh
+            ? "（互动世界初始化失败，可能是本地存储权限问题。请重试或重新启动互动世界。）"
+            : "(Play world initialization failed, possibly a local storage permission issue. Please retry or restart the play world.)",
+          {
+            kind: "play_step_failed",
+            worldId: target.worldId,
+            runId: target.runId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
       let step: Awaited<ReturnType<typeof runner.step>>;
       try {
         step = await runner.step(input, { mode: options.playMode ?? world.mode });
@@ -1358,12 +1375,15 @@ export function createPlayStepTool(
         closePlayRunner(runner);
       }
 
-      const db = createPlayDB(store.runDir(target.worldId, target.runId));
+      let db: ReturnType<typeof createPlayDB> | undefined;
       let graph;
       try {
+        db = createPlayDB(store.runDir(target.worldId, target.runId));
         graph = db.snapshot();
+      } catch {
+        graph = undefined;
       } finally {
-        closePlayDB(db);
+        if (db) closePlayDB(db);
       }
       const currentState = await store.loadCurrentState(target.worldId, target.runId).catch(() => null);
 
@@ -1414,12 +1434,28 @@ export function createPlayReviseTool(
         return textResult("还没有可重做的互动世界。先用 play_start 开一局。");
       }
       const ctx = pipeline.createAgentContext("play");
-      const runner = options.runnerFactory?.({ projectRoot, worldId, runId, ctx }) ?? new PlayRunner({
-        projectRoot,
-        worldId,
-        runId,
-        ctx,
-      });
+      let runner: PlayRunner;
+      try {
+        runner = (options.runnerFactory?.({ projectRoot, worldId, runId, ctx }) ?? new PlayRunner({
+          projectRoot,
+          worldId,
+          runId,
+          ctx,
+        })) as PlayRunner;
+      } catch (err) {
+        const isZh = (world.language ?? "zh") !== "en";
+        return textResult(
+          isZh
+            ? "（互动世界初始化失败，可能是本地存储权限问题。请重试或重新启动互动世界。）"
+            : "(Play world initialization failed, possibly a local storage permission issue. Please retry or restart the play world.)",
+          {
+            kind: "play_revise_failed",
+            worldId,
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
       try {
         if (params.action === "restore_variant") {
           const turn = params.turn;
@@ -1469,12 +1505,15 @@ export function createPlayReviseTool(
           );
         }
 
-        const db = createPlayDB(store.runDir(worldId, runId));
+        let db: ReturnType<typeof createPlayDB> | undefined;
         let graph;
         try {
+          db = createPlayDB(store.runDir(worldId, runId));
           graph = db.snapshot();
+        } catch {
+          graph = undefined;
         } finally {
-          closePlayDB(db);
+          if (db) closePlayDB(db);
         }
         const currentState = await store.loadCurrentState(worldId, runId).catch(() => null);
 

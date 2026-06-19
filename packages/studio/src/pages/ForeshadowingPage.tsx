@@ -1,19 +1,23 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useApi, fetchJson, postApi, deleteApi } from "../hooks/use-api";
+import { appAlert } from "../lib/app-dialog";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { 
-  ChevronLeft, 
-  Plus, 
-  Trash2, 
-  RefreshCw, 
-  Eye, 
-  EyeOff, 
-  AlertCircle, 
-  CheckCircle, 
+import { StudioSelect } from "../components/StudioSelect";
+import { PageHero } from "../components/PageHero";
+import { StatCard } from "../components/StatCard";
+import { FormModal } from "../components/FormModal";
+import {
+  ChevronLeft,
+  Plus,
+  Trash2,
+  RefreshCw,
+  Eye,
+  EyeOff,
+  AlertCircle,
+  CheckCircle,
   Circle,
   Sparkles,
-  X,
   Target
 } from "lucide-react";
 
@@ -67,6 +71,8 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
   const [newItem, setNewItem] = useState({ content: "", plantedChapter: 0, importance: "medium" });
   const [filterType, setFilterType] = useState<string | null>(null);
   const [filterImportance, setFilterImportance] = useState<string | null>(null);
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [scanRange, setScanRange] = useState({ start: 1, end: 9999 });
 
   const fetchData = useCallback(async () => {
     try {
@@ -88,10 +94,13 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
   const handleScan = async () => {
     setScanning(true);
     try {
-      const result = await postApi(`/books/${bookId}/foreshadowing/scan`);
+      const result = await postApi(`/books/${bookId}/foreshadowing/scan`, {
+        chapterRange: { start: scanRange.start, end: scanRange.end }
+      });
       setData(result as ForeshadowData);
+      setShowScanModal(false);
     } catch (error) {
-      console.error("Failed to scan foreshadowing:", error);
+      await appAlert({ title: "扫描失败", message: `AI 扫描伏笔失败：${error instanceof Error ? error.message : "未知错误"}` });
     } finally {
       setScanning(false);
     }
@@ -110,7 +119,7 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
       setNewItem({ content: "", plantedChapter: 0, importance: "medium" });
       setShowAdd(false);
     } catch (error) {
-      console.error("Failed to add foreshadowing:", error);
+      await appAlert({ title: "操作失败", message: `添加伏笔失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
@@ -119,22 +128,25 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
       const result = await deleteApi(`/books/${bookId}/foreshadowing/${itemId}`);
       setData(result as ForeshadowData);
     } catch (error) {
-      console.error("Failed to delete foreshadowing:", error);
+      await appAlert({ title: "操作失败", message: `删除伏笔失败：${error instanceof Error ? error.message : "未知错误"}` });
     }
   };
 
-  const filteredItems = data.items.filter((item) => {
-    if (filterType && item.type !== filterType) return false;
-    if (filterImportance && item.importance !== filterImportance) return false;
-    return true;
-  });
+  const filteredItems = useMemo(() =>
+    data.items.filter((item) => {
+      if (filterType && item.type !== filterType) return false;
+      if (filterImportance && item.importance !== filterImportance) return false;
+      return true;
+    }),
+    [data.items, filterType, filterImportance],
+  );
 
-  const stats = {
+  const stats = useMemo(() => ({
     total: data.items.length,
     planted: data.items.filter((i) => i.type === "planted").length,
     resolved: data.items.filter((i) => i.type === "resolved").length,
     clues: data.items.filter((i) => i.type === "clue").length,
-  };
+  }), [data.items]);
 
   if (loading) {
     return (
@@ -158,59 +170,34 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
       </nav>
 
       {/* Hero Section */}
-      <section className="glass-panel relative overflow-hidden rounded-[2.5rem] p-6 sm:p-10 shadow-3d">
-        <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-4">
-            <div className="flex items-center gap-2.5 text-sm font-bold text-primary">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 shadow-inner">
-                <Target size={16} />
-              </div>
-              <span>FORESHADOWING</span>
-            </div>
-            <h1 className="text-4xl font-serif font-bold tracking-tight text-foreground sm:text-5xl">
-              伏笔追踪
-            </h1>
-            <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-              草蛇灰线，伏脉千里。记录下每一个微小的线索与伏笔，确保它们在最恰当的时机被回收，为读者带来意料之外、情理之中的震撼。
-            </p>
-          </div>
-          
-          <div className="flex flex-wrap gap-3">
-             <button
-               onClick={handleScan}
-               disabled={scanning}
-               className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
-             >
-               <Sparkles size={18} className={scanning ? "animate-spin" : ""} />
-               {scanning ? "AI 深度分析中..." : "AI 智能扫描"}
-             </button>
-             <button
-               onClick={() => setShowAdd(true)}
-               className="soft-pill inline-flex h-12 items-center justify-center gap-2 rounded-2xl px-6 text-sm font-bold text-foreground transition-all hover:border-primary/40"
-             >
-               <Plus size={18} />
-               手动记录
-             </button>
-          </div>
-        </div>
-        
-        {/* Decor */}
-        <div className="absolute -left-16 -bottom-16 h-64 w-64 rounded-full bg-accent/5 blur-3xl opacity-60" />
-      </section>
+      <PageHero
+        label="FORESHADOWING"
+        title="伏笔追踪"
+        description="草蛇灰线，伏脉千里。记录下每一个微小的线索与伏笔，确保它们在最恰当的时机被回收，为读者带来意料之外、情理之中的震撼。"
+      >
+        <button
+          onClick={() => setShowScanModal(true)}
+          disabled={scanning}
+          className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-6 text-sm font-bold text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+        >
+          <Sparkles size={18} className={scanning ? "animate-spin" : ""} />
+          {scanning ? "AI 深度分析中..." : "AI 智能扫描"}
+        </button>
+        <button
+          onClick={() => setShowAdd(true)}
+          className="soft-pill inline-flex h-12 items-center justify-center gap-2 rounded-2xl px-6 text-sm font-bold text-foreground transition-all hover:border-primary/40"
+        >
+          <Plus size={18} />
+          手动记录
+        </button>
+      </PageHero>
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 sm:gap-6">
-        {[
-          { label: "线索总数", value: stats.total, color: "text-foreground", bg: "bg-muted/50" },
-          { label: "已埋伏笔", value: stats.planted, color: "text-amber-500", bg: "bg-amber-500/10" },
-          { label: "已收伏笔", value: stats.resolved, color: "text-emerald-500", bg: "bg-emerald-500/10" },
-          { label: "关键线索", value: stats.clues, color: "text-blue-500", bg: "bg-blue-500/10" }
-        ].map((stat, i) => (
-          <div key={i} className={`paper-sheet flex flex-col items-center justify-center rounded-3xl p-5 text-center transition-all hover:-translate-y-1`}>
-             <div className={`text-3xl font-serif font-bold ${stat.color}`}>{stat.value}</div>
-             <div className="mt-1 text-[11px] font-bold uppercase tracking-widest text-muted-foreground/60">{stat.label}</div>
-          </div>
-        ))}
+        <StatCard value={stats.total} label="线索总数" valueClassName="text-foreground" />
+        <StatCard value={stats.planted} label="已埋伏笔" valueClassName="text-amber-500" />
+        <StatCard value={stats.resolved} label="已收伏笔" valueClassName="text-emerald-500" />
+        <StatCard value={stats.clues} label="关键线索" valueClassName="text-blue-500" />
       </div>
 
       {/* Main Content Area */}
@@ -301,6 +288,15 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
                         }`}>
                           重要性: {IMPORTANCE_LABELS[item.importance]}
                         </span>
+                        {item.strength && (
+                          <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold ${
+                            item.strength === 'strong' ? 'bg-emerald-500/10 text-emerald-600' :
+                            item.strength === 'medium' ? 'bg-amber-500/10 text-amber-600' :
+                            'bg-gray-500/10 text-gray-500'
+                          }`}>
+                            强度: {item.strength === 'strong' ? '强' : item.strength === 'medium' ? '中' : '弱'}
+                          </span>
+                        )}
                       </div>
                       <p className="text-base font-medium leading-relaxed text-foreground">
                         {item.content}
@@ -340,57 +336,11 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
 
       {/* Add Modal */}
       {showAdd && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4 backdrop-blur-xl fade-in"
-          onClick={() => setShowAdd(false)}
-        >
-          <div className="glass-panel w-full max-w-md overflow-hidden rounded-[2.5rem] shadow-3d" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-border/40 px-8 py-6">
-              <h2 className="text-2xl font-bold text-foreground">记录新伏笔</h2>
-              <button onClick={() => setShowAdd(false)} className="soft-pill flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="p-8 space-y-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">伏笔内容</label>
-                <textarea
-                  value={newItem.content}
-                  onChange={(e) => setNewItem({ ...newItem, content: e.target.value })}
-                  rows={4}
-                  autoFocus
-                  className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
-                  placeholder="描写你埋下的伏笔或提供的线索..."
-                />
-              </div>
-              
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">埋设章节</label>
-                  <input
-                    type="number"
-                    value={newItem.plantedChapter || ""}
-                    onChange={(e) => setNewItem({ ...newItem, plantedChapter: parseInt(e.target.value, 10) || 0 })}
-                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">重要程度</label>
-                  <select
-                    value={newItem.importance}
-                    onChange={(e) => setNewItem({ ...newItem, importance: e.target.value })}
-                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 appearance-none cursor-pointer"
-                  >
-                    {Object.entries(IMPORTANCE_LABELS).map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex gap-3 border-t border-border/40 bg-muted/20 px-8 py-6">
+        <FormModal
+          title="记录新伏笔"
+          onClose={() => setShowAdd(false)}
+          footer={
+            <>
               <button
                 onClick={() => setShowAdd(false)}
                 className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
@@ -403,6 +353,127 @@ export function ForeshadowingPage({ bookId, nav, theme: _theme, t: _t }: {
                 className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
               >
                 记录伏笔
+              </button>
+            </>
+          }
+        >
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">伏笔内容</label>
+            <textarea
+              value={newItem.content}
+              onChange={(e) => setNewItem({ ...newItem, content: e.target.value })}
+              rows={4}
+              autoFocus
+              className="w-full resize-none rounded-2xl border border-border/50 bg-background/50 p-4 text-sm font-medium leading-relaxed outline-none focus:border-primary/50 transition-all"
+              placeholder="描写你埋下的伏笔或提供的线索..."
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">埋设章节</label>
+              <input
+                type="number"
+                value={newItem.plantedChapter || ""}
+                onChange={(e) => setNewItem({ ...newItem, plantedChapter: parseInt(e.target.value, 10) || 0 })}
+                className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">重要程度</label>
+              <StudioSelect
+                value={newItem.importance}
+                onValueChange={(v) => setNewItem({ ...newItem, importance: v })}
+                options={Object.entries(IMPORTANCE_LABELS).map(([value, label]) => ({ value, label }))}
+              />
+            </div>
+          </div>
+        </FormModal>
+      )}
+
+      {/* 扫描范围选择模态框 */}
+      {showScanModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setShowScanModal(false)} />
+          <div className="relative w-full max-w-md rounded-[2rem] bg-background p-8 shadow-2xl">
+            <button
+              onClick={() => setShowScanModal(false)}
+              className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-secondary hover:bg-secondary/80 transition-colors"
+            >
+              <X size={18} />
+            </button>
+
+            <h2 className="text-xl font-bold text-foreground mb-6">选择扫描范围</h2>
+
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                AI 将分析所选章节范围内的伏笔和线索。不同次扫描的章节会按顺序合并显示。
+              </p>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">起始章节</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={scanRange.start}
+                    onChange={(e) => setScanRange({ ...scanRange, start: parseInt(e.target.value, 10) || 1 })}
+                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">结束章节</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={scanRange.end}
+                    onChange={(e) => setScanRange({ ...scanRange, end: parseInt(e.target.value, 10) || 9999 })}
+                    className="h-12 w-full rounded-2xl border border-border/50 bg-background/50 px-4 text-sm font-medium outline-none focus:border-primary/50 transition-all"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setScanRange({ start: 1, end: 10 })}
+                  className="px-3 py-1.5 rounded-full bg-secondary/50 text-xs font-medium hover:bg-secondary transition-colors"
+                >
+                  1-10章
+                </button>
+                <button
+                  onClick={() => setScanRange({ start: 11, end: 30 })}
+                  className="px-3 py-1.5 rounded-full bg-secondary/50 text-xs font-medium hover:bg-secondary transition-colors"
+                >
+                  11-30章
+                </button>
+                <button
+                  onClick={() => setScanRange({ start: 31, end: 50 })}
+                  className="px-3 py-1.5 rounded-full bg-secondary/50 text-xs font-medium hover:bg-secondary transition-colors"
+                >
+                  31-50章
+                </button>
+                <button
+                  onClick={() => setScanRange({ start: 1, end: 9999 })}
+                  className="px-3 py-1.5 rounded-full bg-secondary/50 text-xs font-medium hover:bg-secondary transition-colors"
+                >
+                  全部章节
+                </button>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6 pt-6 border-t border-border/40">
+              <button
+                onClick={() => setShowScanModal(false)}
+                className="soft-pill flex-1 h-12 rounded-2xl font-bold text-foreground"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleScan}
+                disabled={scanning}
+                className="flex-1 h-12 rounded-2xl bg-primary font-bold text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50 transition-all"
+              >
+                {scanning ? "分析中..." : "开始扫描"}
               </button>
             </div>
           </div>

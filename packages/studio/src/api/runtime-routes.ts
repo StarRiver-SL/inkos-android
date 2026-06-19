@@ -669,37 +669,93 @@ export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void 
     contextCompression: true,
   }));
 
-  app.get("/api/v1/token-diagnostics", (c) => {
+  app.get("/api/v1/token-diagnostics", async (c) => {
     const headroomStatus = headroom.getStatus();
+
+    // Scan real knowledge library stats from disk
+    const knowledgeRoot = join(root, "knowledge");
+    let totalSources = 0;
+    let totalChunks = 0;
+    let totalDbBytes = 0;
+    const scanDir = async (dir: string) => {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const libDir = join(dir, entry.name);
+          try {
+            const [sources, chunks] = await Promise.all([
+              readFile(join(libDir, "sources.json"), "utf-8").then(JSON.parse).catch(() => []),
+              readFile(join(libDir, "chunks.json"), "utf-8").then(JSON.parse).catch(() => []),
+            ]);
+            totalSources += sources.length;
+            totalChunks += chunks.length;
+          } catch { /* library not readable, skip */ }
+          try {
+            const libStat = await stat(join(libDir, "chunks.json"));
+            totalDbBytes += libStat.size;
+          } catch { /* file may not exist */ }
+        }
+      } catch { /* directory not found, no libraries */ }
+    };
+    await Promise.all([
+      scanDir(join(knowledgeRoot, "books")),
+      scanDir(join(knowledgeRoot, "project")),
+      scanDir(join(knowledgeRoot, "worlds")),
+    ]);
+
+    // Compute embedding status — local hash-based embedding (48-dim) is always available;
+    // external bge endpoint is not configured on this runtime.
+    const embeddingConfigured = Boolean(process.env.INKOS_EMBEDDING_ENDPOINT ?? process.env.INKOS_BGE_ENDPOINT);
+    const embeddingModel = process.env.INKOS_EMBEDDING_MODEL ?? (embeddingConfigured ? "external-bge" : "local-hash-48dim");
+
+    // Cache paths — prefer real .inkos/cache if it exists, otherwise use knowledge dir
+    const cacheDir = join(root, ".inkos", "cache");
+    const cachePath = cacheDir;
+    const fallbackPath = join(knowledgeRoot);
+    let sqliteAvailable = false;
+    try {
+      await stat(cacheDir);
+      sqliteAvailable = true;
+    } catch { /* cache dir does not exist yet */ }
+
     return c.json({
       diagnostics: {
         headroom: headroomStatus,
-      embedding: { configured: false, endpoint: null, model: "built-in", lastExternalOk: null, lastExternalAt: null, lastFallbackAt: null, lastError: null },
-      telemetry: {
-        semanticL1Hits: 0,
-        semanticL2Hits: 0,
-        semanticMisses: 0,
-        cacheSkippedCalls: 0,
-        ccrBlocksCompressed: headroomStatus.session.compressions,
-        originalChars: headroomStatus.session.originalChars,
-        optimizedChars: headroomStatus.session.compressedChars,
-        estimatedTokensSaved: headroomStatus.session.tokensSaved,
-        pipeline: headroomStatus.lastCompressionAt
-          ? [{ kind: "headroom-official", label: "Headroom MCP compression", at: Date.parse(headroomStatus.lastCompressionAt) }]
-          : [],
-      },
-      semanticCache: {
-        storage: { sqliteAvailable: true, path: join(root, "worlds"), fallbackPath: join(root, ".inkos", "cache") },
-        l1Entries: 0,
-        l1Limit: 0,
-        rowCount: 0,
-        dbBytes: 0,
-        fallbackRows: 0,
-        fallbackBytes: 0,
-        l3ArchiveBytes: 0,
-        hitRate: 0,
-        lastMaintenanceAt: null,
-      },
+        embedding: {
+          configured: embeddingConfigured,
+          endpoint: process.env.INKOS_EMBEDDING_ENDPOINT ?? process.env.INKOS_BGE_ENDPOINT ?? null,
+          model: embeddingModel,
+          lastExternalOk: embeddingConfigured ? true : null,
+          lastExternalAt: null,
+          lastFallbackAt: embeddingConfigured ? null : new Date().toISOString(),
+          lastError: null,
+        },
+        telemetry: {
+          semanticL1Hits: 0,
+          semanticL2Hits: 0,
+          semanticMisses: 0,
+          cacheSkippedCalls: 0,
+          ccrBlocksCompressed: headroomStatus.session.compressions,
+          originalChars: headroomStatus.session.originalChars,
+          optimizedChars: headroomStatus.session.compressedChars,
+          estimatedTokensSaved: headroomStatus.session.tokensSaved,
+          pipeline: headroomStatus.lastCompressionAt
+            ? [{ kind: "headroom-official", label: "Headroom MCP compression", at: Date.parse(headroomStatus.lastCompressionAt) }]
+            : [],
+        },
+        semanticCache: {
+          storage: { sqliteAvailable, path: cachePath, fallbackPath },
+          l1Entries: 0,
+          l1Limit: 0,
+          rowCount: totalChunks,
+          dbBytes: totalDbBytes,
+          fallbackRows: totalSources,
+          fallbackBytes: 0,
+          l3ArchiveBytes: 0,
+          hitRate: 0,
+          lastMaintenanceAt: null,
+        },
       },
     });
   });
@@ -746,12 +802,99 @@ export function registerRuntimeRoutes(app: Hono, deps: RuntimeRoutesDeps): void 
     );
   });
 
-  app.post("/api/v1/token-cache/maintenance", (c) => c.json({
-    ok: true,
-    removedRows: 0,
-    archivedRows: 0,
-    message: "Official 1.5 context storage does not require manual cache maintenance.",
-  }));
+  app.post("/api/v1/token-cache/maintenance", async (c) => {
+    const knowledgeRoot = join(root, "knowledge");
+    let removedRows = 0;
+    let archivedRows = 0;
+    const actions: string[] = [];
+
+    const cleanLibrary = async (libDir: string) => {
+      try {
+        const sourcesPath = join(libDir, "sources.json");
+        const chunksPath = join(libDir, "chunks.json");
+
+        const [sourcesRaw, chunksRaw] = await Promise.all([
+          readFile(sourcesPath, "utf-8").catch(() => "[]"),
+          readFile(chunksPath, "utf-8").catch(() => "[]"),
+        ]);
+        const sources: Array<{ path?: string; id?: string }> = JSON.parse(sourcesRaw);
+        const chunks: Array<{ sourceId?: string; id?: string }> = JSON.parse(chunksRaw);
+
+        if (!sources.length && !chunks.length) return;
+
+        // Build set of valid source IDs
+        const validSourceIds = new Set(sources.map((s) => s.id).filter(Boolean));
+
+        // Remove chunks whose sourceId no longer exists
+        const orphanChunks = chunks.filter((ch) => ch.sourceId && !validSourceIds.has(ch.sourceId));
+        if (orphanChunks.length > 0) {
+          const orphanIds = new Set(orphanChunks.map((ch) => ch.id));
+          const cleanedChunks = chunks.filter((ch) => !orphanIds.has(ch.id));
+          await writeFile(chunksPath, JSON.stringify(cleanedChunks, null, 2), "utf-8");
+          removedRows += orphanChunks.length;
+          actions.push(`${libDir}: removed ${orphanChunks.length} orphan chunks`);
+        }
+
+        // Deduplicate chunks by content hash
+        const seen = new Set<string>();
+        const dedupedChunks = chunks.filter((ch) => {
+          const key = `${ch.sourceId}:${JSON.stringify(ch)}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        const dupCount = chunks.length - dedupedChunks.length;
+        if (dupCount > 0) {
+          await writeFile(chunksPath, JSON.stringify(dedupedChunks, null, 2), "utf-8");
+          removedRows += dupCount;
+          actions.push(`${libDir}: deduplicated ${dupCount} chunks`);
+        }
+      } catch { /* library not found or not readable */ }
+    };
+
+    const scanAndClean = async (dir: string) => {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        await Promise.all(
+          entries.filter((e) => e.isDirectory()).map((e) => cleanLibrary(join(dir, e.name))),
+        );
+      } catch { /* directory not found */ }
+    };
+
+    await Promise.all([
+      scanAndClean(join(knowledgeRoot, "books")),
+      scanAndClean(join(knowledgeRoot, "project")),
+      scanAndClean(join(knowledgeRoot, "worlds")),
+    ]);
+
+    // Clean old headroom cache entries if cache dir exists
+    const cacheDir = join(root, ".inkos", "cache");
+    try {
+      const cacheFiles = await readdir(cacheDir);
+      const now = Date.now();
+      const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+      for (const file of cacheFiles) {
+        try {
+          const filePath = join(cacheDir, file);
+          const fileStat = await stat(filePath);
+          if (now - fileStat.mtimeMs > MAX_AGE_MS) {
+            await rm(filePath, { force: true });
+            archivedRows++;
+          }
+        } catch { /* skip unreadable files */ }
+      }
+      if (archivedRows > 0) {
+        actions.push(`cache: cleaned ${archivedRows} stale cache files (>7 days)`);
+      }
+    } catch { /* cache dir doesn't exist */ }
+
+    return c.json({
+      ok: true,
+      removedRows,
+      archivedRows,
+      message: actions.length > 0 ? actions.join("; ") : "缓存状态良好，无需清理。",
+    });
+  });
 
   app.get("/api/v1/runtime/node-info", async (c) => {
     const sqlite = { available: false, databaseSync: false, exports: [] as string[], error: null as string | null };

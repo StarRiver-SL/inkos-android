@@ -1,48 +1,60 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback, Suspense, lazy } from "react";
 import { createPortal } from "react-dom";
 import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
-import { Dashboard } from "./pages/Dashboard";
-import { ChatPage } from "./pages/ChatPage";
-import { BookDetail } from "./pages/BookDetail";
-import { ChapterReader } from "./pages/ChapterReader";
-import { Analytics } from "./pages/Analytics";
-import { ServiceListPage } from "./pages/ServiceListPage";
-import { ServiceDetailPage } from "./pages/ServiceDetailPage";
-import { ProjectSettings } from "./pages/ProjectSettings";
-import { TruthFiles } from "./pages/TruthFiles";
-import { DaemonControl } from "./pages/DaemonControl";
-import { LogViewer } from "./pages/LogViewer";
-import { GenreManager } from "./pages/GenreManager";
-import { StyleManager } from "./pages/StyleManager";
-import { ImportManager } from "./pages/ImportManager";
-import { ImageLibraryPage } from "./pages/ImageLibraryPage";
-import { ImageGenPage } from "./pages/ImageGenPage";
-import { KnowledgePage } from "./pages/KnowledgePage";
-import { TimelinePage } from "./pages/TimelinePage";
-import { SchedulePage } from "./pages/SchedulePage";
-import { CharacterGraphPage } from "./pages/CharacterGraphPage";
-import { WorldSettingsPage } from "./pages/WorldSettingsPage";
-import { ForeshadowingPage } from "./pages/ForeshadowingPage";
-import { EndingsPage } from "./pages/EndingsPage";
-import { RadarView } from "./pages/RadarView";
-import { DoctorView } from "./pages/DoctorView";
-import { LanguageSelector } from "./pages/LanguageSelector";
+
+const Dashboard       = lazy(() => import("./pages/Dashboard").then(m => ({ default: m.Dashboard })));
+const ChatPage        = lazy(() => import("./pages/ChatPage").then(m => ({ default: m.ChatPage })));
+const BookDetail      = lazy(() => import("./pages/BookDetail").then(m => ({ default: m.BookDetail })));
+const ChapterReader   = lazy(() => import("./pages/ChapterReader").then(m => ({ default: m.ChapterReader })));
+const Analytics       = lazy(() => import("./pages/Analytics").then(m => ({ default: m.Analytics })));
+const ServiceListPage = lazy(() => import("./pages/ServiceListPage").then(m => ({ default: m.ServiceListPage })));
+const ServiceDetailPage = lazy(() => import("./pages/ServiceDetailPage").then(m => ({ default: m.ServiceDetailPage })));
+const ProjectSettings = lazy(() => import("./pages/ProjectSettings").then(m => ({ default: m.ProjectSettings })));
+const TruthFiles      = lazy(() => import("./pages/TruthFiles").then(m => ({ default: m.TruthFiles })));
+const DaemonControl   = lazy(() => import("./pages/DaemonControl").then(m => ({ default: m.DaemonControl })));
+const LogViewer       = lazy(() => import("./pages/LogViewer").then(m => ({ default: m.LogViewer })));
+const GenreManager    = lazy(() => import("./pages/GenreManager").then(m => ({ default: m.GenreManager })));
+const StyleManager    = lazy(() => import("./pages/StyleManager").then(m => ({ default: m.StyleManager })));
+const ImportManager   = lazy(() => import("./pages/ImportManager").then(m => ({ default: m.ImportManager })));
+const ImageLibraryPage = lazy(() => import("./pages/ImageLibraryPage").then(m => ({ default: m.ImageLibraryPage })));
+const ImageGenPage    = lazy(() => import("./pages/ImageGenPage").then(m => ({ default: m.ImageGenPage })));
+const KnowledgePage   = lazy(() => import("./pages/KnowledgePage").then(m => ({ default: m.KnowledgePage })));
+const TimelinePage    = lazy(() => import("./pages/TimelinePage").then(m => ({ default: m.TimelinePage })));
+const SchedulePage    = lazy(() => import("./pages/SchedulePage").then(m => ({ default: m.SchedulePage })));
+const CharacterGraphPage = lazy(() => import("./pages/CharacterGraphPage").then(m => ({ default: m.CharacterGraphPage })));
+const WorldSettingsPage  = lazy(() => import("./pages/WorldSettingsPage").then(m => ({ default: m.WorldSettingsPage })));
+const ForeshadowingPage  = lazy(() => import("./pages/ForeshadowingPage").then(m => ({ default: m.ForeshadowingPage })));
+const EndingsPage     = lazy(() => import("./pages/EndingsPage").then(m => ({ default: m.EndingsPage })));
+const RadarView       = lazy(() => import("./pages/RadarView").then(m => ({ default: m.RadarView })));
+const DoctorView      = lazy(() => import("./pages/DoctorView").then(m => ({ default: m.DoctorView })));
+const LanguageSelector = lazy(() => import("./pages/LanguageSelector").then(m => ({ default: m.LanguageSelector })));
+
+function PageLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center p-8">
+      <div className="h-8 w-8 rounded-full border-[3px] border-primary/20 border-t-primary animate-spin" />
+    </div>
+  );
+}
 import { BookSidebar, BookSidebarToggle } from "./components/chat/BookSidebar";
 import { useSSE } from "./hooks/use-sse";
 import { useSessionEvents } from "./hooks/use-session-events";
 import { useTheme } from "./hooks/use-theme";
+import { useStyle } from "./hooks/use-style";
+import { StylePanel } from "./components/StylePanel";
 import { publishLanguageChange, useI18n } from "./hooks/use-i18n";
 import { fetchJson, postApi, putApi, useApi } from "./hooks/use-api";
 import { buildApiUrl } from "./lib/api-url";
-import { AppDialogProvider } from "./lib/app-dialog";
+import { AppDialogProvider, appAlert } from "./lib/app-dialog";
 import {
   ensureEmbeddedNodeRunning,
   requestBatteryOptimizationExemption,
   resetEmbeddedNodeRuntime,
   updateAndroidTaskNotification,
+  checkNodeStatusFromNative,
 } from "./lib/android-runtime-plugin";
 import { isNativeRuntime } from "./lib/mobile-runtime";
 import {
@@ -322,11 +334,18 @@ interface MaintenanceScanPayload {
 async function readAndroidTextFile(path: string): Promise<string | null> {
   if (!isNativeRuntime()) return null;
   try {
-    const result = await Filesystem.readFile({
-      path,
-      directory: Directory.Data,
-      encoding: Encoding.UTF8,
-    });
+    // GeckoView may not connect the Capacitor bridge properly, causing
+    // Filesystem.readFile() to hang forever. Use a hard timeout to prevent
+    // the entire refresh cycle from blocking.
+    const result = await Promise.race([
+      Filesystem.readFile({
+        path,
+        directory: Directory.Data,
+        encoding: Encoding.UTF8,
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+    ]);
+    if (!result) return null;
     if (typeof result.data === "string") return normalizeAndroidFileText(result.data);
     return normalizeAndroidFileText(await result.data.text());
   } catch {
@@ -562,7 +581,7 @@ function RuntimeStatusButton() {
 
   const refresh = async () => {
     setStatus({
-      node: { state: "checking", message: "正在检测 127.0.0.1:4567..." },
+      node: { state: "checking", message: "正在检测内置 Node..." },
       localTools: { state: "checking", implemented: 0, total: 0, message: "正在检测本地工具..." },
       storage: { state: "checking", path: null, message: "正在检测本地保存..." },
     });
@@ -573,6 +592,27 @@ function RuntimeStatusButton() {
       storage: { state: "unavailable", path: null, message: "本地保存状态未知。" },
     };
 
+    // 1) Check Node status via Java-side /api/health (no Node proxy, no Capacitor bridge).
+    //    LocalAssetServer reads runtime-status.json directly in Java and returns JSON.
+    try {
+      const healthUrl = buildApiUrl("/health");
+      if (healthUrl) {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 3000);
+        const healthRes = await fetch(healthUrl, { signal: controller.signal, cache: "no-store" });
+        window.clearTimeout(timeout);
+        if (healthRes.ok) {
+          const body = await healthRes.json() as { ok?: boolean; state?: string };
+          if (body.ok || body.state === "running") {
+            next.node = { state: "running", message: "Node 后端运行中。" };
+          }
+        }
+      }
+    } catch {
+      // Java health check failed — fall through to HTTP probe.
+    }
+
+    // 2) Try HTTP probe via proxy — may confirm or override the native state.
     try {
       const url = buildApiUrl("/project");
       if (url) {
@@ -581,16 +621,16 @@ function RuntimeStatusButton() {
         const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
         window.clearTimeout(timeout);
         if (response.ok) {
-          next.node = { state: "running", message: "Node API 已启动并响应 127.0.0.1:4567。" };
-        } else {
-          next.node = { state: "offline", message: `Node API 有响应但返回 HTTP ${response.status}。` };
+          next.node = { state: "running", message: "Node API 已启动并响应。" };
+        } else if (next.node.state !== "running") {
+          next.node = { state: "offline", message: `Node API 返回 HTTP ${response.status}。` };
         }
       }
     } catch {
-      next.node = { state: "offline", message: "Node API 未响应，主界面不会因此闪退。" };
+      // Fetch failed — health check from step 1 already determines the result.
     }
 
-    const diagnostics = await readAndroidRuntimeDiagnostics();
+    // 3) Also try the /runtime/status endpoint for extra detail.
     try {
       const runtime = await fetchJson<{
         state?: string;
@@ -608,24 +648,11 @@ function RuntimeStatusButton() {
             : `${next.node.message} 原生状态：${nativeState}。`,
         };
       }
-    } catch {
-      if (diagnostics.status?.state || diagnostics.output) {
-        const nativeStateMessage = diagnostics.status?.state === "status-legacy"
-          ? "原生状态：旧版状态文件，Node API 探测结果优先。"
-          : diagnostics.status?.state ? `原生状态：${diagnostics.status.state}` : "";
-        const parts = [
-          next.node.message,
-          nativeStateMessage,
-          diagnostics.status?.message ?? "",
-          diagnostics.output ? `Node 输出：${diagnostics.output}` : "",
-        ].filter(Boolean);
-        next.node = {
-          ...next.node,
-          nativeState: diagnostics.status?.state,
-          nodeOutput: diagnostics.output,
-          message: parts.join("\n"),
-        };
+      if (nativeState === "running") {
+        next.node = { ...next.node, state: "running" };
       }
+    } catch {
+      // /runtime/status fetch also failed — use whatever state we already have.
     }
 
     try {
@@ -670,6 +697,14 @@ function RuntimeStatusButton() {
 
   useEffect(() => {
     void refresh();
+    // Node service starts 1.5s after Activity launch and takes a few more seconds to become ready.
+    // Auto-retry so the status updates without requiring the user to manually click refresh.
+    const t1 = window.setTimeout(() => void refresh(), 3500);
+    const t2 = window.setTimeout(() => void refresh(), 9000);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
   }, []);
 
   const handleEnsureNode = async () => {
@@ -683,9 +718,19 @@ function RuntimeStatusButton() {
   };
 
   const handleBatteryPermission = async () => {
-    setActionStatus("正在打开后台保活权限设置...");
-    const ok = await requestBatteryOptimizationExemption();
-    setActionStatus(ok ? "请在系统弹窗或设置页允许 InkOS 保持后台运行。" : "无法自动打开权限页面，请在系统设置里关闭本应用的电池优化。");
+    try {
+      setActionStatus("正在打开后台保活权限设置...");
+      const ok = await requestBatteryOptimizationExemption();
+      if (ok) {
+        setActionStatus("请在系统弹窗或设置页允许 InkOS 保持后台运行。");
+      } else {
+        setActionStatus("");
+        await appAlert({ title: "无法打开", message: "无法自动打开权限页面。请手动进入系统设置 → 电池 → 后台耗电管理，找到 InkOS 并允许后台运行。" });
+      }
+    } catch (error) {
+      setActionStatus("");
+      await appAlert({ title: "操作失败", message: `打开后台权限设置失败：${error instanceof Error ? error.message : "未知错误"}。请手动在系统设置中关闭本应用的电池优化。` });
+    }
   };
 
   const summary =
@@ -707,6 +752,7 @@ function RuntimeStatusButton() {
       <div className="flex min-h-[100dvh] w-full items-center justify-center px-4 py-[calc(env(safe-area-inset-top)+1rem)] pb-[calc(env(safe-area-inset-bottom)+1rem)]">
         <div
           className="glass-panel fade-in w-full max-w-md overflow-hidden rounded-[2rem] border border-border/70 bg-card/95 shadow-2xl shadow-primary/10"
+          onClick={(e) => e.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
         >
           <div className="flex items-start justify-between gap-4 px-5 pt-5 sm:px-6 sm:pt-6">
@@ -1580,6 +1626,7 @@ export function App() {
   const { route, setRoute } = useHashRoute();
   const sse = useSSE();
   const { theme, setTheme } = useTheme();
+  const styleApi = useStyle();
   const { t, lang: currentLang } = useI18n();
   const { data: project, error: projectError, refetch: refetchProject } = useApi<{ language: string; languageExplicit: boolean }>("/project");
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
@@ -1587,7 +1634,7 @@ export function App() {
   const [startupRetryCount, setStartupRetryCount] = useState(0);
   const [startupDiagnostics, setStartupDiagnostics] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const closeSidebar = () => setSidebarOpen(false);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
 
   const isDark = theme === "dark";
 
@@ -1595,15 +1642,25 @@ export function App() {
     document.documentElement.classList.toggle("dark", isDark);
   }, [isDark]);
 
+  // project 加载完成后，等待 SSE 连接就绪，超时 8 秒则直接放行
+  useEffect(() => {
+    if (!project || sse.connected) return;
+    const timer = window.setTimeout(() => setReady(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [project, sse.connected]);
+
   useEffect(() => {
     if (project) {
       setStartupRetryCount(0);
       if (!project.languageExplicit) {
         setShowLanguageSelector(true);
       }
-      setReady(true);
+      // 等待 SSE 连接就绪后再进入主界面，避免出现"重连中"闪烁
+      if (sse.connected) {
+        setReady(true);
+      }
     }
-  }, [project]);
+  }, [project, sse.connected]);
 
   useEffect(() => {
     if (!isNativeRuntime()) return;
@@ -1671,7 +1728,7 @@ export function App() {
 
   useSessionEvents(sse, route, setRoute);
 
-  const nav = {
+  const nav = useMemo(() => ({
     toDashboard: () => { setRoute({ page: "dashboard" }); closeSidebar(); },
     toChat: () => { setRoute({ page: "chat" }); closeSidebar(); },
     toBook: (bookId: string) => { setRoute({ page: "book", bookId }); closeSidebar(); },
@@ -1700,7 +1757,7 @@ export function App() {
     toImages: () => { setRoute({ page: "images" }); closeSidebar(); },
     toRadar: () => { setRoute({ page: "radar" }); closeSidebar(); },
     toDoctor: () => { setRoute({ page: "doctor" }); closeSidebar(); },
-  };
+  }), [setRoute, closeSidebar]);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage =
@@ -1715,7 +1772,11 @@ export function App() {
       <div className="min-h-screen bg-background flex items-center justify-center px-6">
         <div className="max-w-sm text-center">
           <div className="mx-auto w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
-          <div className="mt-5 text-base font-semibold text-foreground">正在启动本机 Node 后端</div>
+          <div className="mt-5 text-base font-semibold text-foreground">
+            {isNativeRuntime() && !sse.connected
+              ? (currentLang === "zh" ? "正在连接后端服务..." : "Connecting to backend...")
+              : "正在启动本机 Node 后端"}
+          </div>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
             首次打开需要解压并启动内置 Node.js 服务，请稍等。
             {startupRetryCount > 0 ? ` 已检测 ${startupRetryCount} 次。` : ""}
@@ -1769,13 +1830,15 @@ export function App() {
 
   if (showLanguageSelector) {
     return (
-      <LanguageSelector
-        onSelect={async (lang) => {
-          await postApi("/project/language", { language: lang });
-          setShowLanguageSelector(false);
-          refetchProject();
-        }}
-      />
+      <Suspense fallback={<PageLoading />}>
+        <LanguageSelector
+          onSelect={async (lang) => {
+            await postApi("/project/language", { language: lang });
+            setShowLanguageSelector(false);
+            refetchProject();
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -1851,11 +1914,13 @@ export function App() {
             >
               {isDark ? <Sun size={14} /> : <Moon size={14} />}
             </button>
+            <StylePanel {...styleApi} />
           </div>
         </header>
 
         {/* Main Content Area */}
         <main className="app-shell-main mobile-scroll-area mobile-safe-bottom flex-1 relative overflow-y-auto scroll-smooth">
+          <Suspense fallback={<PageLoading />}>
           {route.page === "dashboard" && (
             <div className="max-w-6xl mx-auto px-3 py-4 sm:px-4 sm:py-6 md:px-10 md:py-10 lg:py-12 fade-in">
               <Dashboard nav={nav} sse={sse} theme={theme} t={t} />
@@ -2012,6 +2077,7 @@ export function App() {
               <DoctorView nav={nav} theme={theme} t={t} />
             </div>
           )}
+          </Suspense>
         </main>
       </div>
     </div>

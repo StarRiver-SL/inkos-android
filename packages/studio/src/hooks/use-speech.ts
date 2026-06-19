@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { isNativeRuntime } from "../lib/mobile-runtime";
 
 export interface SpeechOptions {
   readonly rate?: number;    // 0.5 - 2.0, default 1.0
@@ -14,6 +15,8 @@ export interface SpeechState {
   readonly totalSentences: number;
 }
 
+const useNativeTts = isNativeRuntime();
+
 export function useSpeech() {
   const [state, setState] = useState<SpeechState>({
     isSpeaking: false,
@@ -25,15 +28,62 @@ export function useSpeech() {
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const sentencesRef = useRef<string[]>([]);
   const currentIndexRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef(false);
 
   // Check if speech synthesis is supported
-  const isSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+  const isSupported = useNativeTts
+    ? true  // Android always has TTS via native API
+    : typeof window !== "undefined" && "speechSynthesis" in window;
 
-  // Get available voices
+  // ── Native TTS (Android) ──
+  const nativeSpeak = useCallback(async (text: string, options?: SpeechOptions) => {
+    abortRef.current = false;
+    try {
+      await fetch("/__cap_tts/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, rate: options?.rate ?? 1.0 }),
+      });
+      setState({ isSpeaking: true, isPaused: false, currentSentence: 0, totalSentences: 0 });
+
+      // Poll status for progress
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      pollTimerRef.current = setInterval(async () => {
+        if (abortRef.current) return;
+        try {
+          const res = await fetch("/__cap_tts/status");
+          const data = await res.json() as { speaking: boolean; paused: boolean; progress: number; totalChars: number; spokenChars: number; ready: boolean };
+          if (!data.ready) {
+            setState((prev) => ({ ...prev, isSpeaking: false, isPaused: false }));
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+            return;
+          }
+          setState((prev) => ({
+            ...prev,
+            isSpeaking: data.speaking,
+            isPaused: data.paused,
+            currentSentence: data.spokenChars,
+            totalSentences: data.totalChars,
+          }));
+          if (!data.speaking && !data.paused) {
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+          }
+        } catch {
+          // polling error, ignore
+        }
+      }, 300);
+    } catch (e) {
+      console.error("Native TTS speak failed:", e);
+    }
+  }, []);
+
+  // Get available voices (native TTS has no voice selection API exposed)
   const getVoices = useCallback((): SpeechSynthesisVoice[] => {
-    if (!isSupported) return [];
+    if (useNativeTts) return [];
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return [];
     return window.speechSynthesis.getVoices();
-  }, [isSupported]);
+  }, []);
 
   // Get Chinese voices
   const getChineseVoices = useCallback((): SpeechSynthesisVoice[] => {
@@ -44,7 +94,6 @@ export function useSpeech() {
 
   // Split text into sentences
   const splitSentences = useCallback((text: string): string[] => {
-    // Chinese sentence splitting: 。！？；
     const sentences = text
       .split(/(?<=[。！？；\n])/)
       .map((s) => s.trim())
@@ -52,14 +101,9 @@ export function useSpeech() {
     return sentences;
   }, []);
 
-  // Speak text
-  const speak = useCallback((text: string, options?: SpeechOptions) => {
-    if (!isSupported) {
-      console.warn("Speech synthesis not supported");
-      return;
-    }
-
-    // Cancel any ongoing speech
+  // ── Web Speech API (Desktop) ──
+  const webSpeak = useCallback((text: string, options?: SpeechOptions) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
 
     const sentences = splitSentences(text);
@@ -73,13 +117,11 @@ export function useSpeech() {
       totalSentences: sentences.length,
     });
 
-    // Speak each sentence sequentially
     const speakNext = (index: number) => {
       if (index >= sentences.length) {
         setState((prev) => ({ ...prev, isSpeaking: false, isPaused: false }));
         return;
       }
-
       currentIndexRef.current = index;
       setState((prev) => ({ ...prev, currentSentence: index }));
 
@@ -88,16 +130,10 @@ export function useSpeech() {
       utterance.pitch = options?.pitch ?? 1.0;
       utterance.volume = options?.volume ?? 1.0;
 
-      // Use Chinese voice if available
       const chineseVoice = options?.voice ?? getChineseVoices()[0];
-      if (chineseVoice) {
-        utterance.voice = chineseVoice;
-      }
+      if (chineseVoice) utterance.voice = chineseVoice;
 
-      utterance.onend = () => {
-        speakNext(index + 1);
-      };
-
+      utterance.onend = () => speakNext(index + 1);
       utterance.onerror = (event) => {
         if (event.error !== "canceled") {
           console.error("Speech error:", event.error);
@@ -110,42 +146,63 @@ export function useSpeech() {
     };
 
     speakNext(0);
-  }, [isSupported, splitSentences, getChineseVoices]);
+  }, [splitSentences, getChineseVoices]);
 
-  // Pause speech
+  // ── Public API (unified) ──
+  const speak = useCallback((text: string, options?: SpeechOptions) => {
+    if (useNativeTts) {
+      nativeSpeak(text, options);
+    } else {
+      webSpeak(text, options);
+    }
+  }, [useNativeTts, nativeSpeak, webSpeak]);
+
   const pause = useCallback(() => {
-    if (!isSupported) return;
-    window.speechSynthesis.pause();
-    setState((prev) => ({ ...prev, isPaused: true }));
-  }, [isSupported]);
+    if (useNativeTts) {
+      fetch("/__cap_tts/pause", { method: "POST" }).catch(() => {});
+      setState((prev) => ({ ...prev, isPaused: true }));
+    } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.pause();
+      setState((prev) => ({ ...prev, isPaused: true }));
+    }
+  }, [useNativeTts]);
 
-  // Resume speech
   const resume = useCallback(() => {
-    if (!isSupported) return;
-    window.speechSynthesis.resume();
-    setState((prev) => ({ ...prev, isPaused: false }));
-  }, [isSupported]);
+    if (useNativeTts) {
+      fetch("/__cap_tts/resume", { method: "POST" }).catch(() => {});
+      setState((prev) => ({ ...prev, isPaused: false }));
+    } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.resume();
+      setState((prev) => ({ ...prev, isPaused: false }));
+    }
+  }, [useNativeTts]);
 
-  // Stop speech
   const stop = useCallback(() => {
-    if (!isSupported) return;
-    window.speechSynthesis.cancel();
-    setState({
-      isSpeaking: false,
-      isPaused: false,
-      currentSentence: 0,
-      totalSentences: 0,
-    });
-  }, [isSupported]);
+    abortRef.current = true;
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (useNativeTts) {
+      fetch("/__cap_tts/stop", { method: "POST" }).catch(() => {});
+    } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setState({ isSpeaking: false, isPaused: false, currentSentence: 0, totalSentences: 0 });
+  }, [useNativeTts]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (isSupported) {
+      abortRef.current = true;
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      if (useNativeTts) {
+        fetch("/__cap_tts/stop", { method: "POST" }).catch(() => {});
+      } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, [isSupported]);
+  }, [useNativeTts]);
 
   return {
     ...state,

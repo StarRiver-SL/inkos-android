@@ -69,6 +69,34 @@ public class InkOSRuntimePlugin extends Plugin {
         call.resolve(result);
     }
 
+    /**
+     * Read the runtime-status.json file directly from Java (bypasses network and
+     * Capacitor Filesystem plugin). Used by the frontend when GeckoView's fetch
+     * and Capacitor bridge are unreliable.
+     */
+    @PluginMethod
+    public void checkNodeStatus(PluginCall call) {
+        JSObject result = new JSObject();
+        try {
+            File statusFile = new File(getContext().getFilesDir(), "InkOS Studio/runtime-status.json");
+            if (statusFile.exists()) {
+                String content = new String(java.nio.file.Files.readAllBytes(statusFile.toPath()), "UTF-8");
+                org.json.JSONObject json = new org.json.JSONObject(content);
+                result.put("state", json.optString("state", "unknown"));
+                result.put("message", json.optString("message", ""));
+                result.put("nativeLibSize", json.optLong("nativeLibSize", 0));
+                result.put("packagedRuntimeVersion", json.optString("packagedRuntimeVersion", ""));
+            } else {
+                result.put("state", "no-status-file");
+                result.put("message", "runtime-status.json not found.");
+            }
+        } catch (Exception e) {
+            result.put("state", "error");
+            result.put("message", e.getMessage());
+        }
+        call.resolve(result);
+    }
+
     @PluginMethod
     public void installPermissionStatus(PluginCall call) {
         JSObject result = new JSObject();
@@ -169,28 +197,35 @@ public class InkOSRuntimePlugin extends Plugin {
     public void requestBatteryOptimizationExemption(PluginCall call) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+                // Try standard Android battery optimization request
                 Intent request = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
                 request.setData(Uri.parse("package:" + getContext().getPackageName()));
-                getActivity().startActivity(request);
+                try {
+                    getActivity().startActivity(request);
+                } catch (Exception e) {
+                    // Fallback: open app detail settings (works on OPPO/ColorOS/Xiaomi)
+                    Intent appSettings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    appSettings.setData(Uri.parse("package:" + getContext().getPackageName()));
+                    getActivity().startActivity(appSettings);
+                }
             } else {
-                Intent settings = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
-                getActivity().startActivity(settings);
+                // Already exempt or old device: open battery optimization settings list
+                try {
+                    Intent settings = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                    getActivity().startActivity(settings);
+                } catch (Exception e) {
+                    // Final fallback: app detail settings
+                    Intent appSettings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    appSettings.setData(Uri.parse("package:" + getContext().getPackageName()));
+                    getActivity().startActivity(appSettings);
+                }
             }
             JSObject result = new JSObject();
             result.put("ok", true);
             result.put("ignoring", isIgnoringBatteryOptimizations());
             call.resolve(result);
         } catch (Exception error) {
-            try {
-                Intent settings = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
-                getActivity().startActivity(settings);
-                JSObject result = new JSObject();
-                result.put("ok", true);
-                result.put("ignoring", isIgnoringBatteryOptimizations());
-                call.resolve(result);
-            } catch (Exception fallbackError) {
-                call.reject(fallbackError.getMessage());
-            }
+            call.reject("无法打开权限设置页面，请手动在系统设置中关闭本应用的电池优化。", error.getMessage());
         }
     }
 

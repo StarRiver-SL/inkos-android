@@ -236,7 +236,7 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
   if (error) return <div className="rounded-2xl border border-destructive/20 bg-destructive/5 p-6 text-destructive">Error: {error}</div>;
 
   return (
-    <div className="space-y-7 fade-in">
+    <div className="space-y-7 fade-in min-w-0 overflow-hidden">
       <nav className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
         <button onClick={() => nav.toBookSettings(bookId)} className="flex items-center gap-1 transition-colors hover:text-primary">
           <ArrowLeft size={14} />
@@ -267,7 +267,7 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
       </section>
 
       <section className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-3xl border border-border/45 bg-card/70 p-5">
+        <div className="min-w-0 rounded-3xl border border-border/45 bg-card/70 p-5">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 font-bold text-foreground">
               <Upload size={16} className="text-primary" />
@@ -318,7 +318,7 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
           </div>
         </div>
 
-        <div className="rounded-3xl border border-border/45 bg-card/70 p-5">
+        <div className="min-w-0 rounded-3xl border border-border/45 bg-card/70 p-5">
           <div className="flex items-center gap-2 font-bold text-foreground">
             <Search size={16} className="text-primary" />
             检索预览
@@ -437,17 +437,17 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
         </div>
 
         {lexiconTab === "banned" && (
-          <div className="space-y-3">
+          <div className="space-y-3 min-w-0">
             <div className="flex gap-2">
               <input
                 value={newBannedWord}
                 onChange={(e) => setNewBannedWord(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") addBannedWord(); }}
-                className="h-10 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
                 placeholder="输入禁用词，回车添加"
                 disabled={savingLexicon}
               />
-              <button onClick={addBannedWord} disabled={!newBannedWord.trim() || savingLexicon} className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
+              <button onClick={addBannedWord} disabled={!newBannedWord.trim() || savingLexicon} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
                 <Plus size={12} />添加
               </button>
             </div>
@@ -464,23 +464,23 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
         )}
 
         {lexiconTab === "preferred" && (
-          <div className="space-y-3">
+          <div className="space-y-3 min-w-0">
             <div className="flex gap-2">
               <input
                 value={newAvoidWord}
                 onChange={(e) => setNewAvoidWord(e.target.value)}
-                className="h-10 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
                 placeholder="避免的词"
                 disabled={savingLexicon}
               />
               <input
                 value={newPreferWord}
                 onChange={(e) => setNewPreferWord(e.target.value)}
-                className="h-10 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
                 placeholder="替换为"
                 disabled={savingLexicon}
               />
-              <button onClick={addPreferredWord} disabled={!newAvoidWord.trim() || !newPreferWord.trim() || savingLexicon} className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
+              <button onClick={addPreferredWord} disabled={!newAvoidWord.trim() || !newPreferWord.trim() || savingLexicon} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
                 <Plus size={12} />添加
               </button>
             </div>
@@ -497,23 +497,23 @@ export function KnowledgePage({ bookId, nav, theme: _theme, t: _t }: {
         )}
 
         {lexiconTab === "terms" && (
-          <div className="space-y-3">
+          <div className="space-y-3 min-w-0">
             <div className="flex gap-2">
               <input
                 value={newTermName}
                 onChange={(e) => setNewTermName(e.target.value)}
-                className="h-10 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
                 placeholder="术语名"
                 disabled={savingLexicon}
               />
               <input
                 value={newTermDef}
                 onChange={(e) => setNewTermDef(e.target.value)}
-                className="h-10 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60 px-3 text-sm outline-none focus:border-primary/50"
                 placeholder="释义（可选）"
                 disabled={savingLexicon}
               />
-              <button onClick={addDomainTerm} disabled={!newTermName.trim() || savingLexicon} className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
+              <button onClick={addDomainTerm} disabled={!newTermName.trim() || savingLexicon} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-bold text-primary-foreground disabled:opacity-40">
                 <Plus size={12} />添加
               </button>
             </div>

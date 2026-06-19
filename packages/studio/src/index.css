@@ -8,6 +8,11 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/noto-sans-sc";
+@import "@fontsource-variable/noto-serif-sc";
+@import "@fontsource/zcool-kuaile";
+@import "@fontsource/zcool-qingke-huangyou";
+@import "@fontsource/zcool-xiaowei";
+@import "@fontsource/ma-shan-zheng";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -183,7 +188,7 @@ html {
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  --font-serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", serif;
+  --font-serif: "Noto Serif SC Variable", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", serif;
   --font-sans: "Noto Sans SC Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
 
@@ -566,16 +571,16 @@ h3 { font-size: 1.125rem; line-height: 1.4; }
   background: var(--muted-foreground);
 }
 
+/* Hide scrollbar but keep scroll functionality */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Animation Classes ── */
 .fade-in {
   animation: fadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-.stagger-1 { animation-delay: 0.05s; opacity: 0; }
-.stagger-2 { animation-delay: 0.1s; opacity: 0; }
-.stagger-3 { animation-delay: 0.15s; opacity: 0; }
-.stagger-4 { animation-delay: 0.2s; opacity: 0; }
-.stagger-5 { animation-delay: 0.25s; opacity: 0; }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -773,35 +778,6 @@ h3 { font-size: 1.125rem; line-height: 1.4; }
 
 /* ── ChatPanel Animations ── */
 
-/* Header sparkle glow pulse */
-@keyframes iconGlow {
-  0%, 100% { filter: drop-shadow(0 0 0px transparent); }
-  50% { filter: drop-shadow(0 0 6px oklch(0.78 0.14 85 / 0.4)); }
-}
-.chat-icon-glow { animation: iconGlow 2s ease-in-out infinite; }
-
-/* Writing pen gentle bobbing */
-@keyframes iconWrite {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  25% { transform: translateY(-1px) rotate(-3deg); }
-  75% { transform: translateY(1px) rotate(3deg); }
-}
-.chat-icon-write { animation: iconWrite 1.2s ease-in-out infinite; }
-
-/* Slow spin for revision/wrench */
-@keyframes spinSlow {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-.chat-icon-spin-slow { animation: spinSlow 3s linear infinite; }
-
-/* Pop-in for success checkmark */
-@keyframes iconPop {
-  0% { transform: scale(0); opacity: 0; }
-  60% { transform: scale(1.2); }
-  100% { transform: scale(1); opacity: 1; }
-}
-.chat-icon-pop { animation: iconPop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
 /* Shake for trash icon hover */
 @keyframes shake {
@@ -810,12 +786,6 @@ h3 { font-size: 1.125rem; line-height: 1.4; }
   75% { transform: translateX(2px) rotate(5deg); }
 }
 
-/* Message slide-in from right (user) */
-@keyframes msgSlideRight {
-  from { opacity: 0; transform: translateX(12px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-.chat-msg-user { animation: msgSlideRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
 /* Message slide-in from left (assistant) */
 @keyframes msgSlideLeft {
@@ -824,27 +794,6 @@ h3 { font-size: 1.125rem; line-height: 1.4; }
 }
 .chat-msg-assistant { animation: msgSlideLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-/* Thinking breathing glow */
-@keyframes thinkGlow {
-  0%, 100% { box-shadow: 0 0 0 0 oklch(0.78 0.14 85 / 0); }
-  50% { box-shadow: 0 0 12px 2px oklch(0.78 0.14 85 / 0.15); }
-}
-.chat-thinking-glow { animation: thinkGlow 2s ease-in-out infinite; }
-
-/* Typing wave for dots */
-@keyframes typingWave {
-  0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-6px); }
-}
-.chat-typing-dot { animation: typingWave 1.4s ease-in-out infinite; }
-.chat-typing-dot:nth-child(2) { animation-delay: 0.15s; }
-.chat-typing-dot:nth-child(3) { animation-delay: 0.3s; }
-
-/* Panel slide transition */
-.chat-panel-enter {
-  transition: width 300ms cubic-bezier(0.16, 1, 0.3, 1),
-              opacity 200ms ease-out;
-}
 
 /* ── Streamdown overrides ── */
 [data-streamdown="table-wrapper"] {
@@ -907,14 +856,6 @@ h3 { font-size: 1.125rem; line-height: 1.4; }
 .artifact-markdown code {
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.truth-file-pre {
-  display: block;
-  white-space: pre;
-  word-break: normal;
-  overflow-wrap: normal;
-  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 640px) {

@@ -228,7 +228,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         }
     : null;
 
-  const refreshChapterHealth = async () => {
+  const refreshChapterHealth = useCallback(async () => {
     if (!activeBookId) {
       setDegradedChapter(null);
       return;
@@ -241,7 +241,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     } catch {
       // The writing page remains usable if chapter metadata cannot be refreshed.
     }
-  };
+  }, [activeBookId]);
 
   useEffect(() => {
     void refreshChapterHealth();
@@ -301,7 +301,11 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const [playImageRefreshToken, setPlayImageRefreshToken] = useState(0);
   const [tokenSavingsLabel, setTokenSavingsLabel] = useState<string | null>(null);
   const [backgroundMenuOpen, setBackgroundMenuOpen] = useState(false);
-  const [chatBackground, setChatBackground] = useState<ChatBackgroundSettings>(readChatBackground);
+  const [chatBackground, setChatBackground] = useState<ChatBackgroundSettings>(() => readChatBackground(activeSessionId));
+  // Reload wallpaper when switching sessions
+  useEffect(() => {
+    setChatBackground(readChatBackground(activeSessionId));
+  }, [activeSessionId]);
   const [wallpaperHistory, setWallpaperHistory] = useState<ReadonlyArray<WallpaperLibraryItem>>([]);
   const [wallpaperHistoryLoading, setWallpaperHistoryLoading] = useState(false);
   const [wallpaperUploading, setWallpaperUploading] = useState(false);
@@ -321,7 +325,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
 
   useEffect(() => {
     try {
-      writeChatBackground(chatBackground);
+      writeChatBackground(chatBackground, activeSessionId);
     } catch {
       // Storage can be unavailable in privacy-restricted WebViews.
     }
@@ -759,12 +763,19 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         `恢复第 ${degradedChapter} 章的降级状态，并重新整理该章 truth/state。`,
         {
           activeBookId,
-          sessionKind: "book",
+          sessionKind: currentSessionKind,
           actionSource: "quick-action",
           requestedIntent: "repair_state",
         },
       );
+      // Wait a moment for the backend to finish processing, then re-check
+      await new Promise((r) => setTimeout(r, 1500));
       await refreshChapterHealth();
+    } catch (error) {
+      await appAlert({
+        title: "恢复失败",
+        message: `状态恢复失败：${error instanceof Error ? error.message : "未知错误"}。请稍后重试。`,
+      });
     } finally {
       setRepairingChapter(false);
     }
@@ -1121,7 +1132,6 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     role="user"
                     content={msg.content}
                     timestamp={msg.timestamp}
-                    theme={theme}
                     isStreaming={loading}
                     onDelete={() => void handleDeleteMessage(i, "user")}
                   />
@@ -1190,7 +1200,6 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                               role="assistant"
                               content={item.part.content}
                               timestamp={msg.timestamp}
-                              theme={theme}
                               tokenUsage={msg.tokenUsage}
                               isStreaming={loading && i === messages.length - 1}
                               copyContent={assistantText}
@@ -1238,7 +1247,6 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     role={msg.role}
                     content={msg.content}
                     timestamp={msg.timestamp}
-                    theme={theme}
                     tokenUsage={msg.tokenUsage}
                     isStreaming={loading && i === messages.length - 1}
                     onDelete={msg.role === "assistant" || msg.role === "user"
@@ -1299,7 +1307,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       {hasBook && !showChoicePanel && (
         <div className={`relative z-10 shrink-0 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
           <div className="mx-auto w-full max-w-5xl px-2.5 sm:px-4">
-            <div className="legacy-chat-toolbar mb-2 grid grid-cols-3 items-stretch gap-2 overflow-visible rounded-2xl border border-border/45 bg-card/90 px-2.5 py-2 shadow-lg shadow-background/25 backdrop-blur sm:flex sm:flex-nowrap sm:items-center sm:overflow-x-auto dark:bg-card/95">
+            <div className="legacy-chat-toolbar mb-2 grid items-stretch gap-2 overflow-visible rounded-2xl border border-border/45 bg-card/90 px-2.5 py-2 shadow-lg shadow-background/25 backdrop-blur sm:flex sm:flex-nowrap sm:items-center sm:overflow-x-auto dark:bg-card/95" style={{ gridTemplateColumns: "1fr 1fr auto" }}>
               <QuickActions
                 onAction={handleQuickAction}
                 onScratchpad={() => setScratchpadOpen(true)}
@@ -1308,7 +1316,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
               />
               <DropdownMenu open={knowledgePickerOpen} onOpenChange={setKnowledgePickerOpen}>
                 <DropdownMenuTrigger
-                  className={`legacy-chat-knowledge-toggle flex min-h-9 min-w-0 w-full items-center justify-center gap-2 rounded-full px-2.5 py-1.5 text-left text-xs font-semibold shadow-sm transition-all active:scale-95 sm:w-auto sm:shrink-0 sm:justify-start sm:px-3.5 sm:max-w-[16rem] ${
+                  className={`legacy-chat-knowledge-toggle flex min-h-9 min-w-0 items-center justify-center gap-2 rounded-full px-2.5 py-1.5 text-left text-xs font-semibold shadow-sm transition-all active:scale-95 sm:w-auto sm:shrink-0 sm:justify-start sm:px-3.5 sm:max-w-[16rem] ${
                     knowledgeEnabled
                       ? "bg-primary/15 text-primary ring-1 ring-primary/25"
                       : "bg-secondary/45 text-muted-foreground hover:bg-secondary/70 hover:text-foreground"
@@ -1417,7 +1425,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
       <div className={`legacy-chat-composer-wrap relative z-30 shrink-0 border-t border-border/45 px-2.5 py-2 claude-topbar mobile-safe-bottom transition-[padding] duration-200 sm:px-4 sm:py-4 ${worldPanelInsetClass}`}>
         <div className="mx-auto max-w-5xl">
           <div className="flex items-start gap-2">
-            <div className="legacy-chat-composer claude-composer flex-1 rounded-[1.15rem] transition-all sm:rounded-2xl">
+            <div className="legacy-chat-composer claude-composer min-w-0 flex-1 rounded-[1.15rem] transition-all sm:rounded-2xl">
               <div
                 className="flex items-end gap-2 px-3 py-2.5"
                 onClick={(event) => {
@@ -1449,7 +1457,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                     : isZh ? "输入消息..." : "Message InkOS..."}
                   disabled={!activeSessionId}
                   rows={1}
-                  className="max-h-[40dvh] min-h-11 flex-1 resize-none overflow-y-auto whitespace-pre-wrap break-words border-none! bg-transparent px-0 py-2 text-base leading-6 shadow-none outline-none! ring-0! placeholder:text-muted-foreground/60 focus:border-none! focus:outline-none! focus:ring-0! disabled:opacity-50 sm:max-h-[200px] sm:min-h-0 sm:text-sm"
+                  className="max-h-[40dvh] min-h-11 min-w-0 flex-1 resize-none overflow-y-auto whitespace-pre-wrap break-words border-none! bg-transparent px-0 py-2 text-base leading-6 shadow-none outline-none! ring-0! placeholder:text-muted-foreground/60 focus:border-none! focus:outline-none! focus:ring-0! disabled:opacity-50 sm:max-h-[200px] sm:min-h-0 sm:text-sm"
                 />
                 <button
                   type="button"

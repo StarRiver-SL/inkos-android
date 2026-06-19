@@ -153,12 +153,7 @@
   min-width: 2.1rem;
 }
 
-.legacy-webview .fade-in,
-.legacy-webview .stagger-1,
-.legacy-webview .stagger-2,
-.legacy-webview .stagger-3,
-.legacy-webview .stagger-4,
-.legacy-webview .stagger-5 {
+.legacy-webview .fade-in {
   animation: none !important;
   opacity: 1 !important;
   transform: none !important;
