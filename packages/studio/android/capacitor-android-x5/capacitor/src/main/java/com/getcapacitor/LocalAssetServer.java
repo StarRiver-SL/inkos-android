@@ -904,15 +904,23 @@ public class LocalAssetServer extends NanoHTTPD {
     /**
      * Write an SSE response directly to the socket output stream, bypassing
      * NanoHTTPD's ChunkedOutputStream which never flushes small writes.
-     * Accesses the private outputStream field of HTTPSession via reflection.
+     * Finds the outputStream field by type (not name) to survive R8 obfuscation.
      */
     private Response proxySSEDirect(IHTTPSession session, HttpURLConnection conn,
             int responseCode, String contentType, InputStream respStream) {
         try {
-            // Access the private outputStream field from HTTPSession
-            java.lang.reflect.Field outField = session.getClass().getDeclaredField("outputStream");
-            outField.setAccessible(true);
-            java.io.OutputStream socketOut = (java.io.OutputStream) outField.get(session);
+            // Find the OutputStream field by type — survives R8 name obfuscation
+            java.io.OutputStream socketOut = null;
+            for (java.lang.reflect.Field field : session.getClass().getDeclaredFields()) {
+                if (java.io.OutputStream.class.isAssignableFrom(field.getType())) {
+                    field.setAccessible(true);
+                    socketOut = (java.io.OutputStream) field.get(session);
+                    break;
+                }
+            }
+            if (socketOut == null) {
+                throw new IllegalStateException("No OutputStream field found in " + session.getClass().getName());
+            }
 
             // Send HTTP response headers
             String statusLine = "HTTP/1.1 " + responseCode + " OK\r\n";

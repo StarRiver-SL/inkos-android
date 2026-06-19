@@ -30,13 +30,12 @@ export function getApiOrigin(): string {
 
 /**
  * Returns the direct SSE origin for real-time event streams.
- * On Android, NanoHTTPD's response buffering delays SSE event delivery.
- * Connecting directly to the Node backend on port 4567 bypasses this.
+ * Previously this connected directly to Node on port 4567 to bypass NanoHTTPD
+ * buffering, but cross-origin EventSource fails in GeckoView Release builds.
+ * Now we route through the LocalAssetServer proxy (port 4568) which uses
+ * chunked transfer encoding with immediate flush for SSE.
  */
 export function getSseOrigin(): string {
-  if (isEmbeddedNodeMode()) {
-    return "http://127.0.0.1:4567";
-  }
   return getApiOrigin();
 }
 
